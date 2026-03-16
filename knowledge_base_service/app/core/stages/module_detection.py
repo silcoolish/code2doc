@@ -1,0 +1,206 @@
+"""模块检测阶段处理器."""
+
+import json
+import logging
+from typing import Any, Dict, List
+from uuid import uuid4
+
+from app.core.pipeline import PipelineContext, PipelineStageHandler
+from app.domain.models.graph import Module, Workflow
+from app.domain.models.pipeline import PipelineStage, PipelineStatus, StageResult
+from app.domain.llm.client import get_llm_service
+from app.infrastructure.db import get_neo4j_client
+
+logger = logging.getLogger(__name__)
+
+
+class ModuleDetectionStage(PipelineStageHandler):
+    """模块检测阶段处理器 - 使用 LLM 识别功能模块和业务流程."""
+
+    stage = PipelineStage.MODULE_DETECTION
+
+    def __init__(self):
+        self.llm_service = get_llm_service()
+
+    async def execute(self, context: PipelineContext) -> StageResult:
+        """执行模块检测.
+
+        Args:
+            context: 流水线上下文
+
+        Returns:
+            阶段执行结果
+        """
+        try:
+            # 获取文件和摘要信息
+            files = context.data.get("files", [])
+            file_summaries = context.data.get("file_summaries", {})
+            repo_name = context.repo_name
+
+            # 构建结构 JSON
+            structure_json = self._build_structure_json(
+                files, file_summaries, repo_name
+            )
+
+            logger.info("Detecting modules using LLM...")
+
+            # 调用 LLM 检测模块
+            modules_data = await self.llm_service.detect_modules(structure_json)
+
+            # 创建 Module 和 Workflow 节点
+            neo4j = get_neo4j_client()
+            created_modules = []
+            created_workflows = []
+
+            for module_data in modules_data:
+                module_id = f"module_{repo_name}_{uuid4().hex[:8]}"
+
+                module = Module(
+                    id=module_id,
+                    name=module_data.get("name", "Unknown Module"),
+                    type="Module",
+                    description=module_data.get("description", ""),
+                    summary=module_data.get("description", ""),
+                    keywords=module_data.get("files", []),
+                    confidence=module_data.get("confidence", 0.8),
+                )
+
+                # 创建 Module 节点
+                await neo4j.merge_node(
+                    label="Module",
+                    key_property="id",
+                    key_value=module_id,
+                    properties=module.to_dict(),
+                )
+                created_modules.append(module)
+
+                # 关联文件到 Module
+                for file_path in module_data.get("files", []):
+                    file_id = f"file_{repo_name}_{file_path}"
+                    await neo4j.create_relationship(
+                        from_label="File",
+                        from_key="id",
+                        from_value=file_id,
+                        to_label="Module",
+                        to_key="id",
+                        to_value=module_id,
+                        rel_type="BELONG_TO",
+                    )
+
+                # 创建 Workflow 节点
+                for workflow_data in module_data.get("workflows", []):
+                    workflow_id = f"workflow_{repo_name}_{uuid4().hex[:8]}"
+
+                    workflow = Workflow(
+                        id=workflow_id,
+                        name=workflow_data.get("name", "Unknown Workflow"),
+                        type="Workflow",
+                        description=workflow_data.get("description", ""),
+                        summary=workflow_data.get("description", ""),
+                        keywords=workflow_data.get("files", []),
+                        confidence=workflow_data.get("confidence", 0.8),
+                        module_id=module_id,
+                    )
+
+                    # 创建 Workflow 节点
+                    await neo4j.merge_node(
+                        label="Workflow",
+                        key_property="id",
+                        key_value=workflow_id,
+                        properties=workflow.to_dict(),
+                    )
+                    created_workflows.append(workflow)
+
+                    # 关联 Workflow 到 Module
+                    await neo4j.create_relationship(
+                        from_label="Workflow",
+                        from_key="id",
+                        from_value=workflow_id,
+                        to_label="Module",
+                        to_key="id",
+                        to_value=module_id,
+                        rel_type="BELONG_TO",
+                    )
+
+                    # 关联文件到 Workflow
+                    for file_path in workflow_data.get("files", []):
+                        file_id = f"file_{repo_name}_{file_path}"
+                        await neo4j.create_relationship(
+                            from_label="File",
+                            from_key="id",
+                            from_value=file_id,
+                            to_label="Workflow",
+                            to_key="id",
+                            to_value=workflow_id,
+                            rel_type="BELONG_TO",
+                        )
+
+            # 保存到上下文
+            context.data["modules"] = created_modules
+            context.data["workflows"] = created_workflows
+
+            stats = {
+                "modules_detected": len(created_modules),
+                "workflows_detected": len(created_workflows),
+            }
+
+            logger.info(f"Module detection completed: {stats}")
+
+            return StageResult(
+                stage=self.stage,
+                status=PipelineStatus.COMPLETED,
+                message="Module detection completed",
+                metadata=stats,
+            )
+
+        except Exception as e:
+            logger.exception(f"Module detection failed: {e}")
+            return StageResult(
+                stage=self.stage,
+                status=PipelineStatus.FAILED,
+                message=str(e),
+            )
+
+    def _build_structure_json(
+        self,
+        files: List,
+        file_summaries: Dict[str, str],
+        repo_name: str,
+    ) -> Dict[str, Any]:
+        """构建代码结构 JSON.
+
+        Args:
+            files: 文件列表
+            file_summaries: 文件摘要
+            repo_name: 仓库名
+
+        Returns:
+            结构 JSON
+        """
+        structure = {
+            "repository": repo_name,
+            "files": [],
+        }
+
+        for file_node in files:
+            if file_node.file_type != "code":
+                continue
+
+            file_id = f"file_{repo_name}_{file_node.path}"
+            summary = file_summaries.get(file_id, "")
+
+            file_info = {
+                "path": file_node.path,
+                "name": file_node.name,
+                "type": file_node.suffix,
+                "summary": summary[:200] if summary else "",  # 限制长度
+            }
+
+            structure["files"].append(file_info)
+
+        # 限制文件数量，避免超出 LLM 上下文
+        if len(structure["files"]) > 100:
+            structure["files"] = structure["files"][:100]
+            structure["note"] = "Truncated to 100 files"
+
+        return structure
