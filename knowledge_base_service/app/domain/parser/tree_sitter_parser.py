@@ -12,7 +12,7 @@ import tree_sitter_go as tsgo
 import tree_sitter_rust as tsrust
 import tree_sitter_c as tsc
 import tree_sitter_cpp as tscpp
-from tree_sitter import Language, Parser, Node, Query, QueryCursor
+from tree_sitter import Language, Parser, Node, Query
 
 from app.domain.parser.code_parser import (
     CodeParser,
@@ -543,8 +543,8 @@ class TreeSitterParser(CodeParser):
         """
         try:
             query = Query(self.language, query_str)
-            cursor = QueryCursor(query)
-            captures = cursor.captures(node)
+            cursor = query.cursor(node)
+            captures = cursor.captures()
             return self._process_captures(captures)
         except Exception as e:
             logger.warning(f"Query execution failed: {e}")
