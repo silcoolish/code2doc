@@ -14,6 +14,12 @@ import tree_sitter_c as tsc
 import tree_sitter_cpp as tscpp
 from tree_sitter import Language, Parser, Node, Query
 
+# 尝试导入 QueryCursor（tree-sitter 0.22+）
+try:
+    from tree_sitter import QueryCursor
+except ImportError:
+    QueryCursor = None
+
 from app.domain.parser.code_parser import (
     CodeParser,
     ParseResult,
@@ -543,12 +549,43 @@ class TreeSitterParser(CodeParser):
         """
         try:
             query = Query(self.language, query_str)
-            cursor = query.cursor(node)
-            captures = cursor.captures()
-            return self._process_captures(captures)
+
+            # 优先尝试新版 API (tree-sitter 0.22+)
+            if hasattr(query, 'captures'):
+                captures = query.captures(node)
+                return self._process_captures(captures)
+
+            # 旧版 API 使用 QueryCursor
+            if QueryCursor is not None:
+                cursor = QueryCursor(query)
+                captures = cursor.captures(node)
+                return self._process_captures(captures)
+
+            logger.warning("无法执行查询: tree-sitter API 不兼容")
+            return []
+
         except Exception as e:
             logger.warning(f"Query execution failed: {e}")
             return []
+
+    def _get_queries_for_ext(self, ext: str) -> dict:
+        """获取指定扩展名的查询配置.
+
+        Args:
+            ext: 文件扩展名
+
+        Returns:
+            查询配置字典
+        """
+        # 扩展名映射到查询键
+        ext_mapping = {
+            ".h": ".c",
+            ".hpp": ".cpp",
+            ".cc": ".cpp",
+            ".cxx": ".cpp",
+        }
+        query_key = ext_mapping.get(ext, ext)
+        return self.QUERIES.get(query_key, {})
 
     def _extract_symbols(
         self,
@@ -567,10 +604,10 @@ class TreeSitterParser(CodeParser):
         classes: List[ClassSymbol] = []
         standalone_methods: List[MethodSymbol] = []
 
-        if self.language_ext not in self.QUERIES:
+        queries = self._get_queries_for_ext(self.language_ext)
+        if not queries:
+            logger.debug(f"No queries found for extension: {self.language_ext}")
             return classes, standalone_methods
-
-        queries = self.QUERIES[self.language_ext]
 
         # 提取类
         if "class" in queries:
@@ -654,20 +691,34 @@ class TreeSitterParser(CodeParser):
                 # function 查询使用 identifier 匹配独立函数
                 # method 查询使用 field_identifier 匹配类方法
                 method_query = queries.get("function") or queries.get("method")
+                if not method_query:
+                    logger.debug(f"No method/function query found for {self.language_ext}")
+                    return classes, standalone_methods
+
                 capture_list = self._exec_query(method_query, root_node)
+                logger.debug(f"Found {len(capture_list)} captures for {self.language_ext}")
 
                 method_defs = {}
                 for node, capture_name in capture_list:
-                    if "method.def" in capture_name or "function.def" in capture_name:
+                    # 支持 function.def (C/C++) 和 method.def (其他语言)
+                    if ".def" in capture_name and ("function" in capture_name or "method" in capture_name):
                         method_defs[node] = {"node": node}
-                    elif "method.name" in capture_name or "function.name" in capture_name:
+                        logger.debug(f"Found method/function definition: {capture_name}")
+                    # 支持 function.name (C/C++) 和 method.name (其他语言)
+                    elif ".name" in capture_name and ("function" in capture_name or "method" in capture_name):
                         for method_node in method_defs:
                             if self._node_contains(method_node, node):
                                 method_defs[method_node]["name"] = content[node.start_byte:node.end_byte]
+                                logger.debug(f"Found method/function name: {content[node.start_byte:node.end_byte]}")
                                 break
 
+                logger.debug(f"Processing {len(method_defs)} method/function definitions")
                 for method_node, info in method_defs.items():
                     name = info.get("name", "Unknown")
+                    if name == "Unknown":
+                        logger.warning(f"Method without name found at line {method_node.start_point[0] + 1}")
+                        continue
+
                     method_code = content[method_node.start_byte:method_node.end_byte]
 
                     # 检查方法是否在类中
@@ -679,9 +730,10 @@ class TreeSitterParser(CodeParser):
                             code=method_code,
                         )
                         standalone_methods.append(method_symbol)
+                        logger.debug(f"Added standalone method: {name}")
 
             except Exception as e:
-                logger.warning(f"Failed to extract methods: {e}")
+                logger.warning(f"Failed to extract methods: {e}", exc_info=True)
 
         return classes, standalone_methods
 
@@ -703,10 +755,9 @@ class TreeSitterParser(CodeParser):
         """
         methods: List[MethodSymbol] = []
 
-        if self.language_ext not in self.QUERIES:
+        queries = self._get_queries_for_ext(self.language_ext)
+        if not queries:
             return methods
-
-        queries = self.QUERIES[self.language_ext]
 
         # 使用查询提取类中的方法
         method_pattern = queries.get("method_in_class") or queries.get("method")
@@ -758,10 +809,9 @@ class TreeSitterParser(CodeParser):
         """
         imports: List[str] = []
 
-        if self.language_ext not in self.QUERIES:
+        queries = self._get_queries_for_ext(self.language_ext)
+        if not queries:
             return imports
-
-        queries = self.QUERIES[self.language_ext]
 
         # 处理标准 import 查询
         import_query = queries.get("import")
