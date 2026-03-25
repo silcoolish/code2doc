@@ -113,8 +113,30 @@ class PipelineContext:
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
             "config": self.config,
-            "data": self.data,
+            "data": self._serialize_data(self.data),
         }
+
+    def _serialize_data(self, data: Any) -> Any:
+        """递归序列化数据.
+
+        处理包含 to_dict 方法的对象和其他非 JSON 序列化类型。
+        """
+        try:
+            if hasattr(data, 'to_dict') and callable(getattr(data, 'to_dict')):
+                return data.to_dict()
+        except (AttributeError, TypeError):
+            pass
+
+        if isinstance(data, dict):
+            return {k: self._serialize_data(v) for k, v in data.items()}
+        elif isinstance(data, list):
+            return [self._serialize_data(item) for item in data]
+        elif isinstance(data, datetime):
+            return data.isoformat()
+        elif isinstance(data, Enum):
+            return data.value
+        else:
+            return data
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "PipelineContext":

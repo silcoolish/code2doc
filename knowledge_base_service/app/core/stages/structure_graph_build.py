@@ -154,6 +154,10 @@ class StructureGraphBuildStage(PipelineStageHandler):
         """创建 Repository 节点."""
         properties = repository.to_dict()
         properties["repo"] = repository.name
+        # 过滤掉空值和嵌套字典
+        properties = self._filter_properties(properties)
+        logger.info(f"Creating Repository with properties: {properties}")
+        logger.info(f"Property types: {[(k, type(v).__name__) for k, v in properties.items()]}")
         await neo4j.merge_node(
             label="Repository",
             key_property="id",
@@ -165,6 +169,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
         """创建 Directory 节点和关系."""
         properties = directory.to_dict()
         properties["repo"] = repo_id.replace("repo_", "")
+        properties = self._filter_properties(properties)
 
         await neo4j.merge_node(
             label="Directory",
@@ -190,6 +195,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
         """创建 File 节点和关系."""
         properties = file_node.to_dict()
         properties["repo"] = parent_id.replace("repo_", "").split("_dir_")[0]
+        properties = self._filter_properties(properties)
 
         await neo4j.merge_node(
             label="File",
@@ -214,6 +220,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
         """创建 Class 节点和关系."""
         properties = class_node.to_dict()
         properties["repo"] = file_id.split("_")[1]
+        properties = self._filter_properties(properties)
 
         await neo4j.merge_node(
             label="Class",
@@ -237,6 +244,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
         """创建 Method 节点和关系."""
         properties = method_node.to_dict()
         properties["repo"] = parent_id.split("_")[1]
+        properties = self._filter_properties(properties)
 
         await neo4j.merge_node(
             label="Method",
@@ -261,10 +269,11 @@ class StructureGraphBuildStage(PipelineStageHandler):
 
     def _get_parent_directory_id(self, file_path: str, directories: List[Directory], repo_id: str) -> str:
         """获取文件所在目录的ID."""
+        import os
         if "/" not in file_path and "\\" not in file_path:
             return repo_id
 
-        parent_path = str(Path(file_path).parent).replace("\\", "/")
+        parent_path = os.path.dirname(file_path).replace("\\", "/")
         if parent_path == ".":
             return repo_id
 
@@ -274,12 +283,36 @@ class StructureGraphBuildStage(PipelineStageHandler):
 
         return repo_id
 
+    def _filter_properties(self, properties: Dict[str, Any]) -> Dict[str, Any]:
+        """过滤属性，只保留基本类型.
+
+        Neo4j 只支持基本类型（字符串、数字、布尔值、日期）和这些类型的数组。
+        过滤掉字典、None 值和嵌套对象。
+        """
+        filtered = {}
+        for key, value in properties.items():
+            if value is None:
+                continue
+            # 跳过所有字典类型（Neo4j不支持）
+            if isinstance(value, dict):
+                continue
+            # 跳过所有列表类型（除非是纯基本类型列表）
+            if isinstance(value, list):
+                # 只保留非空且元素都是基本类型的列表
+                if value and all(not isinstance(item, (dict, list)) for item in value):
+                    filtered[key] = value
+                continue
+            # 基本类型
+            filtered[key] = value
+        return filtered
+
     def _get_parent_id(self, directory_path: str, repo_id: str) -> str:
         """获取目录的父节点ID."""
+        import os
         if "/" not in directory_path and "\\" not in directory_path:
             return repo_id
 
-        parent_path = str(Path(directory_path).parent).replace("\\", "/")
+        parent_path = os.path.dirname(directory_path).replace("\\", "/")
         if parent_path == ".":
             return repo_id
 

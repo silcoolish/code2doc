@@ -23,8 +23,10 @@ class BaseNode(ABC):
             "name": self.name,
             "type": self.type,
             "description": self.description,
-            "extra": self.extra,
         }
+        # 只添加非空的 extra 字段
+        if self.extra:
+            result["extra"] = self.extra
         return result
 
     @classmethod

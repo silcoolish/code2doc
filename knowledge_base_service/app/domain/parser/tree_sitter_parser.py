@@ -12,7 +12,7 @@ import tree_sitter_go as tsgo
 import tree_sitter_rust as tsrust
 import tree_sitter_c as tsc
 import tree_sitter_cpp as tscpp
-from tree_sitter import Language, Parser, Node
+from tree_sitter import Language, Parser, Node, Query, QueryCursor
 
 from app.domain.parser.code_parser import (
     CodeParser,
@@ -158,15 +158,35 @@ class TreeSitterParser(CodeParser):
         },
         ".c": {
             "struct": """
+                ; 具名结构体
                 (struct_specifier
                     name: (type_identifier) @struct.name
                     body: (field_declaration_list) @struct.body
                 ) @struct.def
+
+                ; typedef 匿名结构体
+                (type_definition
+                    (struct_specifier
+                        body: (field_declaration_list) @struct.body
+                    )
+                    declarator: (type_identifier) @struct.name
+                ) @struct.def
             """,
             "function": """
+                ; 普通函数
                 (function_definition
                     declarator: (function_declarator
                         declarator: (identifier) @function.name
+                    )
+                    body: (compound_statement) @function.body
+                ) @function.def
+
+                ; 返回指针的函数
+                (function_definition
+                    declarator: (pointer_declarator
+                        declarator: (function_declarator
+                            declarator: (identifier) @function.name
+                        )
                     )
                     body: (compound_statement) @function.body
                 ) @function.def
@@ -199,17 +219,39 @@ class TreeSitterParser(CodeParser):
                 ) @struct.def
             """,
             "function": """
+                ; 普通函数
                 (function_definition
                     declarator: (function_declarator
                         declarator: (identifier) @function.name
                     )
                     body: (compound_statement) @function.body
                 ) @function.def
+
+                ; 返回指针的函数
+                (function_definition
+                    declarator: (pointer_declarator
+                        declarator: (function_declarator
+                            declarator: (identifier) @function.name
+                        )
+                    )
+                    body: (compound_statement) @function.body
+                ) @function.def
             """,
             "method": """
+                ; 类方法
                 (function_definition
                     declarator: (function_declarator
                         declarator: (field_identifier) @method.name
+                    )
+                    body: (compound_statement) @method.body
+                ) @method.def
+
+                ; 返回指针的类方法
+                (function_definition
+                    declarator: (pointer_declarator
+                        declarator: (function_declarator
+                            declarator: (field_identifier) @method.name
+                        )
                     )
                     body: (compound_statement) @method.body
                 ) @method.def
@@ -236,15 +278,35 @@ class TreeSitterParser(CodeParser):
         },
         ".h": {
             "struct": """
+                ; 具名结构体
                 (struct_specifier
                     name: (type_identifier) @struct.name
                     body: (field_declaration_list) @struct.body
                 ) @struct.def
+
+                ; typedef 匿名结构体
+                (type_definition
+                    (struct_specifier
+                        body: (field_declaration_list) @struct.body
+                    )
+                    declarator: (type_identifier) @struct.name
+                ) @struct.def
             """,
             "function": """
+                ; 普通函数
                 (function_definition
                     declarator: (function_declarator
                         declarator: (identifier) @function.name
+                    )
+                    body: (compound_statement) @function.body
+                ) @function.def
+
+                ; 返回指针的函数
+                (function_definition
+                    declarator: (pointer_declarator
+                        declarator: (function_declarator
+                            declarator: (identifier) @function.name
+                        )
                     )
                     body: (compound_statement) @function.body
                 ) @function.def
@@ -277,17 +339,39 @@ class TreeSitterParser(CodeParser):
                 ) @struct.def
             """,
             "function": """
+                ; 普通函数
                 (function_definition
                     declarator: (function_declarator
                         declarator: (identifier) @function.name
                     )
                     body: (compound_statement) @function.body
                 ) @function.def
+
+                ; 返回指针的函数
+                (function_definition
+                    declarator: (pointer_declarator
+                        declarator: (function_declarator
+                            declarator: (identifier) @function.name
+                        )
+                    )
+                    body: (compound_statement) @function.body
+                ) @function.def
             """,
             "method": """
+                ; 类方法
                 (function_definition
                     declarator: (function_declarator
                         declarator: (field_identifier) @method.name
+                    )
+                    body: (compound_statement) @method.body
+                ) @method.def
+
+                ; 返回指针的类方法
+                (function_definition
+                    declarator: (pointer_declarator
+                        declarator: (function_declarator
+                            declarator: (field_identifier) @method.name
+                        )
                     )
                     body: (compound_statement) @method.body
                 ) @method.def
@@ -436,7 +520,7 @@ class TreeSitterParser(CodeParser):
         """处理新版本的 captures 返回格式.
 
         Args:
-            captures: tree-sitter captures 返回的字典
+            captures: tree-sitter QueryCursor.captures() 返回的字典
 
         Returns:
             节点和捕获名称的列表
@@ -446,6 +530,25 @@ class TreeSitterParser(CodeParser):
             for node in nodes:
                 result.append((node, capture_name))
         return result
+
+    def _exec_query(self, query_str: str, node: Node) -> list[tuple[Node, str]]:
+        """执行查询并返回捕获结果.
+
+        Args:
+            query_str: 查询字符串
+            node: 要查询的节点
+
+        Returns:
+            节点和捕获名称的列表
+        """
+        try:
+            query = Query(self.language, query_str)
+            cursor = QueryCursor(query)
+            captures = cursor.captures(node)
+            return self._process_captures(captures)
+        except Exception as e:
+            logger.warning(f"Query execution failed: {e}")
+            return []
 
     def _extract_symbols(
         self,
@@ -472,9 +575,7 @@ class TreeSitterParser(CodeParser):
         # 提取类
         if "class" in queries:
             try:
-                query = self.language.query(queries["class"])
-                captures = query.captures(root_node)
-                capture_list = self._process_captures(captures)
+                capture_list = self._exec_query(queries["class"], root_node)
 
                 # 按模式分组捕获
                 class_defs = {}
@@ -517,9 +618,7 @@ class TreeSitterParser(CodeParser):
         # 提取结构体 (C/C++)
         if "struct" in queries:
             try:
-                query = self.language.query(queries["struct"])
-                captures = query.captures(root_node)
-                capture_list = self._process_captures(captures)
+                capture_list = self._exec_query(queries["struct"], root_node)
 
                 struct_defs = {}
                 for node, capture_name in capture_list:
@@ -551,10 +650,11 @@ class TreeSitterParser(CodeParser):
         # 提取独立方法
         if "method" in queries or "function" in queries:
             try:
-                method_query = queries.get("method") or queries.get("function")
-                query = self.language.query(method_query)
-                captures = query.captures(root_node)
-                capture_list = self._process_captures(captures)
+                # 对于独立函数，优先使用 function 查询（如果存在）
+                # function 查询使用 identifier 匹配独立函数
+                # method 查询使用 field_identifier 匹配类方法
+                method_query = queries.get("function") or queries.get("method")
+                capture_list = self._exec_query(method_query, root_node)
 
                 method_defs = {}
                 for node, capture_name in capture_list:
@@ -614,9 +714,7 @@ class TreeSitterParser(CodeParser):
             return methods
 
         try:
-            query = self.language.query(method_pattern)
-            captures = query.captures(class_node)
-            capture_list = self._process_captures(captures)
+            capture_list = self._exec_query(method_pattern, class_node)
 
             method_defs = {}
             for node, capture_name in capture_list:
@@ -669,9 +767,7 @@ class TreeSitterParser(CodeParser):
         import_query = queries.get("import")
         if import_query:
             try:
-                query = self.language.query(import_query)
-                captures = query.captures(root_node)
-                capture_list = self._process_captures(captures)
+                capture_list = self._exec_query(import_query, root_node)
 
                 for node, capture_name in capture_list:
                     if "import" in capture_name:
@@ -685,9 +781,7 @@ class TreeSitterParser(CodeParser):
         include_query = queries.get("include")
         if include_query:
             try:
-                query = self.language.query(include_query)
-                captures = query.captures(root_node)
-                capture_list = self._process_captures(captures)
+                capture_list = self._exec_query(include_query, root_node)
 
                 for node, capture_name in capture_list:
                     if "include" in capture_name:

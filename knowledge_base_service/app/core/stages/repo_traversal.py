@@ -26,6 +26,16 @@ class TraversalResult:
     total_files: int = 0
     total_directories: int = 0
 
+    def to_dict(self) -> Dict[str, Any]:
+        """转换为字典."""
+        return {
+            "repository": self.repository.to_dict(),
+            "directories": [d.to_dict() for d in self.directories],
+            "files": [f.to_dict() for f in self.files],
+            "total_files": self.total_files,
+            "total_directories": self.total_directories,
+        }
+
 
 class RepoTraversalStage(PipelineStageHandler):
     """仓库遍历阶段处理器.

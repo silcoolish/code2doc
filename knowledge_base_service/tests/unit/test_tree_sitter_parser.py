@@ -323,16 +323,73 @@ class TestCParsing:
         """测试结构体提取."""
         result = parser.parse("sample.c", sample_content)
 
-        # C 中的 struct 应该被提取
+        # C 中的 struct 应该被提取为类
         struct_names = [c.name for c in result.classes]
-        # 可能有 Person 结构体
+        assert "Person" in struct_names
+        assert "Calculator" in struct_names
 
     def test_function_extraction(self, parser, sample_content):
         """测试函数提取."""
         result = parser.parse("sample.c", sample_content)
 
-        # C 中的函数
-        assert len(result.methods) > 0
+        # C 中的独立函数
+        method_names = [m.name for m in result.methods]
+
+        # Person 相关函数
+        assert "person_create" in method_names
+        assert "person_greet" in method_names
+        assert "person_celebrate_birthday" in method_names
+
+        # Calculator 相关函数
+        assert "calculator_create" in method_names
+        assert "calculator_add" in method_names
+        assert "calculator_subtract" in method_names
+        assert "calculator_free" in method_names
+
+        # 独立函数
+        assert "process_strings" in method_names
+
+    def test_function_details(self, parser, sample_content):
+        """测试函数详情提取."""
+        result = parser.parse("sample.c", sample_content)
+
+        # 查找 person_create 函数
+        person_create = next((m for m in result.methods if m.name == "person_create"), None)
+        assert person_create is not None
+        assert "Person*" in person_create.code or "person_create" in person_create.code
+        assert person_create.start_line > 0
+        assert person_create.end_line > person_create.start_line
+
+        # 查找 calculator_add 函数
+        calculator_add = next((m for m in result.methods if m.name == "calculator_add"), None)
+        assert calculator_add is not None
+        assert "double" in calculator_add.code
+
+    def test_include_extraction(self, parser, sample_content):
+        """测试头文件包含提取."""
+        result = parser.parse("sample.c", sample_content)
+
+        # 应该提取到 #include 语句
+        assert len(result.imports) >= 3
+        # 检查是否包含 stdio.h, stdlib.h, string.h
+        import_text = " ".join(result.imports)
+        assert "stdio.h" in import_text
+        assert "stdlib.h" in import_text
+        assert "string.h" in import_text
+
+    def test_c_function_line_numbers(self, parser, sample_content):
+        """测试 C 函数行号提取准确性."""
+        result = parser.parse("sample.c", sample_content)
+
+        # person_create 函数应该在第 20 行左右开始
+        person_create = next((m for m in result.methods if m.name == "person_create"), None)
+        assert person_create is not None
+        assert 18 <= person_create.start_line <= 22  # 允许一定误差
+
+        # process_strings 函数应该在第 102 行左右
+        process_strings = next((m for m in result.methods if m.name == "process_strings"), None)
+        assert process_strings is not None
+        assert 100 <= process_strings.start_line <= 105
 
 
 class TestCppParsing:
@@ -362,6 +419,68 @@ class TestCppParsing:
         class_names = [c.name for c in result.classes]
         assert "Person" in class_names
         assert "Calculator" in class_names
+
+    def test_class_method_extraction(self, parser, sample_content):
+        """测试类方法提取."""
+        result = parser.parse("sample.cpp", sample_content)
+
+        # 查找 Person 类
+        person_class = next((c for c in result.classes if c.name == "Person"), None)
+        assert person_class is not None
+
+        # Person 类应该有方法（构造函数、析构函数、方法等）
+        person_methods = [m.name for m in person_class.methods]
+        assert "greet" in person_methods
+        assert "celebrateBirthday" in person_methods
+        assert "getName" in person_methods
+        assert "getAge" in person_methods
+
+        # 查找 Calculator 类
+        calculator_class = next((c for c in result.classes if c.name == "Calculator"), None)
+        assert calculator_class is not None
+
+        calculator_methods = [m.name for m in calculator_class.methods]
+        assert "add" in calculator_methods
+        assert "subtract" in calculator_methods
+        assert "getHistory" in calculator_methods
+        assert "clear" in calculator_methods
+
+    def test_standalone_function_extraction(self, parser, sample_content):
+        """测试独立函数提取."""
+        result = parser.parse("sample.cpp", sample_content)
+
+        # C++ 中的独立函数
+        method_names = [m.name for m in result.methods]
+        assert "processData" in method_names
+
+    def test_inheritance_extraction(self, parser, sample_content):
+        """测试继承关系提取."""
+        result = parser.parse("sample.cpp", sample_content)
+
+        # UpperCaseProcessor 继承自 Processor
+        processor_class = next((c for c in result.classes if c.name == "UpperCaseProcessor"), None)
+        assert processor_class is not None
+
+    def test_cpp_include_extraction(self, parser, sample_content):
+        """测试 C++ 头文件包含提取."""
+        result = parser.parse("sample.cpp", sample_content)
+
+        # 应该提取到 #include 语句
+        assert len(result.imports) >= 4
+        # 检查是否包含预期的头文件
+        import_text = " ".join(result.imports)
+        assert "iostream" in import_text
+        assert "string" in import_text
+        assert "vector" in import_text
+        assert "memory" in import_text
+
+    def test_template_class_extraction(self, parser, sample_content):
+        """测试模板类提取."""
+        result = parser.parse("sample.cpp", sample_content)
+
+        # Processor 模板类应该被提取
+        class_names = [c.name for c in result.classes]
+        assert "Processor" in class_names
 
 
 class TestParseResult:

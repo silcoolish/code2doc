@@ -157,7 +157,7 @@ class PipelineOrchestrator:
                 stage for stage, result in context.stages.items()
                 if result.status == PipelineStatus.COMPLETED
             ],
-            resume_from=context.current_stage.value
+            resume_from=context.current_stage
         )
 
         # 创建任务并执行

@@ -173,12 +173,12 @@ class Neo4jClient:
             props_str = ", r: $rel_props"
             params["rel_props"] = properties
 
-        query = f"""
-        MATCH (from:{label} {{{from_key}: $from_value}})
-        MATCH (to:{to_label} {{{to_key}: $to_value}})
-        CREATE (from)-[r:{rel_type}]{props_str}->(to)
+        query = """
+        MATCH (from:%s {%s: $from_value})
+        MATCH (to:%s {%s: $to_value})
+        CREATE (from)-[r:%s%s]->(to)
         RETURN count(r) as created
-        """
+        """ % (from_label, from_key, to_label, to_key, rel_type, props_str)
 
         result = await self.execute_query(query, params, database)
         return result[0]["created"] > 0 if result else False
