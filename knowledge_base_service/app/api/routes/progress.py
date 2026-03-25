@@ -51,33 +51,3 @@ async def get_progress(repo_id: str) -> ProgressResponse:
         created_at=ctx.created_at.isoformat(),
         updated_at=ctx.updated_at.isoformat(),
     )
-
-
-@router.get("/{repo_id}/status")
-async def get_status(repo_id: str) -> Dict[str, Any]:
-    """获取流水线简要状态.
-
-    Args:
-        repo_id: 仓库ID
-
-    Returns:
-        状态信息
-    """
-    orchestrator = get_orchestrator()
-
-    # 先从缓存获取上下文
-    ctx = orchestrator.get_running_context(repo_id)
-
-    if not ctx:
-        raise HTTPException(
-            status_code=404, detail=f"Pipeline not found for repo: {repo_id}"
-        )
-
-    return {
-        "repo_id": ctx.repo_id,
-        "pipeline_id": ctx.pipeline_id,
-        "repo_name": ctx.repo_name,
-        "status": ctx.overall_status.value,
-        "current_stage": ctx.current_stage.value,
-        "progress": ctx.progress,
-    }

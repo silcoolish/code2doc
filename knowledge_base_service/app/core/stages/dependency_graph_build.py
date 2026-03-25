@@ -12,7 +12,19 @@ logger = logging.getLogger(__name__)
 
 
 class DependencyGraphBuildStage(PipelineStageHandler):
-    """依赖图构建阶段处理器."""
+    """依赖图构建阶段处理器.
+
+    Input (context.data):
+        - dependencies: DependencyResult - 依赖分析结果，包含 method_calls, class_inherits,
+          class_implements, file_uses 等关系列表
+
+    Output (context.data):
+        - 无直接输出，结果写入 Neo4j
+
+    Side Effects:
+        - 在 Neo4j 中创建方法调用(CALL)、类继承(INHERIT)、接口实现(IMPLEMENT)、
+          文件使用(USE)等关系
+    """
 
     stage = PipelineStage.DEPENDENCY_GRAPH_BUILD
 

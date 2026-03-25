@@ -12,7 +12,18 @@ logger = logging.getLogger(__name__)
 
 
 class SemanticGraphBuildStage(PipelineStageHandler):
-    """语义图构建阶段处理器 - 构建语义图关系."""
+    """语义图构建阶段处理器 - 构建语义图关系.
+
+    Input (context.data):
+        - modules: List[Module] - 模块列表
+        - workflows: List[Workflow] - 业务流程列表
+
+    Output (context.data):
+        - 无直接输出
+
+    Side Effects:
+        - 在 Neo4j 中创建 Workflow 到 Class/Method 的 CONTAIN 关系
+    """
 
     stage = PipelineStage.SEMANTIC_GRAPH_BUILD
 

@@ -18,7 +18,7 @@
 - **Neo4j**: 图数据库
 - **Milvus**: 向量数据库
 - **Tree-sitter**: 代码解析
-- **Anthropic/OpenAI**: LLM 和嵌入模型
+- **Langchain**: LLM 和嵌入模型
 
 ## 快速开始
 
@@ -50,9 +50,9 @@ uvicorn app.main:app --reload
 ### 初始化相关
 
 - `POST /api/v1/initialization/start` - 启动构建流水线
-- `POST /api/v1/initialization/restart` - 重新初始化
 - `POST /api/v1/initialization/resume` - 从指定阶段恢复
-- `GET /api/v1/initialization/{pipeline_id}/progress` - 获取构建进度
+- `GET /api/v1/initialization/{repo_id}/status` - 获取仓库初始化状态
+- `GET /api/v1/initialization/{repo_id}/progress` - 获取仓库初始化构建进度
 
 ### 请求示例
 
@@ -61,16 +61,13 @@ uvicorn app.main:app --reload
 curl -X POST http://localhost:8000/api/v1/initialization/start \
   -H "Content-Type: application/json" \
   -d '{
+    "repo_id": "repo_id",
     "repo_path": "/path/to/your/repo",
-    "repo_name": "my-project",
-    "config": {
-      "language_filters": [".py", ".java"],
-      "exclude_patterns": ["node_modules/**"]
-    }
+    "repo_name": "my-project"
   }'
 
 # 获取进度
-curl http://localhost:8000/api/v1/initialization/{pipeline_id}/progress
+curl http://localhost:8000/api/v1/initialization/{repo_id}/progress
 ```
 
 ## MCP 工具

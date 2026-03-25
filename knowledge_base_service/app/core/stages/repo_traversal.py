@@ -28,7 +28,14 @@ class TraversalResult:
 
 
 class RepoTraversalStage(PipelineStageHandler):
-    """仓库遍历阶段处理器."""
+    """仓库遍历阶段处理器.
+
+    Input (context.data):
+        - 无需前置数据，从 context.repo_path 和 context.repo_name 读取
+
+    Output (context.data):
+        - traversal_result: TraversalResult - 包含 repository, directories, files, total_files, total_directories
+    """
 
     stage = PipelineStage.REPO_TRAVERSAL
 
@@ -49,9 +56,6 @@ class RepoTraversalStage(PipelineStageHandler):
 
             # 保存结果到上下文
             context.data["traversal_result"] = result
-            context.data["repository"] = result.repository
-            context.data["directories"] = result.directories
-            context.data["files"] = result.files
 
             metadata = {
                 "total_files": result.total_files,

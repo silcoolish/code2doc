@@ -15,7 +15,15 @@ logger = logging.getLogger(__name__)
 
 
 class CodeParsingStage(PipelineStageHandler):
-    """代码解析阶段处理器."""
+    """代码解析阶段处理器.
+
+    Input (context.data):
+        - traversal_result: TraversalResult - 遍历结果，从中读取 files 列表
+
+    Output (context.data):
+        - parsed_results: Dict[str, ParseResult] - 文件路径到解析结果的映射
+          包含 classes, methods, imports, language 等信息
+    """
 
     stage = PipelineStage.CODE_PARSING
 
@@ -33,7 +41,8 @@ class CodeParsingStage(PipelineStageHandler):
         """
         try:
             # 获取遍历结果
-            files = context.data.get("files", [])
+            traversal_result = context.data.get("traversal_result")
+            files = traversal_result.files if traversal_result else []
             repo_path = context.repo_path
 
             # 过滤出代码文件

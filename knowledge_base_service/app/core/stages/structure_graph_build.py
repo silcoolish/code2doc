@@ -13,7 +13,19 @@ logger = logging.getLogger(__name__)
 
 
 class StructureGraphBuildStage(PipelineStageHandler):
-    """结构图构建阶段处理器."""
+    """结构图构建阶段处理器.
+
+    Input (context.data):
+        - traversal_result: TraversalResult - 包含 repository, directories, files
+        - parsed_results: Dict[str, ParseResult] - 代码解析结果，包含 classes, methods
+
+    Output (context.data):
+        - created_nodes: Dict - 创建的节点统计，包含 repositories, directories, files, classes, methods 数量
+
+    Side Effects:
+        - 在 Neo4j 中创建 Repository, Directory, File, Class, Method 节点
+        - 创建 CONTAIN 关系连接各节点
+    """
 
     stage = PipelineStage.STRUCTURE_GRAPH_BUILD
 
@@ -29,10 +41,11 @@ class StructureGraphBuildStage(PipelineStageHandler):
         try:
             neo4j = get_neo4j_client()
 
-            # 获取数据
-            repository: Repository = context.data.get("repository")
-            directories: List[Directory] = context.data.get("directories", [])
-            files: List[File] = context.data.get("files", [])
+            # 获取数据（从 traversal_result 中读取）
+            traversal_result = context.data.get("traversal_result")
+            repository: Repository = traversal_result.repository if traversal_result else None
+            directories: List[Directory] = traversal_result.directories if traversal_result else []
+            files: List[File] = traversal_result.files if traversal_result else []
             parsed_results: Dict[str, ParseResult] = context.data.get("parsed_results", {})
 
             created_nodes = {

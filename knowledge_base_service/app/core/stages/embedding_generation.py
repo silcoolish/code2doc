@@ -18,7 +18,18 @@ logger = logging.getLogger(__name__)
 
 
 class EmbeddingGenerationStage(PipelineStageHandler):
-    """向量化阶段处理器 - 为摘要生成嵌入向量."""
+    """向量化阶段处理器 - 为摘要生成嵌入向量.
+
+    Input (context.data):
+        - file_summaries: Dict[str, str] - 文件ID到摘要的映射
+        - class_summaries: Dict[str, str] - 类ID到摘要的映射
+        - method_summaries: Dict[str, str] - 方法ID到摘要的映射
+
+    Output (context.data):
+        - file_vectors: List[FileSummaryRecord] - 文件向量记录列表
+        - class_vectors: List[ClassSummaryRecord] - 类向量记录列表
+        - method_vectors: List[MethodSummaryRecord] - 方法向量记录列表
+    """
 
     stage = PipelineStage.EMBEDDING_GENERATION
 

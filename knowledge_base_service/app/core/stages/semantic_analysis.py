@@ -14,7 +14,24 @@ logger = logging.getLogger(__name__)
 
 
 class SemanticAnalysisStage(PipelineStageHandler):
-    """语义分析阶段处理器 - 使用 LLM 生成代码摘要."""
+    """语义分析阶段处理器 - 使用 LLM 生成代码摘要.
+
+    Input (context.data):
+        - parsed_results: Dict[str, ParseResult] - 代码解析结果，包含代码内容和结构信息
+
+    Output (context.data):
+        - method_summaries: Dict[str, str] - 方法ID到摘要的映射
+        - class_summaries: Dict[str, str] - 类ID到摘要的映射
+        - file_summaries: Dict[str, str] - 文件ID到摘要的映射
+
+    Side Effects:
+        - 更新 Neo4j 中 Method, Class, File 节点的 summary 属性
+
+    处理策略：
+        1. 先为所有方法生成摘要（自底向上）
+        2. 使用方法的摘要生成类的摘要
+        3. 使用类的摘要生成文件的摘要
+    """
 
     stage = PipelineStage.SEMANTIC_ANALYSIS
 
@@ -24,11 +41,6 @@ class SemanticAnalysisStage(PipelineStageHandler):
 
     async def execute(self, context: PipelineContext) -> StageResult:
         """执行语义分析.
-
-        策略：
-        1. 先为所有方法生成摘要（自底向上）
-        2. 使用方法的摘要生成类的摘要
-        3. 使用类的摘要生成文件的摘要
 
         Args:
             context: 流水线上下文

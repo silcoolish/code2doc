@@ -159,7 +159,6 @@ class PipelineStage(Enum):
 
     REPO_TRAVERSAL = "repo_traversal"
     CODE_PARSING = "code_parsing"
-    SYMBOL_EXTRACTION = "symbol_extraction"
     STRUCTURE_GRAPH_BUILD = "structure_graph_build"
     DEPENDENCY_ANALYSIS = "dependency_analysis"
     DEPENDENCY_GRAPH_BUILD = "dependency_graph_build"
@@ -177,7 +176,6 @@ class PipelineStage(Enum):
 STAGE_ORDER: List[PipelineStage] = [
     PipelineStage.REPO_TRAVERSAL,
     PipelineStage.CODE_PARSING,
-    PipelineStage.SYMBOL_EXTRACTION,
     PipelineStage.STRUCTURE_GRAPH_BUILD,
     PipelineStage.DEPENDENCY_ANALYSIS,
     PipelineStage.DEPENDENCY_GRAPH_BUILD,

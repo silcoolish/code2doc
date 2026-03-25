@@ -432,6 +432,21 @@ class TreeSitterParser(CodeParser):
             },
         )
 
+    def _process_captures(self, captures: dict) -> list[tuple[Node, str]]:
+        """处理新版本的 captures 返回格式.
+
+        Args:
+            captures: tree-sitter captures 返回的字典
+
+        Returns:
+            节点和捕获名称的列表
+        """
+        result = []
+        for capture_name, nodes in captures.items():
+            for node in nodes:
+                result.append((node, capture_name))
+        return result
+
     def _extract_symbols(
         self,
         root_node: Node,
@@ -459,10 +474,11 @@ class TreeSitterParser(CodeParser):
             try:
                 query = self.language.query(queries["class"])
                 captures = query.captures(root_node)
+                capture_list = self._process_captures(captures)
 
                 # 按模式分组捕获
                 class_defs = {}
-                for node, capture_name in captures:
+                for node, capture_name in capture_list:
                     if "class.def" in capture_name:
                         class_defs[node] = {"node": node}
                     elif "class.name" in capture_name:
@@ -503,9 +519,10 @@ class TreeSitterParser(CodeParser):
             try:
                 query = self.language.query(queries["struct"])
                 captures = query.captures(root_node)
+                capture_list = self._process_captures(captures)
 
                 struct_defs = {}
-                for node, capture_name in captures:
+                for node, capture_name in capture_list:
                     if "struct.def" in capture_name:
                         struct_defs[node] = {"node": node}
                     elif "struct.name" in capture_name:
@@ -537,9 +554,10 @@ class TreeSitterParser(CodeParser):
                 method_query = queries.get("method") or queries.get("function")
                 query = self.language.query(method_query)
                 captures = query.captures(root_node)
+                capture_list = self._process_captures(captures)
 
                 method_defs = {}
-                for node, capture_name in captures:
+                for node, capture_name in capture_list:
                     if "method.def" in capture_name or "function.def" in capture_name:
                         method_defs[node] = {"node": node}
                     elif "method.name" in capture_name or "function.name" in capture_name:
@@ -598,9 +616,10 @@ class TreeSitterParser(CodeParser):
         try:
             query = self.language.query(method_pattern)
             captures = query.captures(class_node)
+            capture_list = self._process_captures(captures)
 
             method_defs = {}
-            for node, capture_name in captures:
+            for node, capture_name in capture_list:
                 if "method.def" in capture_name:
                     method_defs[node] = {"node": node}
                 elif "method.name" in capture_name:
@@ -652,8 +671,9 @@ class TreeSitterParser(CodeParser):
             try:
                 query = self.language.query(import_query)
                 captures = query.captures(root_node)
+                capture_list = self._process_captures(captures)
 
-                for node, capture_name in captures:
+                for node, capture_name in capture_list:
                     if "import" in capture_name:
                         import_text = node.text.decode("utf8") if node.text else ""
                         imports.append(import_text)
@@ -667,8 +687,9 @@ class TreeSitterParser(CodeParser):
             try:
                 query = self.language.query(include_query)
                 captures = query.captures(root_node)
+                capture_list = self._process_captures(captures)
 
-                for node, capture_name in captures:
+                for node, capture_name in capture_list:
                     if "include" in capture_name:
                         include_text = node.text.decode("utf8") if node.text else ""
                         imports.append(include_text)

@@ -16,7 +16,20 @@ logger = logging.getLogger(__name__)
 
 
 class VectorDBStoreStage(PipelineStageHandler):
-    """向量存储阶段处理器 - 将向量保存到 Milvus."""
+    """向量存储阶段处理器 - 将向量保存到 Milvus.
+
+    Input (context.data):
+        - file_vectors: List[FileSummaryRecord] - 文件向量记录列表
+        - class_vectors: List[ClassSummaryRecord] - 类向量记录列表
+        - method_vectors: List[MethodSummaryRecord] - 方法向量记录列表
+
+    Output (context.data):
+        - 无直接输出
+
+    Side Effects:
+        - 将向量数据插入 Milvus 相应 collection
+        - 更新 Neo4j 中 File, Class, Method 节点的 embeddingId 属性
+    """
 
     stage = PipelineStage.VECTOR_DB_STORE
 

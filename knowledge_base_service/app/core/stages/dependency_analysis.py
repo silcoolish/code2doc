@@ -30,7 +30,18 @@ class DependencyResult:
 
 
 class DependencyAnalysisStage(PipelineStageHandler):
-    """依赖分析阶段处理器."""
+    """依赖分析阶段处理器.
+
+    Input (context.data):
+        - parsed_results: Dict[str, ParseResult] - 代码解析结果，包含 classes, methods, imports, calls
+
+    Output (context.data):
+        - dependencies: DependencyResult - 依赖分析结果，包含:
+          - method_calls: List[DependencyRelation] - 方法调用关系
+          - class_inherits: List[DependencyRelation] - 类继承关系
+          - class_implements: List[DependencyRelation] - 接口实现关系
+          - file_uses: List[DependencyRelation] - 文件使用关系
+    """
 
     stage = PipelineStage.DEPENDENCY_ANALYSIS
 

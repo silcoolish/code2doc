@@ -15,7 +15,20 @@ logger = logging.getLogger(__name__)
 
 
 class ModuleDetectionStage(PipelineStageHandler):
-    """模块检测阶段处理器 - 使用 LLM 识别功能模块和业务流程."""
+    """模块检测阶段处理器 - 使用 LLM 识别功能模块和业务流程.
+
+    Input (context.data):
+        - traversal_result: TraversalResult - 遍历结果，从中读取 files 列表
+        - file_summaries: Dict[str, str] - 文件ID到摘要的映射
+
+    Output (context.data):
+        - modules: List[Module] - 检测到的模块列表
+        - workflows: List[Workflow] - 检测到的业务流程列表
+
+    Side Effects:
+        - 在 Neo4j 中创建 Module 和 Workflow 节点
+        - 创建 File -> Module, File -> Workflow, Workflow -> Module 的 BELONG_TO 关系
+    """
 
     stage = PipelineStage.MODULE_DETECTION
 
@@ -32,8 +45,9 @@ class ModuleDetectionStage(PipelineStageHandler):
             阶段执行结果
         """
         try:
-            # 获取文件和摘要信息
-            files = context.data.get("files", [])
+            # 获取文件和摘要信息（从 traversal_result 中读取）
+            traversal_result = context.data.get("traversal_result")
+            files = traversal_result.files if traversal_result else []
             file_summaries = context.data.get("file_summaries", {})
             repo_name = context.repo_name
 
