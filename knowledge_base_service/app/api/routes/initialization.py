@@ -1,12 +1,12 @@
 """初始化相关 API 路由."""
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.core.pipeline import get_orchestrator
-from app.domain.models.pipeline import PipelineStage
+from app.infrastructure.csv_storage import get_repo_status_storage, InitializationStatus
 
 router = APIRouter()
 
@@ -14,6 +14,7 @@ router = APIRouter()
 class StartInitializationRequest(BaseModel):
     """启动初始化请求."""
 
+    repo_id: str = Field(..., description="仓库ID")
     repo_path: str = Field(..., description="仓库路径")
     repo_name: str = Field(..., description="仓库名称")
     config: Optional[Dict[str, Any]] = Field(
@@ -25,6 +26,7 @@ class InitializationResponse(BaseModel):
     """初始化响应."""
 
     pipeline_id: str
+    repo_id: str
     status: str
     current_stage: str
     created_at: str
@@ -33,6 +35,7 @@ class InitializationResponse(BaseModel):
 class RestartInitializationRequest(BaseModel):
     """重新初始化请求."""
 
+    repo_id: str = Field(..., description="仓库ID")
     repo_path: str = Field(..., description="仓库路径")
     repo_name: str = Field(..., description="仓库名称")
     clear_existing: bool = Field(
@@ -46,8 +49,17 @@ class RestartInitializationRequest(BaseModel):
 class ResumeInitializationRequest(BaseModel):
     """恢复初始化请求."""
 
-    pipeline_id: str = Field(..., description="流水线ID")
-    resume_from: str = Field(..., description="恢复阶段")
+    repo_id: str = Field(..., description="仓库ID")
+
+
+class InitializationStatusResponse(BaseModel):
+    """初始化状态响应."""
+
+    repo_id: str
+    status: str = Field(..., description="初始化状态: NotInitialized, Pending, Completed, Failed, Running")
+    repo_name: Optional[str] = None
+    repo_path: Optional[str] = None
+    message: Optional[str] = None
 
 
 @router.post("/start", response_model=InitializationResponse)
@@ -66,23 +78,25 @@ async def start_initialization(
 
     try:
         pipeline_id = await orchestrator.start(
+            repo_id=request.repo_id,
             repo_path=request.repo_path,
             repo_name=request.repo_name,
             config=request.config,
         )
 
-        # 获取初始状态
-        state = await orchestrator.get_state(pipeline_id)
-        if not state:
+        # 获取初始上下文
+        ctx = orchestrator.get_running_context(request.repo_id)
+        if not ctx:
             raise HTTPException(
-                status_code=500, detail="Failed to get pipeline state"
+                status_code=500, detail="Failed to get pipeline context"
             )
 
         return InitializationResponse(
             pipeline_id=pipeline_id,
-            status=state.overall_status.value,
-            current_stage=state.current_stage.value,
-            created_at=state.created_at.isoformat(),
+            repo_id=request.repo_id,
+            status=ctx.overall_status.value,
+            current_stage=ctx.current_stage.value,
+            created_at=ctx.created_at.isoformat(),
         )
 
     except Exception as e:
@@ -91,53 +105,13 @@ async def start_initialization(
         )
 
 
-@router.post("/restart", response_model=InitializationResponse)
-async def restart_initialization(
-    request: RestartInitializationRequest,
-) -> InitializationResponse:
-    """重新启动代码知识底座构建流水线.
-
-    Args:
-        request: 重新初始化请求
-
-    Returns:
-        初始化响应
-    """
-    orchestrator = get_orchestrator()
-
-    try:
-        pipeline_id = await orchestrator.restart(
-            repo_path=request.repo_path,
-            repo_name=request.repo_name,
-            clear_existing=request.clear_existing,
-            config=request.config,
-        )
-
-        # 获取初始状态
-        state = await orchestrator.get_state(pipeline_id)
-        if not state:
-            raise HTTPException(
-                status_code=500, detail="Failed to get pipeline state"
-            )
-
-        return InitializationResponse(
-            pipeline_id=pipeline_id,
-            status=state.overall_status.value,
-            current_stage=state.current_stage.value,
-            created_at=state.created_at.isoformat(),
-        )
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=500, detail=f"Failed to restart initialization: {str(e)}"
-        )
-
-
 @router.post("/resume", response_model=InitializationResponse)
 async def resume_initialization(
     request: ResumeInitializationRequest,
 ) -> InitializationResponse:
-    """从指定阶段恢复流水线.
+    """恢复流水线.
+
+    从已有流水线上下文恢复执行
 
     Args:
         request: 恢复请求
@@ -148,44 +122,28 @@ async def resume_initialization(
     orchestrator = get_orchestrator()
 
     try:
-        # 验证阶段
-        try:
-            resume_stage = PipelineStage(request.resume_from)
-        except ValueError:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid stage: {request.resume_from}",
-            )
-
-        # 获取原状态
-        old_state = await orchestrator.get_state(request.pipeline_id)
-        if not old_state:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Pipeline not found: {request.pipeline_id}",
-            )
-
-        # 启动新流水线，从指定阶段恢复
-        pipeline_id = await orchestrator.start(
-            repo_path=old_state.repo_path,
-            repo_name=old_state.repo_name,
-            resume_from=resume_stage,
+        # 恢复流水线
+        pipeline_id = await orchestrator.resume(
+            repo_id=request.repo_id,
         )
 
-        # 获取状态
-        state = await orchestrator.get_state(pipeline_id)
-        if not state:
+        # 获取上下文
+        ctx = orchestrator.get_running_context(request.repo_id)
+        if not ctx:
             raise HTTPException(
-                status_code=500, detail="Failed to get pipeline state"
+                status_code=500, detail="Failed to get pipeline context"
             )
 
         return InitializationResponse(
             pipeline_id=pipeline_id,
-            status=state.overall_status.value,
-            current_stage=state.current_stage.value,
-            created_at=state.created_at.isoformat(),
+            repo_id=ctx.repo_id,
+            status=ctx.overall_status.value,
+            current_stage=ctx.current_stage.value,
+            created_at=ctx.created_at.isoformat(),
         )
 
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
@@ -194,26 +152,81 @@ async def resume_initialization(
         )
 
 
-@router.post("/{pipeline_id}/cancel")
-async def cancel_initialization(pipeline_id: str) -> Dict[str, str]:
-    """取消流水线.
+@router.get("/{repo_id}/status", response_model=InitializationStatusResponse)
+async def get_initialization_status(repo_id: str) -> InitializationStatusResponse:
+    """获取仓库初始化状态.
+
+    根据repoId从CSV文件中查询对应信息：
+    - 查不到记录: 未进行初始化 (NotInitialized)
+    - 记录为Pending且正在运行: 初始化中 (Running)
+    - 记录为Pending但不在运行: 挂起/等待恢复 (Pending)
+    - 记录为Completed: 初始化成功 (Completed)
+    - 记录为Failed: 初始化失败 (Failed)
 
     Args:
-        pipeline_id: 流水线ID
+        repo_id: 仓库ID
 
     Returns:
-        取消结果
+        初始化状态响应
     """
     orchestrator = get_orchestrator()
+    repo_storage = get_repo_status_storage()
 
-    success = await orchestrator.cancel(pipeline_id)
-    if not success:
-        raise HTTPException(
-            status_code=404, detail=f"Pipeline not found or not running: {pipeline_id}"
+    # 从CSV获取记录
+    record = repo_storage.get_record(repo_id)
+
+    # 检查是否正在运行
+    running_context = orchestrator.get_running_context(repo_id)
+    is_running = running_context is not None
+
+    if record is None:
+        # 未找到记录，表示未进行初始化
+        return InitializationStatusResponse(
+            repo_id=repo_id,
+            status="NotInitialized",
+            message="Repository has not been initialized",
         )
 
-    return {
-        "pipeline_id": pipeline_id,
-        "status": "cancelled",
-        "message": "Pipeline cancelled successfully",
-    }
+    # 根据记录状态和运行状态确定最终状态
+    if record.initial_status == InitializationStatus.COMPLETED:
+        return InitializationStatusResponse(
+            repo_id=repo_id,
+            status="Completed",
+            repo_name=record.repo_name,
+            repo_path=record.repo_path,
+            message="Initialization completed successfully",
+        )
+    elif record.initial_status == InitializationStatus.FAILED:
+        return InitializationStatusResponse(
+            repo_id=repo_id,
+            status="Failed",
+            repo_name=record.repo_name,
+            repo_path=record.repo_path,
+            message="Initialization failed",
+        )
+    elif record.initial_status == InitializationStatus.PENDING:
+        if is_running:
+            return InitializationStatusResponse(
+                repo_id=repo_id,
+                status="Running",
+                repo_name=record.repo_name,
+                repo_path=record.repo_path,
+                message="Initialization is in progress",
+            )
+        else:
+            return InitializationStatusResponse(
+                repo_id=repo_id,
+                status="Pending",
+                repo_name=record.repo_name,
+                repo_path=record.repo_path,
+                message="Initialization is pending or can be resumed",
+            )
+
+    # 未知状态
+    return InitializationStatusResponse(
+        repo_id=repo_id,
+        status="Unknown",
+        repo_name=record.repo_name,
+        repo_path=record.repo_path,
+        message=f"Unknown initialization status: {record.initial_status}",
+    )

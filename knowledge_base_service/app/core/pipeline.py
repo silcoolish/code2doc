@@ -1,35 +1,27 @@
 """流水线编排器."""
 
 import asyncio
-import json
 import logging
-import os
-from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Callable
+from typing import Any, Dict, Optional
 from uuid import uuid4
 
-from app.config import get_settings
+from app.core.pipeline_logger import get_pipeline_log_manager
 from app.domain.models.pipeline import (
     PipelineStage,
-    PipelineState,
     PipelineStatus,
+    PipelineContext,
     StageResult,
+    STAGE_ORDER,
+)
+from app.infrastructure.csv_storage import (
+    get_repo_status_storage,
+    InitializationStatus,
 )
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class PipelineContext:
-    """流水线上下文."""
-
-    pipeline_id: str
-    repo_path: str
-    repo_name: str
-    config: Dict[str, Any] = field(default_factory=dict)
-    data: Dict[str, Any] = field(default_factory=dict)
 
 
 class PipelineStageHandler:
@@ -49,72 +41,15 @@ class PipelineStageHandler:
         raise NotImplementedError
 
 
-class CheckpointManager:
-    """断点管理器."""
-
-    def __init__(self, checkpoint_dir: str):
-        self.checkpoint_dir = Path(checkpoint_dir)
-        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
-
-    def _get_checkpoint_path(self, pipeline_id: str) -> Path:
-        """获取断点文件路径."""
-        return self.checkpoint_dir / f"{pipeline_id}.json"
-
-    async def save(self, state: PipelineState) -> None:
-        """保存流水线状态.
-
-        Args:
-            state: 流水线状态
-        """
-        checkpoint_path = self._get_checkpoint_path(state.pipeline_id)
-        try:
-            with open(checkpoint_path, "w", encoding="utf-8") as f:
-                json.dump(state.to_dict(), f, indent=2, ensure_ascii=False)
-            logger.debug(f"Checkpoint saved: {checkpoint_path}")
-        except Exception as e:
-            logger.error(f"Failed to save checkpoint: {e}")
-            raise
-
-    async def load(self, pipeline_id: str) -> Optional[PipelineState]:
-        """加载流水线状态.
-
-        Args:
-            pipeline_id: 流水线ID
-
-        Returns:
-            流水线状态或None
-        """
-        checkpoint_path = self._get_checkpoint_path(pipeline_id)
-        if not checkpoint_path.exists():
-            return None
-
-        try:
-            with open(checkpoint_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            return PipelineState.from_dict(data)
-        except Exception as e:
-            logger.error(f"Failed to load checkpoint: {e}")
-            return None
-
-    async def clear(self, pipeline_id: str) -> None:
-        """清除断点数据.
-
-        Args:
-            pipeline_id: 流水线ID
-        """
-        checkpoint_path = self._get_checkpoint_path(pipeline_id)
-        if checkpoint_path.exists():
-            checkpoint_path.unlink()
-            logger.debug(f"Checkpoint cleared: {checkpoint_path}")
-
-
 class PipelineOrchestrator:
     """流水线编排器."""
 
     def __init__(self):
         self._handlers: Dict[PipelineStage, PipelineStageHandler] = {}
-        self._checkpoint_manager = CheckpointManager(get_settings().checkpoint_dir)
+        self._log_manager = get_pipeline_log_manager()
         self._running_pipelines: Dict[str, asyncio.Task] = {}
+        # 正在运行中的流水线上下文
+        self._running_repos_contexts: Dict[str, PipelineContext] = {}
 
     def register_handler(
         self,
@@ -132,18 +67,18 @@ class PipelineOrchestrator:
 
     async def start(
         self,
+        repo_id: str,
         repo_path: str,
         repo_name: str,
         config: Optional[Dict[str, Any]] = None,
-        resume_from: Optional[PipelineStage] = None,
     ) -> str:
-        """启动流水线.
+        """启动新流水线.
 
         Args:
+            repo_id: 仓库ID
             repo_path: 仓库路径
             repo_name: 仓库名称
             config: 配置选项
-            resume_from: 从指定阶段恢复
 
         Returns:
             流水线ID
@@ -151,110 +86,193 @@ class PipelineOrchestrator:
         pipeline_id = str(uuid4())
         context = PipelineContext(
             pipeline_id=pipeline_id,
+            repo_id=repo_id,
             repo_path=repo_path,
             repo_name=repo_name,
             config=config or {},
         )
 
+        # 为新流水线准备日志目录（会归档旧日志）
+        self._log_manager.prepare_new_pipeline(repo_id)
+
+        # 确定起始阶段为新流水线的第一个阶段
+        start_stage = STAGE_ORDER[0]
+
+        self._running_repos_contexts[repo_id] = context
+
+        # 创建CSV记录（Pending状态）
+        repo_storage = get_repo_status_storage()
+        repo_storage.create_record(
+            repo_id=repo_id,
+            repo_name=repo_name,
+            repo_path=repo_path,
+            status=InitializationStatus.PENDING,
+        )
+
+        # 记录流水线启动
+        self._log_manager.log_pipeline_started(
+            repo_id=context.repo_id,
+            pipeline_id=context.pipeline_id,
+            repo_name=context.repo_name,
+            repo_path=context.repo_path
+        )
+
         # 创建任务并执行
         task = asyncio.create_task(
-            self._run_pipeline(context, resume_from),
+            self._run_pipeline(context, start_stage),
             name=f"pipeline-{pipeline_id}",
         )
-        self._running_pipelines[pipeline_id] = task
+        self._running_pipelines[repo_id] = task
 
-        logger.info(f"Pipeline started: {pipeline_id}")
         return pipeline_id
+
+    async def resume(
+        self,
+        repo_id: str,
+    ) -> str:
+        """恢复流水线.
+
+        Args:
+            repo_id: 仓库ID
+
+        Returns:
+            流水线ID
+
+        Raises:
+            ValueError: 如果找不到流水线上下文
+        """
+        # 加载已有上下文
+        context = await self._log_manager.load_context(repo_id)
+        if context is None:
+            raise ValueError(
+                f"Cannot resume repo {repo_id} pipeline: context not found"
+            )
+        self._running_repos_contexts[repo_id] = context
+
+        # 记录流水线恢复
+        self._log_manager.log_pipeline_resumed(
+            repo_id=context.repo_id,
+            pipeline_id=context.pipeline_id,
+            completed_stages=[
+                stage for stage, result in context.stages.items()
+                if result.status == PipelineStatus.COMPLETED
+            ],
+            resume_from=context.current_stage.value
+        )
+
+        # 创建任务并执行
+        task = asyncio.create_task(
+            self._run_pipeline(context, context.current_stage),
+            name=f"pipeline-{context.pipeline_id}",
+        )
+        self._running_pipelines[context.pipeline_id] = task
+
+        return context.pipeline_id
 
     async def _run_pipeline(
         self,
         context: PipelineContext,
-        resume_from: Optional[PipelineStage] = None,
+        start_stage: PipelineStage,
     ) -> None:
         """运行流水线.
 
         Args:
             context: 流水线上下文
-            resume_from: 从指定阶段恢复
+            start_stage: 起始阶段
         """
-        # 定义阶段顺序
-        stage_order = [
-            PipelineStage.REPO_TRAVERSAL,
-            PipelineStage.CODE_PARSING,
-            PipelineStage.SYMBOL_EXTRACTION,
-            PipelineStage.STRUCTURE_GRAPH_BUILD,
-            PipelineStage.DEPENDENCY_ANALYSIS,
-            PipelineStage.DEPENDENCY_GRAPH_BUILD,
-            PipelineStage.SEMANTIC_ANALYSIS,
-            PipelineStage.EMBEDDING_GENERATION,
-            PipelineStage.VECTOR_DB_STORE,
-            PipelineStage.MODULE_DETECTION,
-            PipelineStage.SEMANTIC_GRAPH_BUILD,
-        ]
-
-        # 创建或加载状态
-        if resume_from:
-            state = await self._checkpoint_manager.load(context.pipeline_id)
-            if state is None:
-                raise ValueError(
-                    f"Cannot resume pipeline {context.pipeline_id}: checkpoint not found"
-                )
-        else:
-            state = PipelineState(
-                pipeline_id=context.pipeline_id,
-                repo_path=context.repo_path,
-                repo_name=context.repo_name,
-                overall_status=PipelineStatus.RUNNING,
-            )
+        context.overall_status = PipelineStatus.RUNNING
 
         try:
             # 确定起始阶段索引
             start_idx = 0
-            if resume_from:
-                for i, stage in enumerate(stage_order):
-                    if stage == resume_from:
-                        start_idx = i
-                        break
+            for i, stage in enumerate(STAGE_ORDER):
+                if stage == start_stage:
+                    start_idx = i
+                    break
 
             # 执行各阶段
-            for stage in stage_order[start_idx:]:
+            for stage in STAGE_ORDER[start_idx:]:
+
+                context.current_stage = stage
+                # 保存上下文, 保证执行阶段失败可恢复
+                await self._log_manager.save_context(context)
+
+                # 记录阶段开始
+                self._log_manager.log_stage_started(
+                    repo_id=context.repo_id,
+                    pipeline_id=context.pipeline_id,
+                    stage=stage,
+                )
+
                 # 检查是否有处理器
                 if stage not in self._handlers:
-                    logger.warning(f"No handler for stage: {stage.value}, skipping")
-                    continue
-
-                # 执行阶段
-                result = await self._execute_stage(stage, context)
-                state.update_stage(stage, result)
-
-                # 保存断点
-                await self._checkpoint_manager.save(state)
-
-                # 如果阶段失败，停止流水线
-                if result.status == PipelineStatus.FAILED:
-                    state.overall_status = PipelineStatus.FAILED
-                    logger.error(
-                        f"Pipeline {context.pipeline_id} failed at stage {stage.value}"
+                    error_msg = f"No handler registered for stage: {stage.value}"
+                    context.overall_status = PipelineStatus.FAILED
+                    self._log_manager.log_stage_failed(
+                        repo_id=context.repo_id,
+                        pipeline_id=context.pipeline_id,
+                        stage=stage,
+                        duration=0.0,
+                        error=error_msg,
                     )
                     break
 
+                # 执行阶段
+                result = await self._execute_stage(stage, context)
+                context.update_stage(stage, result)
+
+                # 记录阶段结果
+                if result.status == PipelineStatus.COMPLETED:
+                    self._log_manager.log_stage_completed(
+                        repo_id=context.repo_id,
+                        pipeline_id=context.pipeline_id,
+                        stage=stage,
+                        duration=result.duration_seconds or 0.0,
+                    )
+                else:
+                    self._log_manager.log_stage_failed(
+                        repo_id=context.repo_id,
+                        pipeline_id=context.pipeline_id,
+                        stage=stage,
+                        duration=result.duration_seconds or 0.0,
+                        error=result.message,
+                    )
+
+                    # 如果阶段失败，停止流水线
+                    context.overall_status = PipelineStatus.FAILED
+                    break
+
             # 更新最终状态
-            if state.overall_status != PipelineStatus.FAILED:
-                state.overall_status = PipelineStatus.COMPLETED
-                state.current_stage = PipelineStage.COMPLETED
-                logger.info(f"Pipeline {context.pipeline_id} completed successfully")
+            if context.overall_status != PipelineStatus.FAILED:
+                context.overall_status = PipelineStatus.COMPLETED
+                context.current_stage = PipelineStage.COMPLETED
+
 
         except Exception as e:
-            state.overall_status = PipelineStatus.FAILED
-            logger.exception(f"Pipeline {context.pipeline_id} failed: {e}")
+            context.overall_status = PipelineStatus.FAILED
 
         finally:
-            # 保存最终状态
-            await self._checkpoint_manager.save(state)
+            # 更新CSV记录状态
+            repo_storage = get_repo_status_storage()
+            if context.overall_status == PipelineStatus.COMPLETED:
+                self._log_manager.log_pipeline_completed(
+                    repo_id=context.repo_id,
+                    pipeline_id=context.pipeline_id,
+                )
+                repo_storage.update_status(context.repo_id, InitializationStatus.COMPLETED)
+            else:
+                self._log_manager.log_pipeline_failed(
+                    repo_id=context.repo_id,
+                    pipeline_id=context.pipeline_id,
+                    failed_stage=context.current_stage,
+                )
+                repo_storage.update_status(context.repo_id, InitializationStatus.FAILED)
 
             # 从运行列表中移除
             if context.pipeline_id in self._running_pipelines:
                 del self._running_pipelines[context.pipeline_id]
+            if context.repo_id in self._running_repos_contexts:
+                del self._running_repos_contexts[context.repo_id]
 
     async def _execute_stage(
         self,
@@ -271,23 +289,16 @@ class PipelineOrchestrator:
             阶段执行结果
         """
         handler = self._handlers[stage]
-
         start_time = datetime.utcnow()
-        logger.info(f"Stage {stage.value} started")
 
         try:
             result = await handler.execute(context)
             result.start_time = start_time
             result.end_time = datetime.utcnow()
             result.stage = stage
-
-            logger.info(
-                f"Stage {stage.value} completed in {result.duration_seconds:.2f}s"
-            )
             return result
 
         except Exception as e:
-            logger.exception(f"Stage {stage.value} failed: {e}")
             return StageResult(
                 stage=stage,
                 status=PipelineStatus.FAILED,
@@ -296,71 +307,31 @@ class PipelineOrchestrator:
                 message=str(e),
             )
 
-    async def get_state(self, pipeline_id: str) -> Optional[PipelineState]:
-        """获取流水线状态.
+    def get_running_context(self, repo_id: str) -> Optional[PipelineContext]:
+        """通过repo_id获取正在运行的流水线上下文.
 
         Args:
-            pipeline_id: 流水线ID
+            repo_id: 仓库ID
 
         Returns:
-            流水线状态或None
+            流水线上下文或None
         """
-        return await self._checkpoint_manager.load(pipeline_id)
+        if repo_id in self._running_repos_contexts:
+            return self._running_repos_contexts[repo_id]
+        return None
 
-    async def cancel(self, pipeline_id: str) -> bool:
-        """取消流水线.
+    def get_static_context(self, repo_id: str) -> Optional[PipelineContext] :
+        """通过repo_id获取日志文件中的上下文.
 
         Args:
-            pipeline_id: 流水线ID
+            repo_id: 仓库ID
 
         Returns:
-            是否成功取消
+            流水线上下文或None
         """
-        if pipeline_id not in self._running_pipelines:
-            return False
+        return self._log_manager.load_context(repo_id)
 
-        task = self._running_pipelines[pipeline_id]
-        task.cancel()
 
-        try:
-            await task
-        except asyncio.CancelledError:
-            logger.info(f"Pipeline {pipeline_id} cancelled")
-
-        # 更新状态
-        state = await self._checkpoint_manager.load(pipeline_id)
-        if state:
-            state.overall_status = PipelineStatus.PAUSED
-            await self._checkpoint_manager.save(state)
-
-        del self._running_pipelines[pipeline_id]
-        return True
-
-    async def restart(
-        self,
-        repo_path: str,
-        repo_name: str,
-        clear_existing: bool = False,
-        config: Optional[Dict[str, Any]] = None,
-    ) -> str:
-        """重新启动流水线.
-
-        Args:
-            repo_path: 仓库路径
-            repo_name: 仓库名称
-            clear_existing: 是否清除已有数据
-            config: 配置选项
-
-        Returns:
-            新流水线ID
-        """
-        # 如果需要清除数据，执行清除逻辑
-        if clear_existing:
-            # TODO: 调用存储层清除数据
-            logger.info(f"Cleared existing data for repo: {repo_name}")
-
-        # 启动新流水线
-        return await self.start(repo_path, repo_name, config)
 
 
 # 全局编排器实例

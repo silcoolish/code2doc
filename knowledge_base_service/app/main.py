@@ -2,6 +2,7 @@
 
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -55,6 +56,14 @@ async def lifespan(app: FastAPI):
     """应用生命周期管理."""
     # 启动时
     logger.info("Starting up Knowledge Base Service...")
+    settings = get_settings()
+
+    # 创建日志根目录
+    try:
+        Path(settings.log_dir).mkdir(parents=True, exist_ok=True)
+        logger.info(f"Log directory created: {settings.log_dir}")
+    except Exception as e:
+        logger.error(f"Failed to create log directory: {e}")
 
     # 注册流水线阶段
     _register_pipeline_stages()

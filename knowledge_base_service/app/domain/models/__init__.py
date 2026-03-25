@@ -14,7 +14,6 @@ from .pipeline import (
     PipelineStage,
     PipelineStatus,
     StageResult,
-    PipelineState,
 )
 from .vector import (
     FileSummaryRecord,
@@ -40,7 +39,6 @@ __all__ = [
     "PipelineStage",
     "PipelineStatus",
     "StageResult",
-    "PipelineState",
     # Vector models
     "FileSummaryRecord",
     "ClassSummaryRecord",

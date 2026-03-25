@@ -15,8 +15,8 @@ from app.domain.models.pipeline import (
     PipelineStage,
     PipelineStatus,
     StageResult,
-    PipelineState,
 )
+from app.core.pipeline import PipelineContext
 
 
 class TestGraphModels:
@@ -101,10 +101,11 @@ class TestPipelineModels:
 
         assert result.duration_seconds is None
 
-    def test_pipeline_state_update_stage(self):
-        """测试更新阶段."""
-        state = PipelineState(
+    def test_pipeline_context_update_stage(self):
+        """测试 PipelineContext 更新阶段."""
+        ctx = PipelineContext(
             pipeline_id="test",
+            repo_id="test-repo-id",
             repo_path="/test",
             repo_name="test-repo",
         )
@@ -114,7 +115,33 @@ class TestPipelineModels:
             status=PipelineStatus.COMPLETED,
         )
 
-        state.update_stage(PipelineStage.REPO_TRAVERSAL, result)
+        ctx.update_stage(PipelineStage.REPO_TRAVERSAL, result)
 
-        assert state.current_stage == PipelineStage.REPO_TRAVERSAL
-        assert state.stages[PipelineStage.REPO_TRAVERSAL] == result
+        assert ctx.current_stage == PipelineStage.REPO_TRAVERSAL
+        assert ctx.stages[PipelineStage.REPO_TRAVERSAL] == result
+        assert ctx.progress > 0
+
+    def test_pipeline_context_progress(self):
+        """测试 PipelineContext 进度计算."""
+        ctx = PipelineContext(
+            pipeline_id="test",
+            repo_id="test-repo-id",
+            repo_path="/test",
+            repo_name="test-repo",
+        )
+
+        # 初始进度
+        assert ctx.progress == 0.0
+
+        # 完成第一个阶段
+        ctx.update_stage(
+            PipelineStage.REPO_TRAVERSAL,
+            StageResult(
+                stage=PipelineStage.REPO_TRAVERSAL,
+                status=PipelineStatus.COMPLETED,
+            ),
+        )
+
+        # 应该有进度 (1/11 ≈ 9.09%)
+        assert ctx.progress > 0
+        assert ctx.progress == pytest.approx(9.09, abs=0.01)

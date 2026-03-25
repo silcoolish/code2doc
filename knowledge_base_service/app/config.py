@@ -55,10 +55,13 @@ class Settings(BaseSettings):
     embedding_provider: str = Field(default="qwen")  # "openai" | "qwen"
 
     # Pipeline Settings
-    checkpoint_dir: str = Field(default="./checkpoints")
     batch_size: int = Field(default=100)
     max_retries: int = Field(default=3)
     retry_delay: float = Field(default=1.0)
+
+    # Logging Settings
+    log_dir: str = Field(default="./log")
+    log_level: str = Field(default="INFO")
 
     # Supported Languages
     supported_languages: List[str] = Field(

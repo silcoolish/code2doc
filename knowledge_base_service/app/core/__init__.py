@@ -1,10 +1,11 @@
 """核心模块."""
 
+from app.domain.models.pipeline import STAGE_ORDER
+
 from .pipeline import (
     PipelineOrchestrator,
     PipelineContext,
     PipelineStageHandler,
-    CheckpointManager,
     get_orchestrator,
 )
 
@@ -12,6 +13,6 @@ __all__ = [
     "PipelineOrchestrator",
     "PipelineContext",
     "PipelineStageHandler",
-    "CheckpointManager",
+    "STAGE_ORDER",
     "get_orchestrator",
 ]
