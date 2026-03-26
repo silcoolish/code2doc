@@ -1,19 +1,24 @@
 """结构图构建阶段处理器.
 
-该阶段合并了代码解析和结构图构建:
-1. 遍历仓库文件
-2. 解析代码文件提取类和方法
-3. 将解析结果立即存入Neo4j图数据库
-4. 在上下文中只保存节点ID信息
+该阶段合并了仓库遍历、代码解析和结构图构建:
+1. 遍历仓库文件系统
+2. 直接创建 Repository、Directory、File 等结构节点并保存到 Neo4j
+3. 解析代码文件提取类和方法
+4. 创建 Class、Method 节点并保存到 Neo4j
+5. 在上下文中只保存节点ID信息
 
 后续阶段需要具体信息时，应通过节点ID从图数据库中查询。
 """
 
 import asyncio
+import fnmatch
 import logging
 import os
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Callable
+
+from gitignore_parser import parse_gitignore
 
 from app.config import get_settings
 from app.core.pipeline import PipelineContext, PipelineStageHandler
@@ -30,11 +35,14 @@ logger = logging.getLogger(__name__)
 class StructureGraphBuildStage(PipelineStageHandler):
     """结构图构建阶段处理器.
 
-    将代码解析和图构建合并为一个阶段，解析后立即存储到Neo4j，
+    将仓库遍历、代码解析和图构建合并为一个阶段：
+    1. 遍历仓库文件系统
+    2. 直接创建结构节点并存储到Neo4j
+    3. 解析代码文件创建 Class/Method 节点
     上下文中只保留节点ID引用。
 
     Input (context.data):
-        - traversal_result: TraversalResult - 包含 repository, directories, files
+        - 无需前置数据，从 context.repo_path 和 context.repo_name 读取
 
     Output (context.data):
         - node_ids: Dict[str, List[str]] - 各类节点的ID列表
@@ -63,41 +71,24 @@ class StructureGraphBuildStage(PipelineStageHandler):
         try:
             self._neo4j = get_neo4j_client()
 
-            # 获取遍历结果
-            traversal_result = context.data.get("traversal_result")
-            if not traversal_result:
-                return StageResult(
-                    stage=self.stage,
-                    status=PipelineStatus.FAILED,
-                    message="No traversal_result found in context",
-                )
-
-            repository: Repository = traversal_result.repository
-            directories: List[Directory] = traversal_result.directories
-            files: List[File] = traversal_result.files
+            # 1. 遍历仓库并直接创建结构节点
+            repository, directories, files = await self._traverse_and_create_structure(
+                context.repo_path, context.repo_name
+            )
 
             # 节点ID记录（只存ID，不存完整数据）
             node_ids = {
-                "repository_id": "",
-                "directory_ids": [],
+                "repository_id": repository.id,
+                "directory_ids": [d.id for d in directories],
                 "file_ids": [],
                 "class_ids": [],
                 "method_ids": [],
             }
 
-            # 1. 创建 Repository 节点
-            await self._create_repository(repository)
-            node_ids["repository_id"] = repository.id
             logger.info(f"Created Repository node: {repository.name}")
+            logger.info(f"Created {len(directories)} Directory nodes")
 
-            # 2. 创建 Directory 节点和关系
-            for directory in directories:
-                await self._create_directory(directory, repository.id)
-                node_ids["directory_ids"].append(directory.id)
-
-            logger.info(f"Created {len(node_ids['directory_ids'])} Directory nodes")
-
-            # 3. 解析代码文件并创建 File/Class/Method 节点
+            # 2. 解析代码文件并创建 File/Class/Method 节点
             file_node_ids, class_node_ids, method_node_ids = await self._process_code_files(
                 files, directories, repository.id, context.repo_name, context.repo_path
             )
@@ -105,7 +96,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
             node_ids["class_ids"] = class_node_ids
             node_ids["method_ids"] = method_node_ids
 
-            # 4. 保存节点ID到上下文（而非完整数据）
+            # 3. 保存节点ID到上下文（而非完整数据）
             context.data["node_ids"] = node_ids
 
             # 统计信息
@@ -120,9 +111,10 @@ class StructureGraphBuildStage(PipelineStageHandler):
             return StageResult(
                 stage=self.stage,
                 status=PipelineStatus.COMPLETED,
-                message=f"Structure graph built: {len(node_ids['file_ids'])} files, "
-                        f"{len(node_ids['class_ids'])} classes, "
-                        f"{len(node_ids['method_ids'])} methods",
+                message=f"Structure graph built: {len(directories)} directories, "
+                        f"{len(file_node_ids)} files, "
+                        f"{len(class_node_ids)} classes, "
+                        f"{len(method_node_ids)} methods",
                 metadata=metadata,
             )
 
@@ -134,9 +126,192 @@ class StructureGraphBuildStage(PipelineStageHandler):
                 message=str(e),
             )
 
+    async def _traverse_and_create_structure(
+        self, repo_path: str, repo_name: str
+    ) -> tuple[Repository, List[Directory], List[File]]:
+        """遍历仓库并直接创建结构节点.
+
+        Args:
+            repo_path: 仓库路径
+            repo_name: 仓库名称
+
+        Returns:
+            (repository, directories, code_files)
+        """
+        repo_root = Path(repo_path).resolve()
+        if not repo_root.exists():
+            raise FileNotFoundError(f"Repository path not found: {repo_path}")
+
+        # 创建 Repository 节点
+        repository = Repository(
+            id=f"repo_{repo_name}",
+            name=repo_name,
+            type="Repository",
+            path=str(repo_root),
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow(),
+        )
+        await self._create_repository(repository)
+
+        # 加载 .gitignore
+        gitignore_path = repo_root / ".gitignore"
+        matches_gitignore: Optional[Callable] = None
+        if gitignore_path.exists():
+            try:
+                matches_gitignore = parse_gitignore(gitignore_path)
+            except Exception as e:
+                logger.warning(f"Failed to parse .gitignore: {e}")
+
+        directories: List[Directory] = []
+        code_files: List[File] = []
+
+        # 遍历目录
+        for path in repo_root.rglob("*"):
+            try:
+                relative_path = path.relative_to(repo_root)
+                str_path = str(relative_path).replace("\\", "/")
+
+                # 检查是否应该忽略
+                if self._should_ignore(str_path, path, matches_gitignore):
+                    continue
+
+                if path.is_dir():
+                    # 创建 Directory 节点
+                    directory = Directory(
+                        id=f"dir_{repo_name}_{str_path}",
+                        name=path.name,
+                        type="Directory",
+                        path=str_path,
+                    )
+                    await self._create_directory(directory, repository.id)
+                    directories.append(directory)
+
+                elif path.is_file():
+                    # 确定文件类型
+                    file_type = self._determine_file_type(path)
+                    suffix = path.suffix
+
+                    # 创建 File 节点
+                    file_node = File(
+                        id=f"file_{repo_name}_{str_path}",
+                        name=path.name,
+                        type="File",
+                        path=str_path,
+                        file_type=file_type,
+                        suffix=suffix,
+                    )
+                    # 只收集代码文件用于后续解析
+                    if file_type == "code":
+                        code_files.append(file_node)
+
+            except Exception as e:
+                logger.warning(f"Error processing path {path}: {e}")
+                continue
+
+        return repository, directories, code_files
+
+    def _should_ignore(
+        self,
+        str_path: str,
+        path: Path,
+        matches_gitignore: Optional[Callable],
+    ) -> bool:
+        """检查路径是否应该被忽略.
+
+        Args:
+            str_path: 相对路径字符串
+            path: Path 对象
+            matches_gitignore: gitignore 匹配函数
+
+        Returns:
+            是否应该忽略
+        """
+        # 检查默认排除模式
+        for pattern in self.settings.default_exclude_patterns:
+            if self._match_pattern(str_path, pattern):
+                return True
+
+        # 检查 .gitignore
+        if matches_gitignore and matches_gitignore(path):
+            return True
+
+        # 检查用户配置的排除模式
+        config_patterns = self.settings.default_exclude_patterns
+        for pattern in config_patterns:
+            if self._match_pattern(str_path, pattern):
+                return True
+
+        return False
+
+    def _match_pattern(self, path: str, pattern: str) -> bool:
+        """匹配路径模式.
+
+        Args:
+            path: 文件路径
+            pattern: 匹配模式
+
+        Returns:
+            是否匹配
+        """
+        # 处理 **/ 前缀
+        if pattern.startswith("**/"):
+            suffix = pattern[3:]
+            return fnmatch.fnmatch(path, suffix) or any(
+                fnmatch.fnmatch(str(p), suffix)
+                for p in Path(path).parents
+            )
+
+        # 处理 /** 后缀
+        if pattern.endswith("/**"):
+            prefix = pattern[:-3]
+            return path.startswith(prefix)
+
+        # 处理通配符
+        return fnmatch.fnmatch(path, pattern) or fnmatch.fnmatch(
+            Path(path).name, pattern
+        )
+
+    def _determine_file_type(self, path: Path) -> str:
+        """确定文件类型.
+
+        Args:
+            path: 文件路径
+
+        Returns:
+            文件类型: code / doc / config
+        """
+        suffix = path.suffix.lower()
+
+        # 代码文件
+        code_extensions = {
+            ".py", ".java", ".js", ".ts", ".go", ".rs", ".cpp", ".c", ".h",
+            ".hpp", ".cs", ".rb", ".php", ".swift", ".kt", ".scala",
+            ".r", ".m", ".mm", ".groovy", ".clj", ".erl", ".ex", ".exs",
+        }
+
+        # 文档文件
+        doc_extensions = {
+            ".md", ".rst", ".txt", ".adoc", ".org",
+        }
+
+        # 配置文件
+        config_extensions = {
+            ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg",
+            ".conf", ".properties", ".xml", ".env", ".env.example",
+        }
+
+        if suffix in code_extensions:
+            return "code"
+        elif suffix in doc_extensions:
+            return "doc"
+        elif suffix in config_extensions:
+            return "config"
+        else:
+            return "other"
+
     async def _process_code_files(
         self,
-        files: List[File],
+        code_files: List[File],
         directories: List[Directory],
         repo_id: str,
         repo_name: str,
@@ -145,7 +320,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
         """处理代码文件：解析并创建节点.
 
         Args:
-            files: 文件列表
+            code_files: 代码文件列表（已过滤的代码类型文件）
             directories: 目录列表
             repo_id: 仓库ID
             repo_name: 仓库名称
@@ -154,10 +329,10 @@ class StructureGraphBuildStage(PipelineStageHandler):
         Returns:
             (file_ids, class_ids, method_ids)
         """
-        # 过滤出代码文件
+        # 过滤出支持语言的代码文件
         code_files = [
-            f for f in files
-            if f.file_type == "code" and self._is_supported_language(f.suffix)
+            f for f in code_files
+            if self._is_supported_language(f.suffix)
         ]
 
         total_files = len(code_files)

@@ -14,7 +14,6 @@ from app.core.pipeline import get_orchestrator
 from app.domain.models.pipeline import PipelineStage
 
 # 导入所有阶段处理器
-from app.core.stages.repo_traversal import RepoTraversalStage
 from app.core.stages.structure_graph_build import StructureGraphBuildStage
 from app.core.stages.dependency_graph_build import DependencyGraphBuildStage
 from app.core.stages.semantic_analysis import SemanticAnalysisStage
@@ -41,8 +40,7 @@ def _register_pipeline_stages():
     """注册所有流水线阶段处理器."""
     orchestrator = get_orchestrator()
 
-    orchestrator.register_handler(PipelineStage.REPO_TRAVERSAL, RepoTraversalStage())
-    # CODE_PARSING 已合并到 STRUCTURE_GRAPH_BUILD
+    # REPO_TRAVERSAL 已合并到 STRUCTURE_GRAPH_BUILD
     orchestrator.register_handler(PipelineStage.STRUCTURE_GRAPH_BUILD, StructureGraphBuildStage())
     orchestrator.register_handler(PipelineStage.DEPENDENCY_GRAPH_BUILD, DependencyGraphBuildStage())
     orchestrator.register_handler(PipelineStage.SEMANTIC_ANALYSIS, SemanticAnalysisStage())

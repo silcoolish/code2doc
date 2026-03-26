@@ -194,12 +194,11 @@ class PipelineStage(Enum):
 
 # 流水线阶段执行顺序（全局常量）
 STAGE_ORDER: List[PipelineStage] = [
-    PipelineStage.REPO_TRAVERSAL,
-    PipelineStage.STRUCTURE_GRAPH_BUILD,
+    PipelineStage.STRUCTURE_GRAPH_BUILD,  # 合并了 repo_traversal
     PipelineStage.DEPENDENCY_GRAPH_BUILD,
     PipelineStage.SEMANTIC_ANALYSIS,
     PipelineStage.MODULE_DETECTION,
-    PipelineStage.VECTOR_DB_STORE,
+    PipelineStage.VECTOR_DB_STORE,  # 合并了 embedding_generation
 ]
 
 
