@@ -482,9 +482,9 @@ class LLMService:
     ) -> str:
         """构建摘要生成提示词."""
         parts = [
-            f"Generate a concise summary of the following {language} {node_type}.",
+            f"请为以下 {language} {node_type} 生成中文摘要。",
             "",
-            "Code:",
+            "代码:",
             "```",
             code[:3000],  # 限制代码长度
             "```",
@@ -493,25 +493,25 @@ class LLMService:
         if docstring:
             parts.extend([
                 "",
-                "Documentation:",
+                "文档注释:",
                 docstring,
             ])
 
         if callee_summaries:
             parts.extend([
                 "",
-                "This code calls the following functions:",
+                "此代码调用了以下函数（及其摘要）:",
             ])
             for i, summary in enumerate(callee_summaries[:5], 1):  # 限制数量
                 parts.append(f"{i}. {summary}")
 
         parts.extend([
             "",
-            "Provide a 1-2 sentence summary describing:",
-            "- What this code does",
-            "- Key functionality or purpose",
+            "请用 1-2 句话的中文描述以下内容:",
+            "- 这段代码的功能",
+            "- 主要用途或目的",
             "",
-            "Summary:",
+            "摘要（中文）:",
         ])
 
         return "\n".join(parts)

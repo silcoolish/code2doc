@@ -197,6 +197,7 @@ STAGE_ORDER: List[PipelineStage] = [
     PipelineStage.REPO_TRAVERSAL,
     PipelineStage.STRUCTURE_GRAPH_BUILD,
     PipelineStage.DEPENDENCY_GRAPH_BUILD,
+    PipelineStage.SEMANTIC_ANALYSIS,
     PipelineStage.EMBEDDING_GENERATION,
     PipelineStage.VECTOR_DB_STORE,
     PipelineStage.MODULE_DETECTION,
