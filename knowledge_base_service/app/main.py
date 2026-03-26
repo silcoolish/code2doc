@@ -21,10 +21,18 @@ from app.core.stages.semantic_analysis import SemanticAnalysisStage
 from app.core.stages.vector_db_store import VectorDBStoreStage
 from app.core.stages.module_detection import ModuleDetectionStage
 
+# 确保日志目录存在
+log_dir = Path("./log")
+log_dir.mkdir(parents=True, exist_ok=True)
+
 # 配置日志
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.FileHandler(log_dir / "server.log", encoding="utf-8"),
+        logging.StreamHandler(),
+    ],
 )
 logger = logging.getLogger(__name__)
 
