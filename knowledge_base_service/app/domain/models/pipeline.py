@@ -180,7 +180,7 @@ class PipelineStage(Enum):
     """流水线阶段枚举."""
 
     REPO_TRAVERSAL = "repo_traversal"
-    CODE_PARSING = "code_parsing"
+    # CODE_PARSING 阶段已与 STRUCTURE_GRAPH_BUILD 合并
     STRUCTURE_GRAPH_BUILD = "structure_graph_build"
     DEPENDENCY_ANALYSIS = "dependency_analysis"
     DEPENDENCY_GRAPH_BUILD = "dependency_graph_build"
@@ -195,13 +195,12 @@ class PipelineStage(Enum):
 
 
 # 流水线阶段执行顺序（全局常量）
+# 注意：CODE_PARSING 已合并到 STRUCTURE_GRAPH_BUILD
+# DEPENDENCY_ANALYSIS 和 SEMANTIC_ANALYSIS 暂时禁用，后续从Neo4j读取数据
 STAGE_ORDER: List[PipelineStage] = [
     PipelineStage.REPO_TRAVERSAL,
-    PipelineStage.CODE_PARSING,
-    PipelineStage.STRUCTURE_GRAPH_BUILD,
-    PipelineStage.DEPENDENCY_ANALYSIS,
+    PipelineStage.STRUCTURE_GRAPH_BUILD,  # 包含代码解析和图构建
     PipelineStage.DEPENDENCY_GRAPH_BUILD,
-    PipelineStage.SEMANTIC_ANALYSIS,
     PipelineStage.EMBEDDING_GENERATION,
     PipelineStage.VECTOR_DB_STORE,
     PipelineStage.MODULE_DETECTION,

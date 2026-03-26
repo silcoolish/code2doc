@@ -15,11 +15,8 @@ from app.domain.models.pipeline import PipelineStage
 
 # 导入所有阶段处理器
 from app.core.stages.repo_traversal import RepoTraversalStage
-from app.core.stages.code_parsing import CodeParsingStage
 from app.core.stages.structure_graph_build import StructureGraphBuildStage
-from app.core.stages.dependency_analysis import DependencyAnalysisStage
 from app.core.stages.dependency_graph_build import DependencyGraphBuildStage
-from app.core.stages.semantic_analysis import SemanticAnalysisStage
 from app.core.stages.embedding_generation import EmbeddingGenerationStage
 from app.core.stages.vector_db_store import VectorDBStoreStage
 from app.core.stages.module_detection import ModuleDetectionStage
@@ -38,11 +35,10 @@ def _register_pipeline_stages():
     orchestrator = get_orchestrator()
 
     orchestrator.register_handler(PipelineStage.REPO_TRAVERSAL, RepoTraversalStage())
-    orchestrator.register_handler(PipelineStage.CODE_PARSING, CodeParsingStage())
+    # CODE_PARSING 已合并到 STRUCTURE_GRAPH_BUILD
     orchestrator.register_handler(PipelineStage.STRUCTURE_GRAPH_BUILD, StructureGraphBuildStage())
-    orchestrator.register_handler(PipelineStage.DEPENDENCY_ANALYSIS, DependencyAnalysisStage())
+    # DEPENDENCY_ANALYSIS 和 SEMANTIC_ANALYSIS 暂时禁用，后续从Neo4j读取数据
     orchestrator.register_handler(PipelineStage.DEPENDENCY_GRAPH_BUILD, DependencyGraphBuildStage())
-    orchestrator.register_handler(PipelineStage.SEMANTIC_ANALYSIS, SemanticAnalysisStage())
     orchestrator.register_handler(PipelineStage.EMBEDDING_GENERATION, EmbeddingGenerationStage())
     orchestrator.register_handler(PipelineStage.VECTOR_DB_STORE, VectorDBStoreStage())
     orchestrator.register_handler(PipelineStage.MODULE_DETECTION, ModuleDetectionStage())

@@ -1,14 +1,72 @@
 """依赖图构建阶段处理器."""
 
 import logging
-from typing import List
+from dataclasses import dataclass, field
+from typing import Dict, List
 
 from app.core.pipeline import PipelineContext, PipelineStageHandler
 from app.domain.models.pipeline import PipelineStage, PipelineStatus, StageResult
 from app.infrastructure.db import GraphDatabaseClient, get_neo4j_client
-from app.core.stages.dependency_analysis import DependencyResult
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class DependencyRelation:
+    """依赖关系."""
+
+    source_id: str
+    target_id: str
+    rel_type: str  # CALL, INHERIT, IMPLEMENT, USE
+    metadata: Dict = field(default_factory=dict)
+
+    def to_dict(self) -> Dict:
+        """转换为字典."""
+        return {
+            "source_id": self.source_id,
+            "target_id": self.target_id,
+            "rel_type": self.rel_type,
+            "metadata": self.metadata,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict) -> "DependencyRelation":
+        """从字典创建实例."""
+        return cls(
+            source_id=data["source_id"],
+            target_id=data["target_id"],
+            rel_type=data["rel_type"],
+            metadata=data.get("metadata", {}),
+        )
+
+
+@dataclass
+class DependencyResult:
+    """依赖分析结果."""
+
+    method_calls: List[DependencyRelation] = field(default_factory=list)
+    class_inherits: List[DependencyRelation] = field(default_factory=list)
+    class_implements: List[DependencyRelation] = field(default_factory=list)
+    file_uses: List[DependencyRelation] = field(default_factory=list)
+
+    def to_dict(self) -> Dict:
+        """转换为字典."""
+        return {
+            "method_calls": [r.to_dict() for r in self.method_calls],
+            "class_inherits": [r.to_dict() for r in self.class_inherits],
+            "class_implements": [r.to_dict() for r in self.class_implements],
+            "file_uses": [r.to_dict() for r in self.file_uses],
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict) -> "DependencyResult":
+        """从字典创建实例."""
+        return cls(
+            method_calls=[DependencyRelation.from_dict(r) for r in data.get("method_calls", [])],
+            class_inherits=[DependencyRelation.from_dict(r) for r in data.get("class_inherits", [])],
+            class_implements=[DependencyRelation.from_dict(r) for r in data.get("class_implements", [])],
+            file_uses=[DependencyRelation.from_dict(r) for r in data.get("file_uses", [])],
+        )
 
 
 class DependencyGraphBuildStage(PipelineStageHandler):
