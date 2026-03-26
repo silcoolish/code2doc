@@ -33,13 +33,13 @@ class SemanticAnalysisStage(PipelineStageHandler):
           {methods_summarized: int, classes_summarized: int, files_summarized: int}
 
     Side Effects:
-        - 在 Neo4j 中更新 Method/Class/File 节点的 summary 属性
+        - 在 图数据库 中更新 Method/Class/File 节点的 summary 属性
     """
 
     stage = PipelineStage.SEMANTIC_ANALYSIS
 
     def __init__(self):
-        self._neo4j: Optional[GraphDatabaseClient] = None
+        self.graph_db: Optional[GraphDatabaseClient] = None
         self._llm_service = get_llm_service()
 
     async def execute(self, context: PipelineContext) -> StageResult:
@@ -52,7 +52,7 @@ class SemanticAnalysisStage(PipelineStageHandler):
             阶段执行结果
         """
         try:
-            self._neo4j = get_graph_db_client()
+            self.graph_db = get_graph_db_client()
             repo_name = context.repo_name
 
             # 1. 生成 Method 节点的 summary
@@ -163,7 +163,7 @@ class SemanticAnalysisStage(PipelineStageHandler):
                m.language as language, m.name as name, m.summary as summary,
                collect(DISTINCT callee.id) as callee_ids
         """
-        return await self._neo4j.execute_query(query, {"repo_name": repo_name})
+        return await self.graph_db.execute_query(query, {"repo_name": repo_name})
 
     def _build_call_graph(
         self, methods: List[Dict]
@@ -320,7 +320,7 @@ class SemanticAnalysisStage(PipelineStageHandler):
                c.language as language, c.name as name, c.summary as summary,
                collect(DISTINCT m.summary) as method_summaries
         """
-        return await self._neo4j.execute_query(query, {"repo_name": repo_name})
+        return await self.graph_db.execute_query(query, {"repo_name": repo_name})
 
     async def _generate_class_summary(self, class_node: Dict) -> str:
         """为单个类生成 summary.
@@ -404,7 +404,7 @@ class SemanticAnalysisStage(PipelineStageHandler):
                collect(DISTINCT c.summary) as class_summaries,
                collect(DISTINCT m.summary) as method_summaries
         """
-        return await self._neo4j.execute_query(query, {"repo_name": repo_name})
+        return await self.graph_db.execute_query(query, {"repo_name": repo_name})
 
     async def _generate_file_summary(self, file_node: Dict) -> str:
         """为单个文件生成 summary.
@@ -473,7 +473,7 @@ class SemanticAnalysisStage(PipelineStageHandler):
         SET n.summary = $summary
         """
         try:
-            await self._neo4j.execute_query(
+            await self.graph_db.execute_query(
                 query, {"node_id": node_id, "summary": summary}
             )
         except Exception as e:

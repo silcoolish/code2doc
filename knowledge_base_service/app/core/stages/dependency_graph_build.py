@@ -37,7 +37,7 @@ class DependencyGraphBuildStage(PipelineStageHandler):
     stage = PipelineStage.DEPENDENCY_GRAPH_BUILD
 
     def __init__(self):
-        self._neo4j: Optional[GraphDatabaseClient] = None
+        self.graph_db: Optional[GraphDatabaseClient] = None
 
     async def execute(self, context: PipelineContext) -> StageResult:
         """执行依赖图构建.
@@ -49,7 +49,7 @@ class DependencyGraphBuildStage(PipelineStageHandler):
             阶段执行结果
         """
         try:
-            self._neo4j = get_graph_db_client()
+            self.graph_db = get_graph_db_client()
             repo_name = context.repo_name
 
             # 1. 构建文件依赖（USE 关系）
@@ -205,7 +205,7 @@ class DependencyGraphBuildStage(PipelineStageHandler):
         WHERE f.repo = $repo_name AND f.fileType = 'code'
         RETURN f.id as id, f.path as path, f.code as code, f.suffix as suffix
         """
-        result = await self._neo4j.execute_query(query, {"repo_name": repo_name})
+        result = await self.graph_db.execute_query(query, {"repo_name": repo_name})
 
         # 添加 language 字段
         for file_node in result:
@@ -243,7 +243,7 @@ class DependencyGraphBuildStage(PipelineStageHandler):
         RETURN m.id as id, m.name as name, m.code as code,
                m.language as language, m.filePath as file_path
         """
-        return await self._neo4j.execute_query(query, {"repo_name": repo_name})
+        return await self.graph_db.execute_query(query, {"repo_name": repo_name})
 
     def _build_file_path_index(self, files: List[Dict]) -> Dict[str, str]:
         """构建文件路径索引.
@@ -445,7 +445,7 @@ class DependencyGraphBuildStage(PipelineStageHandler):
             是否成功创建
         """
         try:
-            return await self._neo4j.create_relationship(
+            return await self.graph_db.create_relationship(
                 from_label="File",
                 from_key="id",
                 from_value=from_id,
@@ -469,7 +469,7 @@ class DependencyGraphBuildStage(PipelineStageHandler):
             是否成功创建
         """
         try:
-            return await self._neo4j.create_relationship(
+            return await self.graph_db.create_relationship(
                 from_label="Method",
                 from_key="id",
                 from_value=from_id,

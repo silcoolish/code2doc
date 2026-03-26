@@ -56,7 +56,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
 
     def __init__(self):
         self.settings = get_settings()
-        self._neo4j: Optional[GraphDatabaseClient] = None
+        self.graph_db: Optional[GraphDatabaseClient] = None
 
     async def execute(self, context: PipelineContext) -> StageResult:
         """执行结构图构建.
@@ -68,7 +68,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
             阶段执行结果
         """
         try:
-            self._neo4j = get_graph_db_client()
+            self.graph_db = get_graph_db_client()
 
             # 1. 遍历仓库并直接创建结构节点
             repository, directories, files = await self._traverse_and_create_structure(
@@ -459,7 +459,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
         properties["repo"] = repository.name
         properties = self._filter_properties(properties)
 
-        await self._neo4j.merge_node(
+        await self.graph_db.merge_node(
             label="Repository",
             key_property="id",
             key_value=repository.id,
@@ -472,7 +472,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
         properties["repo"] = repo_id.replace("repo_", "")
         properties = self._filter_properties(properties)
 
-        await self._neo4j.merge_node(
+        await self.graph_db.merge_node(
             label="Directory",
             key_property="id",
             key_value=directory.id,
@@ -482,7 +482,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
         # 创建 CONTAIN 关系
         parent_id = self._get_parent_id(directory.path, repo_id)
         if parent_id:
-            await self._neo4j.create_relationship(
+            await self.graph_db.create_relationship(
                 from_label="Directory" if "/" in directory.path else "Repository",
                 from_key="id",
                 from_value=parent_id,
@@ -498,7 +498,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
         properties["repo"] = parent_id.replace("repo_", "").split("_dir_")[0]
         properties = self._filter_properties(properties)
 
-        await self._neo4j.merge_node(
+        await self.graph_db.merge_node(
             label="File",
             key_property="id",
             key_value=file_node.id,
@@ -507,7 +507,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
 
         # 创建 CONTAIN 关系
         label = "Directory" if "dir_" in parent_id else "Repository"
-        await self._neo4j.create_relationship(
+        await self.graph_db.create_relationship(
             from_label=label,
             from_key="id",
             from_value=parent_id,
@@ -548,7 +548,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
         properties["repo"] = repo_name
         properties = self._filter_properties(properties)
 
-        await self._neo4j.merge_node(
+        await self.graph_db.merge_node(
             label="Class",
             key_property="id",
             key_value=class_node_id,
@@ -556,7 +556,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
         )
 
         # 创建 CONTAIN 关系
-        await self._neo4j.create_relationship(
+        await self.graph_db.create_relationship(
             from_label="File",
             from_key="id",
             from_value=file_id,
@@ -604,7 +604,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
         properties["repo"] = repo_name
         properties = self._filter_properties(properties)
 
-        await self._neo4j.merge_node(
+        await self.graph_db.merge_node(
             label="Method",
             key_property="id",
             key_value=method_node_id,
@@ -615,7 +615,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
         parent_label = "Class" if "class_" in parent_id else "File"
 
         # 创建 CONTAIN 关系
-        await self._neo4j.create_relationship(
+        await self.graph_db.create_relationship(
             from_label=parent_label,
             from_key="id",
             from_value=parent_id,
