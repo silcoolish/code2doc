@@ -22,6 +22,7 @@ from app.domain.models.vector import (
     ClassCodeRecord,
     MethodCodeRecord,
 )
+from app.infrastructure.db.base_client import VectorDatabaseClient
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +38,7 @@ COLLECTIONS = {
 }
 
 
-class MilvusClient:
+class MilvusClient(VectorDatabaseClient):
     """Milvus 异步客户端封装."""
 
     _instance: Optional["MilvusClient"] = None

@@ -4,7 +4,7 @@ import json
 import logging
 from typing import Dict, List, Optional, Any
 
-from app.infrastructure.db import Neo4jClient, MilvusClient
+from app.infrastructure.db import GraphDatabaseClient, VectorDatabaseClient
 from app.domain.llm.client import get_llm_service
 
 logger = logging.getLogger(__name__)
@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 class KnowledgeBaseTools:
     """知识底座工具类."""
 
-    def __init__(self, neo4j: Neo4jClient, milvus: MilvusClient):
+    def __init__(self, neo4j: GraphDatabaseClient, milvus: VectorDatabaseClient):
         self.neo4j = neo4j
         self.milvus = milvus
         self.llm_service = get_llm_service()

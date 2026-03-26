@@ -7,11 +7,12 @@ from neo4j import AsyncGraphDatabase, AsyncDriver
 from neo4j.exceptions import Neo4jError
 
 from app.config import get_settings
+from app.infrastructure.db.base_client import GraphDatabaseClient
 
 logger = logging.getLogger(__name__)
 
 
-class Neo4jClient:
+class Neo4jClient(GraphDatabaseClient):
     """Neo4j 异步客户端封装."""
 
     _instance: Optional["Neo4jClient"] = None
