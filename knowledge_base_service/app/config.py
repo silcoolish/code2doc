@@ -28,6 +28,17 @@ class Settings(BaseSettings):
     neo4j_user: str = Field(default="neo4j")
     neo4j_password: str = Field(default="password")
 
+    # Graph Database Settings
+    graph_db_type: str = Field(default="neo4j")  # "neo4j" | "nebula" | "janusgraph"
+
+    # Neo4j Settings
+    neo4j_uri: str = Field(default="bolt://localhost:7687")
+    neo4j_user: str = Field(default="neo4j")
+    neo4j_password: str = Field(default="password")
+
+    # Vector Database Settings
+    vector_db_type: str = Field(default="milvus")  # "milvus" | "pinecone" | "weaviate" | "qdrant"
+
     # Milvus Settings
     milvus_host: str = Field(default="localhost")
     milvus_port: int = Field(default=19530)

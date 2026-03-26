@@ -26,8 +26,7 @@ from app.domain.models.graph import Class, Directory, File, Method, Repository
 from app.domain.models.pipeline import PipelineStage, PipelineStatus, StageResult
 from app.domain.parser.code_parser import ClassSymbol, MethodSymbol
 from app.domain.parser.tree_sitter_parser import get_parser_for_file
-from app.infrastructure.db.base_client import GraphDatabaseClient
-from app.infrastructure.db.neo4j_client import get_neo4j_client
+from app.infrastructure.db import GraphDatabaseClient, get_graph_db_client
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +68,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
             阶段执行结果
         """
         try:
-            self._neo4j = get_neo4j_client()
+            self._neo4j = get_graph_db_client()
 
             # 1. 遍历仓库并直接创建结构节点
             repository, directories, files = await self._traverse_and_create_structure(

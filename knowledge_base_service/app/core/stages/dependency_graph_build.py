@@ -12,8 +12,7 @@ from pathlib import Path
 
 from app.core.pipeline import PipelineContext, PipelineStageHandler
 from app.domain.models.pipeline import PipelineStage, PipelineStatus, StageResult
-from app.infrastructure.db.base_client import GraphDatabaseClient
-from app.infrastructure.db.neo4j_client import get_neo4j_client
+from app.infrastructure.db import GraphDatabaseClient, get_graph_db_client
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +49,7 @@ class DependencyGraphBuildStage(PipelineStageHandler):
             阶段执行结果
         """
         try:
-            self._neo4j = get_neo4j_client()
+            self._neo4j = get_graph_db_client()
             repo_name = context.repo_name
 
             # 1. 构建文件依赖（USE 关系）

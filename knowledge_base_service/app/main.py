@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
-from app.infrastructure.db import get_neo4j_client, get_milvus_client
+from app.infrastructure.db import get_graph_db_client, get_vector_db_client
 from app.api.routes import initialization, progress
 from app.core.pipeline import get_orchestrator
 from app.domain.models.pipeline import PipelineStage
@@ -70,18 +70,18 @@ async def lifespan(app: FastAPI):
 
     # 连接数据库
     try:
-        neo4j_client = get_neo4j_client()
+        neo4j_client = get_graph_db_client()
         await neo4j_client.connect()
-        logger.info("Neo4j connected")
+        logger.info("Graph database connected")
     except Exception as e:
-        logger.error(f"Failed to connect to Neo4j: {e}")
+        logger.error(f"Failed to connect to graph database: {e}")
 
     try:
-        milvus_client = get_milvus_client()
+        milvus_client = get_vector_db_client()
         await milvus_client.connect()
-        logger.info("Milvus connected")
+        logger.info("Vector database connected")
     except Exception as e:
-        logger.error(f"Failed to connect to Milvus: {e}")
+        logger.error(f"Failed to connect to vector database: {e}")
 
     yield
 
@@ -89,18 +89,18 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down Knowledge Base Service...")
 
     try:
-        neo4j_client = get_neo4j_client()
+        neo4j_client = get_graph_db_client()
         await neo4j_client.close()
-        logger.info("Neo4j disconnected")
+        logger.info("Graph database disconnected")
     except Exception as e:
-        logger.error(f"Error closing Neo4j connection: {e}")
+        logger.error(f"Error closing graph database connection: {e}")
 
     try:
-        milvus_client = get_milvus_client()
+        milvus_client = get_vector_db_client()
         await milvus_client.close()
-        logger.info("Milvus disconnected")
+        logger.info("Vector database disconnected")
     except Exception as e:
-        logger.error(f"Error closing Milvus connection: {e}")
+        logger.error(f"Error closing vector database connection: {e}")
 
 
 def create_app() -> FastAPI:

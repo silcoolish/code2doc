@@ -15,8 +15,7 @@ from collections import defaultdict, deque
 from app.core.pipeline import PipelineContext, PipelineStageHandler
 from app.domain.models.pipeline import PipelineStage, PipelineStatus, StageResult
 from app.domain.llm.client import get_llm_service
-from app.infrastructure.db.base_client import GraphDatabaseClient
-from app.infrastructure.db.neo4j_client import get_neo4j_client
+from app.infrastructure.db import GraphDatabaseClient, get_graph_db_client
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +52,7 @@ class SemanticAnalysisStage(PipelineStageHandler):
             阶段执行结果
         """
         try:
-            self._neo4j = get_neo4j_client()
+            self._neo4j = get_graph_db_client()
             repo_name = context.repo_name
 
             # 1. 生成 Method 节点的 summary

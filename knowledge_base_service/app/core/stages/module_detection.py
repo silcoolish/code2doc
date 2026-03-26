@@ -9,7 +9,7 @@ from app.core.pipeline import PipelineContext, PipelineStageHandler
 from app.domain.models.graph import Module, Workflow
 from app.domain.models.pipeline import PipelineStage, PipelineStatus, StageResult
 from app.domain.llm.client import get_llm_service
-from app.infrastructure.db import GraphDatabaseClient, get_neo4j_client
+from app.infrastructure.db import GraphDatabaseClient, get_graph_db_client
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +63,7 @@ class ModuleDetectionStage(PipelineStageHandler):
             modules_data = await self.llm_service.detect_modules(structure_json)
 
             # 创建 Module 和 Workflow 节点
-            neo4j: GraphDatabaseClient = get_neo4j_client()
+            neo4j: GraphDatabaseClient = get_graph_db_client()
             created_modules = []
             created_workflows = []
 

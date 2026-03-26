@@ -13,7 +13,7 @@ from mcp.types import (
 )
 
 from app.config import get_settings
-from app.infrastructure.db import get_neo4j_client, get_milvus_client
+from app.infrastructure.db import get_graph_db_client, get_vector_db_client
 from app.mcp.tools import KnowledgeBaseTools
 
 logger = logging.getLogger(__name__)
@@ -25,8 +25,8 @@ async def app_lifespan(server: Server) -> AsyncIterator[KnowledgeBaseTools]:
     # 启动时
     logger.info("Starting MCP server...")
 
-    neo4j = get_neo4j_client()
-    milvus = get_milvus_client()
+    neo4j = get_graph_db_client()
+    milvus = get_vector_db_client()
 
     try:
         await neo4j.connect()

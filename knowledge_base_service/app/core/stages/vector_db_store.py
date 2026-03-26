@@ -23,8 +23,8 @@ from app.domain.llm.client import get_llm_service
 from app.infrastructure.db import (
     GraphDatabaseClient,
     VectorDatabaseClient,
-    get_milvus_client,
-    get_neo4j_client,
+    get_graph_db_client,
+    get_vector_db_client,
 )
 
 logger = logging.getLogger(__name__)
@@ -67,8 +67,8 @@ class VectorDBStoreStage(PipelineStageHandler):
             阶段执行结果
         """
         try:
-            neo4j: GraphDatabaseClient = get_neo4j_client()
-            milvus: VectorDatabaseClient = get_milvus_client()
+            neo4j: GraphDatabaseClient = get_graph_db_client()
+            milvus: VectorDatabaseClient = get_vector_db_client()
             repo_name = context.repo_name
 
             # 1. 从 Neo4j 提取节点内容（包含 summary）
