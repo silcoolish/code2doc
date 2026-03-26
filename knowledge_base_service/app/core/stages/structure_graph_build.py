@@ -24,8 +24,7 @@ from app.config import get_settings
 from app.core.pipeline import PipelineContext, PipelineStageHandler
 from app.domain.models.graph import Class, Directory, File, Method, Repository
 from app.domain.models.pipeline import PipelineStage, PipelineStatus, StageResult
-from app.domain.parser.code_parser import ClassSymbol, MethodSymbol
-from app.domain.parser.tree_sitter_parser import get_parser_for_file
+from app.domain.analyzer import get_analyzer_for_file, ParsedSymbol, is_supported_file
 from app.infrastructure.db import GraphDatabaseClient, get_graph_db_client
 
 logger = logging.getLogger(__name__)
@@ -331,7 +330,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
         # 过滤出支持语言的代码文件
         code_files = [
             f for f in code_files
-            if self._is_supported_language(f.suffix)
+            if is_supported_file(f.path)
         ]
 
         total_files = len(code_files)
@@ -410,45 +409,49 @@ class StructureGraphBuildStage(PipelineStageHandler):
             logger.warning(f"Failed to read file {file_node.path}: {e}")
             return file_ids, class_ids, method_ids
 
-        parser = get_parser_for_file(file_node.path)
-        if not parser:
+        analyzer = get_analyzer_for_file(file_node.path)
+        if not analyzer:
             return file_ids, class_ids, method_ids
 
-        parse_result = parser.parse(file_node.path, content)
+        parse_result = analyzer.parse_for_structure(file_node.path, content)
         if not parse_result.success:
             logger.warning(f"Failed to parse {file_node.path}: {parse_result.error}")
             return file_ids, class_ids, method_ids
 
         file_id = file_node.id
 
-        # 创建 Class 节点
+        # 创建 Class/Struct/Interface/Enum/Trait 节点，并建立类名到ID的映射
+        class_name_to_id: dict = {}
         for class_symbol in parse_result.classes:
             class_node_id = await self._create_class_from_symbol(
                 class_symbol, file_id, file_node.path, parse_result.language, repo_name
             )
             class_ids.append(class_node_id)
+            class_name_to_id[class_symbol.name] = class_node_id
 
-            # 创建类中的 Method 节点
-            for method_symbol in class_symbol.methods:
+        # 创建 Method 节点
+        for method_symbol in parse_result.methods:
+            # 根据 parent_name 判断是类方法还是独立函数
+            if method_symbol.parent_name and method_symbol.parent_name in class_name_to_id:
+                # 类方法
+                class_node_id = class_name_to_id[method_symbol.parent_name]
                 method_node_id = await self._create_method_from_symbol(
                     method_symbol,
                     class_node_id,
                     file_node.path,
                     parse_result.language,
                     repo_name,
-                    class_name=class_symbol.name,
+                    class_name=method_symbol.parent_name,
                 )
-                method_ids.append(method_node_id)
-
-        # 创建独立 Method 节点
-        for method_symbol in parse_result.methods:
-            method_node_id = await self._create_method_from_symbol(
-                method_symbol,
-                file_id,
-                file_node.path,
-                parse_result.language,
-                repo_name,
-            )
+            else:
+                # 独立函数
+                method_node_id = await self._create_method_from_symbol(
+                    method_symbol,
+                    file_id,
+                    file_node.path,
+                    parse_result.language,
+                    repo_name,
+                )
             method_ids.append(method_node_id)
 
         return file_ids, class_ids, method_ids
@@ -519,23 +522,34 @@ class StructureGraphBuildStage(PipelineStageHandler):
 
     async def _create_class_from_symbol(
         self,
-        class_symbol: ClassSymbol,
+        class_symbol: ParsedSymbol,
         file_id: str,
         file_path: str,
         language: str,
         repo_name: str,
     ) -> str:
-        """从 ClassSymbol 创建 Class 节点.
+        """从 ParsedSymbol 创建 Class 节点.
 
         Returns:
             创建的 Class 节点ID
         """
         class_node_id = f"class_{repo_name}_{file_path}_{class_symbol.name}"
 
+        # 根据 symbol_type 确定节点类型
+        node_type = "Class"
+        if class_symbol.symbol_type == "struct":
+            node_type = "Struct"
+        elif class_symbol.symbol_type == "interface":
+            node_type = "Interface"
+        elif class_symbol.symbol_type == "enum":
+            node_type = "Enum"
+        elif class_symbol.symbol_type == "trait":
+            node_type = "Trait"
+
         class_node = Class(
             id=class_node_id,
             name=class_symbol.name,
-            type="Class",
+            type=node_type,
             file_path=file_path,
             start_line=class_symbol.start_line,
             end_line=class_symbol.end_line,
@@ -570,14 +584,14 @@ class StructureGraphBuildStage(PipelineStageHandler):
 
     async def _create_method_from_symbol(
         self,
-        method_symbol: MethodSymbol,
+        method_symbol: ParsedSymbol,
         parent_id: str,
         file_path: str,
         language: str,
         repo_name: str,
         class_name: str = "",
     ) -> str:
-        """从 MethodSymbol 创建 Method 节点.
+        """从 ParsedSymbol 创建 Method 节点.
 
         Returns:
             创建的 Method 节点ID
@@ -629,8 +643,8 @@ class StructureGraphBuildStage(PipelineStageHandler):
 
     def _is_supported_language(self, suffix: str) -> bool:
         """检查是否支持该语言."""
-        from app.domain.parser.tree_sitter_parser import TreeSitterParser
-        return suffix.lower() in TreeSitterParser.LANGUAGE_MAP
+        from app.domain.analyzer import get_analyzer_for_extension
+        return get_analyzer_for_extension(suffix) is not None
 
     def _get_parent_directory_id(
         self, file_path: str, directories: List[Directory], repo_id: str
