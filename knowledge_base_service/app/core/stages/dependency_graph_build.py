@@ -5,7 +5,7 @@ from typing import List
 
 from app.core.pipeline import PipelineContext, PipelineStageHandler
 from app.domain.models.pipeline import PipelineStage, PipelineStatus, StageResult
-from app.infrastructure.db import get_neo4j_client
+from app.infrastructure.db import GraphDatabaseClient, get_neo4j_client
 from app.core.stages.dependency_analysis import DependencyResult
 
 logger = logging.getLogger(__name__)
@@ -38,7 +38,7 @@ class DependencyGraphBuildStage(PipelineStageHandler):
             阶段执行结果
         """
         try:
-            neo4j = get_neo4j_client()
+            neo4j: GraphDatabaseClient = get_neo4j_client()
             dependencies: DependencyResult = context.data.get("dependencies")
 
             if not dependencies:

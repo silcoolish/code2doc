@@ -6,7 +6,7 @@ from typing import Dict, List, Any
 from app.core.pipeline import PipelineContext, PipelineStageHandler
 from app.domain.models.graph import Class, Method, File, Directory, Repository
 from app.domain.models.pipeline import PipelineStage, PipelineStatus, StageResult
-from app.infrastructure.db import get_neo4j_client
+from app.infrastructure.db import GraphDatabaseClient, get_neo4j_client
 from app.domain.parser.code_parser import ParseResult
 
 logger = logging.getLogger(__name__)
@@ -39,7 +39,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
             阶段执行结果
         """
         try:
-            neo4j = get_neo4j_client()
+            neo4j: GraphDatabaseClient = get_neo4j_client()
 
             # 获取数据（从 traversal_result 中读取）
             traversal_result = context.data.get("traversal_result")
@@ -150,7 +150,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
                 message=str(e),
             )
 
-    async def _create_repository(self, neo4j, repository: Repository) -> None:
+    async def _create_repository(self, neo4j: GraphDatabaseClient, repository: Repository) -> None:
         """创建 Repository 节点."""
         properties = repository.to_dict()
         properties["repo"] = repository.name
@@ -165,7 +165,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
             properties=properties,
         )
 
-    async def _create_directory(self, neo4j, directory: Directory, repo_id: str) -> None:
+    async def _create_directory(self, neo4j: GraphDatabaseClient, directory: Directory, repo_id: str) -> None:
         """创建 Directory 节点和关系."""
         properties = directory.to_dict()
         properties["repo"] = repo_id.replace("repo_", "")
@@ -191,7 +191,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
                 rel_type="CONTAIN",
             )
 
-    async def _create_file(self, neo4j, file_node: File, parent_id: str) -> None:
+    async def _create_file(self, neo4j: GraphDatabaseClient, file_node: File, parent_id: str) -> None:
         """创建 File 节点和关系."""
         properties = file_node.to_dict()
         properties["repo"] = parent_id.replace("repo_", "").split("_dir_")[0]
@@ -216,7 +216,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
             rel_type="CONTAIN",
         )
 
-    async def _create_class(self, neo4j, class_node: Class, file_id: str) -> None:
+    async def _create_class(self, neo4j: GraphDatabaseClient, class_node: Class, file_id: str) -> None:
         """创建 Class 节点和关系."""
         properties = class_node.to_dict()
         properties["repo"] = file_id.split("_")[1]
@@ -240,7 +240,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
             rel_type="CONTAIN",
         )
 
-    async def _create_method(self, neo4j, method_node: Method, parent_id: str) -> None:
+    async def _create_method(self, neo4j: GraphDatabaseClient, method_node: Method, parent_id: str) -> None:
         """创建 Method 节点和关系."""
         properties = method_node.to_dict()
         properties["repo"] = parent_id.split("_")[1]

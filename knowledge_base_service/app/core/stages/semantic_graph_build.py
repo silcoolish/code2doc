@@ -6,7 +6,7 @@ from typing import List
 from app.core.pipeline import PipelineContext, PipelineStageHandler
 from app.domain.models.graph import Module, Workflow
 from app.domain.models.pipeline import PipelineStage, PipelineStatus, StageResult
-from app.infrastructure.db import get_neo4j_client
+from app.infrastructure.db import GraphDatabaseClient, get_neo4j_client
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +37,7 @@ class SemanticGraphBuildStage(PipelineStageHandler):
             阶段执行结果
         """
         try:
-            neo4j = get_neo4j_client()
+            neo4j: GraphDatabaseClient = get_neo4j_client()
 
             # 获取模块和工作流
             modules: List[Module] = context.data.get("modules", [])

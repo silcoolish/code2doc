@@ -10,7 +10,12 @@ from app.domain.models.vector import (
     ClassSummaryRecord,
     MethodSummaryRecord,
 )
-from app.infrastructure.db import get_milvus_client, get_neo4j_client
+from app.infrastructure.db import (
+    GraphDatabaseClient,
+    VectorDatabaseClient,
+    get_milvus_client,
+    get_neo4j_client,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,8 +48,8 @@ class VectorDBStoreStage(PipelineStageHandler):
             阶段执行结果
         """
         try:
-            milvus = get_milvus_client()
-            neo4j = get_neo4j_client()
+            milvus: VectorDatabaseClient = get_milvus_client()
+            neo4j: GraphDatabaseClient = get_neo4j_client()
 
             # 获取向量数据
             file_vectors: List[FileSummaryRecord] = context.data.get("file_vectors", [])
