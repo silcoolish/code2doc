@@ -92,9 +92,8 @@ curl http://localhost:8000/api/v1/initialization/{repo_id}/progress
 5. **dependency_analysis** - 依赖分析
 6. **dependency_graph_build** - 依赖图构建
 7. **semantic_analysis** - 语义分析
-8. **embedding_generation** - 向量化
-9. **vector_db_store** - 向量存储
-10. **module_detection** - 模块检测（包含语义图构建）
+8. **module_detection** - 模块检测（包含语义图构建）
+9. **vector_db_store** - 向量数据库存储（包含embedding生成）
 
 ## 项目结构
 

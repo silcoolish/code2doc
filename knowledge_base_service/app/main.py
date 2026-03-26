@@ -18,7 +18,6 @@ from app.core.stages.repo_traversal import RepoTraversalStage
 from app.core.stages.structure_graph_build import StructureGraphBuildStage
 from app.core.stages.dependency_graph_build import DependencyGraphBuildStage
 from app.core.stages.semantic_analysis import SemanticAnalysisStage
-from app.core.stages.embedding_generation import EmbeddingGenerationStage
 from app.core.stages.vector_db_store import VectorDBStoreStage
 from app.core.stages.module_detection import ModuleDetectionStage
 
@@ -39,10 +38,9 @@ def _register_pipeline_stages():
     orchestrator.register_handler(PipelineStage.STRUCTURE_GRAPH_BUILD, StructureGraphBuildStage())
     orchestrator.register_handler(PipelineStage.DEPENDENCY_GRAPH_BUILD, DependencyGraphBuildStage())
     orchestrator.register_handler(PipelineStage.SEMANTIC_ANALYSIS, SemanticAnalysisStage())
-    orchestrator.register_handler(PipelineStage.EMBEDDING_GENERATION, EmbeddingGenerationStage())
-    orchestrator.register_handler(PipelineStage.VECTOR_DB_STORE, VectorDBStoreStage())
     orchestrator.register_handler(PipelineStage.MODULE_DETECTION, ModuleDetectionStage())
-    # SEMANTIC_GRAPH_BUILD 已合并到 MODULE_DETECTION
+    orchestrator.register_handler(PipelineStage.VECTOR_DB_STORE, VectorDBStoreStage())
+    # EMBEDDING_GENERATION 已合并到 VECTOR_DB_STORE
 
     logger.info("Pipeline stages registered")
 
