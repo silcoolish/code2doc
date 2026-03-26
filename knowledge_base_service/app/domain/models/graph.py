@@ -111,6 +111,7 @@ class Class(BaseNode):
     summary: str = ""
     embedding_id: str = ""
     docstring: str = ""
+    real_type: str = ""
 
     def __post_init__(self):
         if not self.type:
@@ -127,6 +128,7 @@ class Class(BaseNode):
             "summary": self.summary,
             "embeddingId": self.embedding_id,
             "docstring": self.docstring,
+            "realType": self.real_type,
         })
         return result
 

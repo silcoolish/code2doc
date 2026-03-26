@@ -535,27 +535,22 @@ class StructureGraphBuildStage(PipelineStageHandler):
         """
         class_node_id = f"class_{repo_name}_{file_path}_{class_symbol.name}"
 
-        # 根据 symbol_type 确定节点类型
-        node_type = "Class"
-        if class_symbol.symbol_type == "struct":
-            node_type = "Struct"
-        elif class_symbol.symbol_type == "interface":
-            node_type = "Interface"
-        elif class_symbol.symbol_type == "enum":
-            node_type = "Enum"
-        elif class_symbol.symbol_type == "trait":
-            node_type = "Trait"
+        # 真实类型映射（首字母大写）
+        real_type = "Class"
+        if class_symbol.symbol_type:
+            real_type = class_symbol.symbol_type.capitalize()
 
         class_node = Class(
             id=class_node_id,
             name=class_symbol.name,
-            type=node_type,
+            type="Class",
             file_path=file_path,
             start_line=class_symbol.start_line,
             end_line=class_symbol.end_line,
             language=language,
             code=class_symbol.code,
             docstring=class_symbol.docstring,
+            real_type=real_type,
         )
 
         properties = class_node.to_dict()
