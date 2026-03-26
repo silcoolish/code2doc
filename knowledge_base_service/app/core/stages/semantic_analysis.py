@@ -155,15 +155,7 @@ class SemanticAnalysisStage(PipelineStageHandler):
         Returns:
             Method 节点列表，包含 code, docstring, language 和 calls 关系
         """
-        query = """
-        MATCH (m:Method)
-        WHERE m.repo = $repo_name
-        OPTIONAL MATCH (m)-[:CALL]->(callee:Method)
-        RETURN m.id as id, m.code as code, m.docstring as docstring,
-               m.language as language, m.name as name, m.summary as summary,
-               collect(DISTINCT callee.id) as callee_ids
-        """
-        return await self.graph_db.execute_query(query, {"repo_name": repo_name})
+        return await self.graph_db.get_methods_with_calls(repo_name)
 
     def _build_call_graph(
         self, methods: List[Dict]
@@ -312,15 +304,7 @@ class SemanticAnalysisStage(PipelineStageHandler):
         Returns:
             Class 节点列表
         """
-        query = """
-        MATCH (c:Class)
-        WHERE c.repo = $repo_name
-        OPTIONAL MATCH (c)-[:CONTAIN]->(m:Method)
-        RETURN c.id as id, c.code as code, c.docstring as docstring,
-               c.language as language, c.name as name, c.summary as summary,
-               collect(DISTINCT m.summary) as method_summaries
-        """
-        return await self.graph_db.execute_query(query, {"repo_name": repo_name})
+        return await self.graph_db.get_classes_with_methods(repo_name)
 
     async def _generate_class_summary(self, class_node: Dict) -> str:
         """为单个类生成 summary.
@@ -394,17 +378,7 @@ class SemanticAnalysisStage(PipelineStageHandler):
         Returns:
             File 节点列表
         """
-        query = """
-        MATCH (f:File)
-        WHERE f.repo = $repo_name
-        OPTIONAL MATCH (f)-[:CONTAIN]->(c:Class)
-        OPTIONAL MATCH (f)-[:CONTAIN]->(m:Method)
-        RETURN f.id as id, f.code as code, f.fileType as file_type,
-               f.suffix as suffix, f.name as name, f.summary as summary,
-               collect(DISTINCT c.summary) as class_summaries,
-               collect(DISTINCT m.summary) as method_summaries
-        """
-        return await self.graph_db.execute_query(query, {"repo_name": repo_name})
+        return await self.graph_db.get_files_for_summary(repo_name)
 
     async def _generate_file_summary(self, file_node: Dict) -> str:
         """为单个文件生成 summary.
@@ -468,13 +442,4 @@ class SemanticAnalysisStage(PipelineStageHandler):
             node_id: 节点ID
             summary: 摘要内容
         """
-        query = f"""
-        MATCH (n:{label} {{id: $node_id}})
-        SET n.summary = $summary
-        """
-        try:
-            await self.graph_db.execute_query(
-                query, {"node_id": node_id, "summary": summary}
-            )
-        except Exception as e:
-            logger.warning(f"Failed to update summary for {label} {node_id}: {e}")
+        await self.graph_db.update_node_summary(label, node_id, summary)

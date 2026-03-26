@@ -243,16 +243,7 @@ class ModuleDetectionStage(PipelineStageHandler):
         for workflow in workflows:
             # 根据 workflow.keywords 中的文件路径查找相关的 Class 和 Method
             for keyword in workflow.keywords:
-                query = """
-                MATCH (n)
-                WHERE (n:Class OR n:Method) AND n.filePath CONTAINS $keyword
-                RETURN n.id as node_id, labels(n) as labels
-                LIMIT 10
-                """
-                results = await neo4j.execute_query(
-                    query,
-                    {"keyword": keyword},
-                )
+                results = await neo4j.find_nodes_by_file_path(keyword)
 
                 for result in results:
                     success = await neo4j.create_relationship(

@@ -273,6 +273,244 @@ class Neo4jClient(GraphDatabaseClient):
             database,
         )
 
+    async def get_code_files(self, repo_name: str, database: Optional[str] = None) -> List[Dict[str, Any]]:
+        """获取指定仓库的所有代码文件节点.
+
+        Args:
+            repo_name: 仓库名称
+            database: 目标数据库名称
+
+        Returns:
+            File 节点列表，包含 id, path, code, suffix, language 等字段
+        """
+        query = """
+        MATCH (f:File)
+        WHERE f.repo = $repo_name AND f.fileType = 'code'
+        RETURN f.id as id, f.path as path, f.code as code, f.suffix as suffix
+        """
+        result = await self.execute_query(query, {"repo_name": repo_name}, database)
+
+        # 添加 language 字段
+        language_map = {
+            ".py": "python",
+            ".java": "java",
+            ".js": "javascript",
+            ".ts": "typescript",
+            ".tsx": "typescript",
+            ".go": "go",
+            ".rs": "rust",
+            ".c": "c",
+            ".h": "c",
+            ".cpp": "cpp",
+            ".hpp": "cpp",
+            ".cc": "cpp",
+        }
+
+        for file_node in result:
+            suffix = file_node.get("suffix", "").lower()
+            file_node["language"] = language_map.get(suffix, "")
+
+        return result
+
+    async def get_all_methods(self, repo_name: str, database: Optional[str] = None) -> List[Dict[str, Any]]:
+        """获取指定仓库的所有 Method 节点.
+
+        Args:
+            repo_name: 仓库名称
+            database: 目标数据库名称
+
+        Returns:
+            Method 节点列表，包含 id, name, code, language, file_path 等字段
+        """
+        query = """
+        MATCH (m:Method)
+        WHERE m.repo = $repo_name
+        RETURN m.id as id, m.name as name, m.code as code,
+               m.language as language, m.filePath as file_path
+        """
+        return await self.execute_query(query, {"repo_name": repo_name}, database)
+
+    async def get_methods_with_calls(self, repo_name: str, database: Optional[str] = None) -> List[Dict[str, Any]]:
+        """获取所有 Method 节点及其 CALL 关系.
+
+        Args:
+            repo_name: 仓库名称
+            database: 目标数据库名称
+
+        Returns:
+            Method 节点列表，包含 code, docstring, language, name, summary, callee_ids 等字段
+        """
+        query = """
+        MATCH (m:Method)
+        WHERE m.repo = $repo_name
+        OPTIONAL MATCH (m)-[:CALL]->(callee:Method)
+        RETURN m.id as id, m.code as code, m.docstring as docstring,
+               m.language as language, m.name as name, m.summary as summary,
+               collect(DISTINCT callee.id) as callee_ids
+        """
+        return await self.execute_query(query, {"repo_name": repo_name}, database)
+
+    async def get_classes_with_methods(self, repo_name: str, database: Optional[str] = None) -> List[Dict[str, Any]]:
+        """获取所有 Class 节点及其包含的 Method summaries.
+
+        Args:
+            repo_name: 仓库名称
+            database: 目标数据库名称
+
+        Returns:
+            Class 节点列表，包含 code, docstring, language, name, summary, method_summaries 等字段
+        """
+        query = """
+        MATCH (c:Class)
+        WHERE c.repo = $repo_name
+        OPTIONAL MATCH (c)-[:CONTAIN]->(m:Method)
+        RETURN c.id as id, c.code as code, c.docstring as docstring,
+               c.language as language, c.name as name, c.summary as summary,
+               collect(DISTINCT m.summary) as method_summaries
+        """
+        return await self.execute_query(query, {"repo_name": repo_name}, database)
+
+    async def get_files_for_summary(self, repo_name: str, database: Optional[str] = None) -> List[Dict[str, Any]]:
+        """获取所有 File 节点及其包含的 Class/Method summaries.
+
+        Args:
+            repo_name: 仓库名称
+            database: 目标数据库名称
+
+        Returns:
+            File 节点列表，包含 code, file_type, suffix, name, summary, class_summaries, method_summaries 等字段
+        """
+        query = """
+        MATCH (f:File)
+        WHERE f.repo = $repo_name
+        OPTIONAL MATCH (f)-[:CONTAIN]->(c:Class)
+        OPTIONAL MATCH (f)-[:CONTAIN]->(m:Method)
+        RETURN f.id as id, f.code as code, f.fileType as file_type,
+               f.suffix as suffix, f.name as name, f.summary as summary,
+               collect(DISTINCT c.summary) as class_summaries,
+               collect(DISTINCT m.summary) as method_summaries
+        """
+        return await self.execute_query(query, {"repo_name": repo_name}, database)
+
+    async def update_node_summary(
+        self,
+        label: str,
+        node_id: str,
+        summary: str,
+        database: Optional[str] = None,
+    ) -> bool:
+        """更新节点的 summary 属性.
+
+        Args:
+            label: 节点标签
+            node_id: 节点ID
+            summary: 摘要内容
+            database: 目标数据库名称
+
+        Returns:
+            是否成功更新
+        """
+        query = f"""
+        MATCH (n:{label} {{id: $node_id}})
+        SET n.summary = $summary
+        """
+        try:
+            await self.execute_query(query, {"node_id": node_id, "summary": summary}, database)
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to update summary for {label} {node_id}: {e}")
+            return False
+
+    async def find_nodes_by_file_path(
+        self,
+        keyword: str,
+        database: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """根据文件路径关键字查找 Class 或 Method 节点.
+
+        Args:
+            keyword: 文件路径关键字
+            database: 目标数据库名称
+
+        Returns:
+            节点列表，包含 node_id 和 labels 字段
+        """
+        query = """
+        MATCH (n)
+        WHERE (n:Class OR n:Method) AND n.filePath CONTAINS $keyword
+        RETURN n.id as node_id, labels(n) as labels
+        LIMIT 10
+        """
+        return await self.execute_query(query, {"keyword": keyword}, database)
+
+    async def get_nodes_with_summary(
+        self,
+        repo_name: str,
+        node_type: str,
+        database: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """获取指定类型的所有包含 summary 的节点.
+
+        Args:
+            repo_name: 仓库名称
+            node_type: 节点类型 (File, Class, Method)
+            database: 目标数据库名称
+
+        Returns:
+            节点列表，包含 id, name, summary 等字段
+        """
+        if node_type == "File":
+            query = """
+            MATCH (f:File)
+            WHERE f.repo = $repo_name AND f.summary IS NOT NULL
+            RETURN f.id as id, f.name as name, f.summary as summary, f.path as path
+            """
+        elif node_type == "Class":
+            query = """
+            MATCH (c:Class)
+            WHERE c.repo = $repo_name AND c.summary IS NOT NULL
+            RETURN c.id as id, c.name as name, c.summary as summary
+            """
+        elif node_type == "Method":
+            query = """
+            MATCH (m:Method)
+            WHERE m.repo = $repo_name AND m.summary IS NOT NULL
+            RETURN m.id as id, m.name as name, m.summary as summary
+            """
+        else:
+            return []
+
+        return await self.execute_query(query, {"repo_name": repo_name}, database)
+
+    async def update_node_embedding_id(
+        self,
+        label: str,
+        node_id: str,
+        embedding_id: str,
+        database: Optional[str] = None,
+    ) -> bool:
+        """更新节点的 embeddingId 属性.
+
+        Args:
+            label: 节点标签
+            node_id: 节点ID
+            embedding_id: 向量ID
+            database: 目标数据库名称
+
+        Returns:
+            是否成功更新
+        """
+        query = f"""
+        MATCH (n:{label} {{id: $id}})
+        SET n.embeddingId = $embedding_id
+        """
+        try:
+            await self.execute_query(query, {"id": node_id, "embedding_id": embedding_id}, database)
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to update embeddingId for {label} {node_id}: {e}")
+            return False
+
 
 # 全局客户端实例
 _neo4j_client: Optional[Neo4jClient] = None

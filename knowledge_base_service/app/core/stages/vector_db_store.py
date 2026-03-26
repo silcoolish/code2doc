@@ -129,12 +129,7 @@ class VectorDBStoreStage(PipelineStageHandler):
         contents = []
 
         # 查询 File 节点
-        file_query = """
-        MATCH (f:File)
-        WHERE f.repo = $repo_name AND f.summary IS NOT NULL
-        RETURN f.id as id, f.name as name, f.summary as summary, f.path as path
-        """
-        file_results = await neo4j.execute_query(file_query, {"repo_name": repo_name})
+        file_results = await neo4j.get_nodes_with_summary(repo_name, "File")
         for result in file_results:
             if result.get("summary"):
                 contents.append({
@@ -146,12 +141,7 @@ class VectorDBStoreStage(PipelineStageHandler):
                 })
 
         # 查询 Class 节点
-        class_query = """
-        MATCH (c:Class)
-        WHERE c.repo = $repo_name AND c.summary IS NOT NULL
-        RETURN c.id as id, c.name as name, c.summary as summary
-        """
-        class_results = await neo4j.execute_query(class_query, {"repo_name": repo_name})
+        class_results = await neo4j.get_nodes_with_summary(repo_name, "Class")
         for result in class_results:
             if result.get("summary"):
                 contents.append({
@@ -162,12 +152,7 @@ class VectorDBStoreStage(PipelineStageHandler):
                 })
 
         # 查询 Method 节点
-        method_query = """
-        MATCH (m:Method)
-        WHERE m.repo = $repo_name AND m.summary IS NOT NULL
-        RETURN m.id as id, m.name as name, m.summary as summary
-        """
-        method_results = await neo4j.execute_query(method_query, {"repo_name": repo_name})
+        method_results = await neo4j.get_nodes_with_summary(repo_name, "Method")
         for result in method_results:
             if result.get("summary"):
                 contents.append({
@@ -283,9 +268,8 @@ class VectorDBStoreStage(PipelineStageHandler):
 
             # 更新 Neo4j 中的 embeddingId
             for vector in file_records:
-                await neo4j.execute_query(
-                    "MATCH (f:File {id: $id}) SET f.embeddingId = $embedding_id",
-                    {"id": vector.node_id, "embedding_id": vector.id},
+                await neo4j.update_node_embedding_id(
+                    "File", vector.node_id, vector.id
                 )
 
             logger.info(f"Stored {len(file_records)} file vectors")
@@ -301,9 +285,8 @@ class VectorDBStoreStage(PipelineStageHandler):
 
             # 更新 Neo4j
             for vector in class_records:
-                await neo4j.execute_query(
-                    "MATCH (c:Class {id: $id}) SET c.embeddingId = $embedding_id",
-                    {"id": vector.node_id, "embedding_id": vector.id},
+                await neo4j.update_node_embedding_id(
+                    "Class", vector.node_id, vector.id
                 )
 
             logger.info(f"Stored {len(class_records)} class vectors")
@@ -319,12 +302,13 @@ class VectorDBStoreStage(PipelineStageHandler):
 
             # 更新 Neo4j
             for vector in method_records:
-                await neo4j.execute_query(
-                    "MATCH (m:Method {id: $id}) SET m.embeddingId = $embedding_id",
-                    {"id": vector.node_id, "embedding_id": vector.id},
+                await neo4j.update_node_embedding_id(
+                    "Method", vector.node_id, vector.id
                 )
 
             logger.info(f"Stored {len(method_records)} method vectors")
 
-        stats["total_vectors"] = stats["file_vectors"] + stats["class_vectors"] + stats["method_vectors"]
+        stats["total_vectors"] = (
+            stats["file_vectors"] + stats["class_vectors"] + stats["method_vectors"]
+        )
         return stats

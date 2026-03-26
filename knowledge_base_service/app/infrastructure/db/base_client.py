@@ -164,6 +164,149 @@ class GraphDatabaseClient(ABC):
         """
         pass
 
+    @abstractmethod
+    async def get_code_files(self, repo_name: str, database: Optional[str] = None) -> List[Dict[str, Any]]:
+        """获取指定仓库的所有代码文件节点.
+
+        Args:
+            repo_name: 仓库名称
+            database: 目标数据库名称
+
+        Returns:
+            File 节点列表，包含 id, path, code, suffix, language 等字段
+        """
+        pass
+
+    @abstractmethod
+    async def get_all_methods(self, repo_name: str, database: Optional[str] = None) -> List[Dict[str, Any]]:
+        """获取指定仓库的所有 Method 节点.
+
+        Args:
+            repo_name: 仓库名称
+            database: 目标数据库名称
+
+        Returns:
+            Method 节点列表，包含 id, name, code, language, file_path 等字段
+        """
+        pass
+
+    @abstractmethod
+    async def get_methods_with_calls(self, repo_name: str, database: Optional[str] = None) -> List[Dict[str, Any]]:
+        """获取所有 Method 节点及其 CALL 关系.
+
+        Args:
+            repo_name: 仓库名称
+            database: 目标数据库名称
+
+        Returns:
+            Method 节点列表，包含 code, docstring, language, name, summary, callee_ids 等字段
+        """
+        pass
+
+    @abstractmethod
+    async def get_classes_with_methods(self, repo_name: str, database: Optional[str] = None) -> List[Dict[str, Any]]:
+        """获取所有 Class 节点及其包含的 Method summaries.
+
+        Args:
+            repo_name: 仓库名称
+            database: 目标数据库名称
+
+        Returns:
+            Class 节点列表，包含 code, docstring, language, name, summary, method_summaries 等字段
+        """
+        pass
+
+    @abstractmethod
+    async def get_files_for_summary(self, repo_name: str, database: Optional[str] = None) -> List[Dict[str, Any]]:
+        """获取所有 File 节点及其包含的 Class/Method summaries.
+
+        Args:
+            repo_name: 仓库名称
+            database: 目标数据库名称
+
+        Returns:
+            File 节点列表，包含 code, file_type, suffix, name, summary, class_summaries, method_summaries 等字段
+        """
+        pass
+
+    @abstractmethod
+    async def update_node_summary(
+        self,
+        label: str,
+        node_id: str,
+        summary: str,
+        database: Optional[str] = None,
+    ) -> bool:
+        """更新节点的 summary 属性.
+
+        Args:
+            label: 节点标签
+            node_id: 节点ID
+            summary: 摘要内容
+            database: 目标数据库名称
+
+        Returns:
+            是否成功更新
+        """
+        pass
+
+    @abstractmethod
+    async def find_nodes_by_file_path(
+        self,
+        keyword: str,
+        database: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """根据文件路径关键字查找 Class 或 Method 节点.
+
+        Args:
+            keyword: 文件路径关键字
+            database: 目标数据库名称
+
+        Returns:
+            节点列表，包含 node_id 和 labels 字段
+        """
+        pass
+
+    @abstractmethod
+    async def get_nodes_with_summary(
+        self,
+        repo_name: str,
+        node_type: str,
+        database: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """获取指定类型的所有包含 summary 的节点.
+
+        Args:
+            repo_name: 仓库名称
+            node_type: 节点类型 (File, Class, Method)
+            database: 目标数据库名称
+
+        Returns:
+            节点列表，包含 id, name, summary 等字段
+        """
+        pass
+
+    @abstractmethod
+    async def update_node_embedding_id(
+        self,
+        label: str,
+        node_id: str,
+        embedding_id: str,
+        database: Optional[str] = None,
+    ) -> bool:
+        """更新节点的 embeddingId 属性.
+
+        Args:
+            label: 节点标签
+            node_id: 节点ID
+            embedding_id: 向量ID
+            database: 目标数据库名称
+
+        Returns:
+            是否成功更新
+        """
+        pass
+
 
 class VectorDatabaseClient(ABC):
     """向量数据库客户端抽象基类.

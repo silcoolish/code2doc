@@ -200,33 +200,7 @@ class DependencyGraphBuildStage(PipelineStageHandler):
         Returns:
             File 节点列表
         """
-        query = """
-        MATCH (f:File)
-        WHERE f.repo = $repo_name AND f.fileType = 'code'
-        RETURN f.id as id, f.path as path, f.code as code, f.suffix as suffix
-        """
-        result = await self.graph_db.execute_query(query, {"repo_name": repo_name})
-
-        # 添加 language 字段
-        for file_node in result:
-            suffix = file_node.get("suffix", "").lower()
-            language_map = {
-                ".py": "python",
-                ".java": "java",
-                ".js": "javascript",
-                ".ts": "typescript",
-                ".tsx": "typescript",
-                ".go": "go",
-                ".rs": "rust",
-                ".c": "c",
-                ".h": "c",
-                ".cpp": "cpp",
-                ".hpp": "cpp",
-                ".cc": "cpp",
-            }
-            file_node["language"] = language_map.get(suffix, "")
-
-        return result
+        return await self.graph_db.get_code_files(repo_name)
 
     async def _get_all_methods(self, repo_name: str) -> List[Dict]:
         """获取所有 Method 节点.
@@ -237,13 +211,7 @@ class DependencyGraphBuildStage(PipelineStageHandler):
         Returns:
             Method 节点列表
         """
-        query = """
-        MATCH (m:Method)
-        WHERE m.repo = $repo_name
-        RETURN m.id as id, m.name as name, m.code as code,
-               m.language as language, m.filePath as file_path
-        """
-        return await self.graph_db.execute_query(query, {"repo_name": repo_name})
+        return await self.graph_db.get_all_methods(repo_name)
 
     def _build_file_path_index(self, files: List[Dict]) -> Dict[str, str]:
         """构建文件路径索引.
