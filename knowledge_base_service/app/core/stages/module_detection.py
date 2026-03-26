@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 class ModuleDetectionStage(PipelineStageHandler):
-    """模块检测阶段处理器 - 使用 LLM 识别功能模块和业务流程.
+    """模块检测阶段处理器 - 使用 LLM 识别功能模块和业务流程，并构建语义图.
 
     Input (context.data):
         - traversal_result: TraversalResult - 遍历结果，从中读取 files 列表
@@ -28,6 +28,7 @@ class ModuleDetectionStage(PipelineStageHandler):
     Side Effects:
         - 在 Neo4j 中创建 Module 和 Workflow 节点
         - 创建 File -> Module, File -> Workflow, Workflow -> Module 的 BELONG_TO 关系
+        - 创建 Workflow -> Class/Method 的 CONTAIN 关系（语义图构建）
     """
 
     stage = PipelineStage.MODULE_DETECTION
@@ -153,9 +154,15 @@ class ModuleDetectionStage(PipelineStageHandler):
             context.data["modules"] = created_modules
             context.data["workflows"] = created_workflows
 
+            # 构建语义图关系 (从 semantic_graph_build 阶段合并过来)
+            created_relations = await self._build_semantic_graph(
+                neo4j, created_workflows
+            )
+
             stats = {
                 "modules_detected": len(created_modules),
                 "workflows_detected": len(created_workflows),
+                "semantic_relations_created": created_relations["workflow_contain"],
             }
 
             logger.info(f"Module detection completed: {stats}")
@@ -163,7 +170,7 @@ class ModuleDetectionStage(PipelineStageHandler):
             return StageResult(
                 stage=self.stage,
                 status=PipelineStatus.COMPLETED,
-                message="Module detection completed",
+                message="Module detection and semantic graph build completed",
                 metadata=stats,
             )
 
@@ -218,3 +225,46 @@ class ModuleDetectionStage(PipelineStageHandler):
             structure["note"] = "Truncated to 100 files"
 
         return structure
+
+    async def _build_semantic_graph(
+        self, neo4j: GraphDatabaseClient, workflows: List[Workflow]
+    ) -> Dict[str, int]:
+        """构建语义图关系 - 创建 Workflow 到 Class/Method 的 CONTAIN 关系.
+
+        Args:
+            neo4j: 图数据库客户端
+            workflows: 工作流列表
+
+        Returns:
+            创建的关系统计
+        """
+        created_relations = {"workflow_contain": 0}
+
+        for workflow in workflows:
+            # 根据 workflow.keywords 中的文件路径查找相关的 Class 和 Method
+            for keyword in workflow.keywords:
+                query = """
+                MATCH (n)
+                WHERE (n:Class OR n:Method) AND n.filePath CONTAINS $keyword
+                RETURN n.id as node_id, labels(n) as labels
+                LIMIT 10
+                """
+                results = await neo4j.execute_query(
+                    query,
+                    {"keyword": keyword},
+                )
+
+                for result in results:
+                    success = await neo4j.create_relationship(
+                        from_label="Workflow",
+                        from_key="id",
+                        from_value=workflow.id,
+                        to_label=result["labels"][0],
+                        to_key="id",
+                        to_value=result["node_id"],
+                        rel_type="CONTAIN",
+                    )
+                    if success:
+                        created_relations["workflow_contain"] += 1
+
+        return created_relations

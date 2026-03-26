@@ -94,8 +94,7 @@ curl http://localhost:8000/api/v1/initialization/{repo_id}/progress
 7. **semantic_analysis** - 语义分析
 8. **embedding_generation** - 向量化
 9. **vector_db_store** - 向量存储
-10. **module_detection** - 模块检测
-11. **semantic_graph_build** - 语义图构建
+10. **module_detection** - 模块检测（包含语义图构建）
 
 ## 项目结构
 

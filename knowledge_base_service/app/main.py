@@ -21,7 +21,6 @@ from app.core.stages.semantic_analysis import SemanticAnalysisStage
 from app.core.stages.embedding_generation import EmbeddingGenerationStage
 from app.core.stages.vector_db_store import VectorDBStoreStage
 from app.core.stages.module_detection import ModuleDetectionStage
-from app.core.stages.semantic_graph_build import SemanticGraphBuildStage
 
 # 配置日志
 logging.basicConfig(
@@ -43,7 +42,7 @@ def _register_pipeline_stages():
     orchestrator.register_handler(PipelineStage.EMBEDDING_GENERATION, EmbeddingGenerationStage())
     orchestrator.register_handler(PipelineStage.VECTOR_DB_STORE, VectorDBStoreStage())
     orchestrator.register_handler(PipelineStage.MODULE_DETECTION, ModuleDetectionStage())
-    orchestrator.register_handler(PipelineStage.SEMANTIC_GRAPH_BUILD, SemanticGraphBuildStage())
+    # SEMANTIC_GRAPH_BUILD 已合并到 MODULE_DETECTION
 
     logger.info("Pipeline stages registered")
 

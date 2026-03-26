@@ -201,7 +201,6 @@ STAGE_ORDER: List[PipelineStage] = [
     PipelineStage.EMBEDDING_GENERATION,
     PipelineStage.VECTOR_DB_STORE,
     PipelineStage.MODULE_DETECTION,
-    PipelineStage.SEMANTIC_GRAPH_BUILD,
 ]
 
 
