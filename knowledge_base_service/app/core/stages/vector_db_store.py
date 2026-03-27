@@ -47,6 +47,7 @@ class VectorDBStoreStage(PipelineStageHandler):
     """
 
     stage = PipelineStage.VECTOR_DB_STORE
+    weight = 1.5  # 向量存储
 
     def __init__(self):
         self.settings = get_settings()
@@ -94,6 +95,7 @@ class VectorDBStoreStage(PipelineStageHandler):
 
             # 顺序处理各类型节点（降低并发复杂度，控制内存使用）
             for node_type, stat_key, collection_name, is_semantic in node_type_configs:
+                context.stage_msg = f"正在处理 {node_type} 节点..."
                 count = await self._process_node_type_in_batches(
                     graph_db=graph_db,
                     vector_db=vector_db,
@@ -103,6 +105,7 @@ class VectorDBStoreStage(PipelineStageHandler):
                     stat_key=stat_key,
                     is_semantic=is_semantic,
                     batch_size=batch_size,
+                    context=context,
                 )
                 stats[stat_key] += count
                 stats["total_vectors"] += count
@@ -110,6 +113,7 @@ class VectorDBStoreStage(PipelineStageHandler):
             # 保存结果到上下文
             context.data["vector_storage"] = stats
 
+            context.stage_msg = f"向量存储完成：共 {stats['total_vectors']} 个向量"
             logger.info(f"Vector storage completed: {stats}")
 
             return StageResult(
@@ -137,6 +141,7 @@ class VectorDBStoreStage(PipelineStageHandler):
         stat_key: str,
         is_semantic: bool,
         batch_size: int = 100,
+        context: PipelineContext = None,
     ) -> int:
         """分页处理指定类型的节点.
 
@@ -209,11 +214,17 @@ class VectorDBStoreStage(PipelineStageHandler):
             total_processed += len(records)
             skip += len(nodes)
 
+            progress_msg = f"{node_type} 节点处理: {min(skip, total)}/{total}"
+            if context:
+                context.stage_msg = progress_msg
             logger.info(
                 f"{node_type} progress: {min(skip, total)}/{total} "
                 f"(batch: {len(records)} vectors)"
             )
 
+        completion_msg = f"已完成 {total_processed} 个 {node_type} 向量"
+        if context:
+            context.stage_msg = completion_msg
         logger.info(f"Completed processing {total_processed} {node_type} vectors")
         return total_processed
 

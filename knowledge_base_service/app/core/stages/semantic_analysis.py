@@ -37,6 +37,7 @@ class SemanticAnalysisStage(PipelineStageHandler):
     """
 
     stage = PipelineStage.SEMANTIC_ANALYSIS
+    weight = 2.0  # LLM 生成摘要
 
     def __init__(self):
         self.graph_db: Optional[GraphDatabaseClient] = None
@@ -56,12 +57,15 @@ class SemanticAnalysisStage(PipelineStageHandler):
             repo_name = context.repo_name
 
             # 1. 生成 Method 节点的 summary
-            method_count = await self._generate_method_summaries(repo_name)
+            context.stage_msg = "正在生成 Method 摘要..."
+            method_count = await self._generate_method_summaries(repo_name, context)
 
             # 2. 生成 Class 节点的 summary
+            context.stage_msg = "正在生成 Class 摘要..."
             class_count = await self._generate_class_summaries(repo_name)
 
             # 3. 生成 File 节点的 summary
+            context.stage_msg = "正在生成 File 摘要..."
             file_count = await self._generate_file_summaries(repo_name)
 
             # 保存结果到上下文
@@ -71,6 +75,7 @@ class SemanticAnalysisStage(PipelineStageHandler):
                 "files_summarized": file_count,
             }
 
+            context.stage_msg = f"语义分析完成：{method_count} 个方法, {class_count} 个类, {file_count} 个文件"
             logger.info(
                 f"Semantic analysis completed: {method_count} methods, "
                 f"{class_count} classes, {file_count} files summarized"
@@ -96,13 +101,14 @@ class SemanticAnalysisStage(PipelineStageHandler):
                 message=str(e),
             )
 
-    async def _generate_method_summaries(self, repo_name: str) -> int:
+    async def _generate_method_summaries(self, repo_name: str, context: PipelineContext) -> int:
         """生成所有 Method 节点的 summary.
 
         使用拓扑排序处理 CALL 依赖关系，确保先生成被调用方法的 summary。
 
         Args:
             repo_name: 仓库名称
+            context: 流水线上下文
 
         Returns:
             生成的摘要数量
@@ -111,6 +117,8 @@ class SemanticAnalysisStage(PipelineStageHandler):
         methods = await self._get_methods_with_calls(repo_name)
         if not methods:
             return 0
+
+        total_methods = len(methods)
 
         # 构建依赖图
         method_graph = self._build_call_graph(methods)
@@ -122,8 +130,12 @@ class SemanticAnalysisStage(PipelineStageHandler):
         summary_cache: Dict[str, str] = {}
 
         count = 0
-        for method_id in sorted_methods:
+        for idx, method_id in enumerate(sorted_methods):
             method = method_graph[method_id]["data"]
+
+            # 每10个方法更新一次进度消息
+            if idx % 10 == 0:
+                context.stage_msg = f"正在生成 Method 摘要: {idx}/{total_methods}"
 
             # 跳过已有 summary 的方法
             if method.get("summary"):
@@ -144,6 +156,7 @@ class SemanticAnalysisStage(PipelineStageHandler):
                 summary_cache[method_id] = summary
                 count += 1
 
+        context.stage_msg = f"已完成 {count} 个 Method 摘要"
         return count
 
     async def _get_methods_with_calls(self, repo_name: str) -> List[Dict]:

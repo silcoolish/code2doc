@@ -37,6 +37,7 @@ class ModuleDetectionStage(PipelineStageHandler):
     """
 
     stage = PipelineStage.MODULE_DETECTION
+    weight = 1.5  # 模块检测
 
     def __init__(self):
         self.llm_service = get_llm_service()
@@ -57,22 +58,27 @@ class ModuleDetectionStage(PipelineStageHandler):
             file_summaries = context.data.get("file_summaries", {})
             repo_name = context.repo_name
 
+            context.stage_msg = "正在构建代码结构信息..."
+
             # 构建结构 JSON
             structure_json = self._build_structure_json(
                 files, file_summaries, repo_name
             )
 
+            context.stage_msg = "正在使用 LLM 检测模块..."
             logger.info("Detecting modules using LLM...")
 
             # 调用 LLM 检测模块
             modules_data = await self.llm_service.detect_modules(structure_json)
 
             # 创建 Module 和 Workflow 节点
+            context.stage_msg = f"正在创建模块节点..."
             neo4j: GraphDatabaseClient = get_graph_db_client()
             created_modules = []
             created_workflows = []
 
-            for module_data in modules_data:
+            for idx, module_data in enumerate(modules_data):
+                context.stage_msg = f"正在创建模块节点: {idx + 1}/{len(modules_data)}"
                 module_id = f"module_{repo_name}_{uuid4().hex[:8]}"
 
                 module = Module(
@@ -170,6 +176,7 @@ class ModuleDetectionStage(PipelineStageHandler):
                 "semantic_relations_created": created_relations["workflow_contain"],
             }
 
+            context.stage_msg = f"模块检测完成：{len(created_modules)} 个模块, {len(created_workflows)} 个工作流"
             logger.info(f"Module detection completed: {stats}")
 
             return StageResult(

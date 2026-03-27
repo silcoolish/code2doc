@@ -52,6 +52,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
     """
 
     stage = PipelineStage.STRUCTURE_GRAPH_BUILD
+    weight = 3.0  # 文件遍历和解析，最耗时
 
     def __init__(self):
         self.settings = get_settings()
@@ -70,6 +71,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
             self.graph_db = get_graph_db_client()
 
             # 1. 遍历仓库并直接创建结构节点
+            context.stage_msg = "正在遍历仓库文件..."
             repository, directories, files = await self._traverse_and_create_structure(
                 context.repo_path, context.repo_name
             )
@@ -83,12 +85,14 @@ class StructureGraphBuildStage(PipelineStageHandler):
                 "method_ids": [],
             }
 
+            context.stage_msg = f"已创建 {len(directories)} 个目录节点"
             logger.info(f"Created Repository node: {repository.name}")
             logger.info(f"Created {len(directories)} Directory nodes")
 
             # 2. 解析代码文件并创建 File/Class/Method 节点
+            context.stage_msg = f"正在解析 {len(files)} 个代码文件..."
             file_node_ids, class_node_ids, method_node_ids = await self._process_code_files(
-                files, directories, repository.id, context.repo_name, context.repo_path
+                files, directories, repository.id, context.repo_name, context.repo_path, context
             )
             node_ids["file_ids"] = file_node_ids
             node_ids["class_ids"] = class_node_ids
@@ -105,6 +109,8 @@ class StructureGraphBuildStage(PipelineStageHandler):
                 "classes": len(node_ids["class_ids"]),
                 "methods": len(node_ids["method_ids"]),
             }
+
+            context.stage_msg = f"结构图构建完成：{len(file_node_ids)} 个文件, {len(class_node_ids)} 个类, {len(method_node_ids)} 个方法"
 
             return StageResult(
                 stage=self.stage,
@@ -314,6 +320,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
         repo_id: str,
         repo_name: str,
         repo_path: str,
+        context: PipelineContext,
     ) -> tuple[List[str], List[str], List[str]]:
         """处理代码文件：解析并创建节点.
 
@@ -362,8 +369,10 @@ class StructureGraphBuildStage(PipelineStageHandler):
                     method_ids.extend(m_ids)
 
             progress = min(100, int((i + len(batch)) / total_files * 100))
+            context.stage_msg = f"正在解析代码文件: {i + len(batch)}/{total_files} ({progress}%)"
             logger.info(f"Processing progress: {progress}% ({i + len(batch)}/{total_files})")
 
+        context.stage_msg = f"已创建 {len(file_ids)} 个File节点, {len(class_ids)} 个Class节点, {len(method_ids)} 个Method节点"
         logger.info(f"Created {len(class_ids)} Class nodes")
         logger.info(f"Created {len(method_ids)} Method nodes")
 

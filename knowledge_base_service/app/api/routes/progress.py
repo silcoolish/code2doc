@@ -18,6 +18,8 @@ class ProgressResponse(BaseModel):
     overall_status: str
     current_stage: str
     progress: float
+    pipeline_msg: str  # 流水线运行信息
+    stage_msg: str  # 阶段执行信息
     created_at: str
     updated_at: str
 
@@ -48,6 +50,8 @@ async def get_progress(repo_id: str) -> ProgressResponse:
         overall_status=ctx.overall_status.value,
         current_stage=ctx.current_stage.value,
         progress=ctx.progress,
+        pipeline_msg=ctx.pipeline_msg,
+        stage_msg=ctx.stage_msg,
         created_at=ctx.created_at.isoformat(),
         updated_at=ctx.updated_at.isoformat(),
     )

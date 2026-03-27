@@ -71,6 +71,8 @@ class PipelineContext:
     created_at: datetime = field(default_factory=datetime.utcnow, init=False)
     updated_at: datetime = field(default_factory=datetime.utcnow, init=False)
     progress: float = field(default=0.0, init=False)
+    pipeline_msg: str = field(default="", init=False)  # 流水线运行信息
+    stage_msg: str = field(default="", init=False)  # 阶段执行信息
 
     def __post_init__(self):
         """初始化后设置默认值."""
@@ -83,21 +85,27 @@ class PipelineContext:
         self.stages[stage] = result
         self.current_stage = stage
         self.updated_at = datetime.utcnow()
-        self._update_progress()
+        self._update_progress_on_complete(stage)
 
     def get_stage_result(self, stage: "PipelineStage") -> Optional["StageResult"]:
         """获取阶段结果."""
         return self.stages.get(stage)
 
-    def _update_progress(self):
-        """更新进度百分比."""
-        completed = sum(
-            1
-            for s in STAGE_ORDER
-            if s in self.stages
-            and self.stages[s].status == PipelineStatus.COMPLETED
-        )
-        self.progress = round((completed / len(STAGE_ORDER)) * 100, 2)
+    def _update_progress_on_complete(self, completed_stage: "PipelineStage"):
+        """阶段完成时更新进度百分比（基于权重）."""
+        total_weight = sum(STAGE_WEIGHTS.values())
+        if total_weight == 0:
+            total_weight = 1.0
+
+        # 计算已完成阶段的权重和
+        completed_weight = 0.0
+        for stage in STAGE_ORDER:
+            if stage in self.stages and self.stages[stage].status == PipelineStatus.COMPLETED:
+                completed_weight += STAGE_WEIGHTS.get(stage, 1.0)
+            if stage == completed_stage:
+                break
+
+        self.progress = round((completed_weight / total_weight) * 100, 2)
 
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典."""
@@ -109,6 +117,8 @@ class PipelineContext:
             "current_stage": self.current_stage.value,
             "overall_status": self.overall_status.value,
             "progress": self.progress,
+            "pipeline_msg": self.pipeline_msg,
+            "stage_msg": self.stage_msg,
             "stages": {k.value: v.to_dict() for k, v in self.stages.items()},
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
@@ -162,6 +172,8 @@ class PipelineContext:
         ctx.current_stage = PipelineStage(data["current_stage"])
         ctx.overall_status = PipelineStatus(data["overall_status"])
         ctx.progress = data.get("progress", 0.0)
+        ctx.pipeline_msg = data.get("pipeline_msg", "")
+        ctx.stage_msg = data.get("stage_msg", "")
         ctx.created_at = (
             datetime.fromisoformat(data["created_at"])
             if data.get("created_at")
@@ -200,6 +212,15 @@ STAGE_ORDER: List[PipelineStage] = [
     PipelineStage.MODULE_DETECTION,
     PipelineStage.VECTOR_DB_STORE,  # 合并了 embedding_generation
 ]
+
+# 阶段权重配置（权重越大，所占进度越多）
+STAGE_WEIGHTS: Dict[PipelineStage, float] = {
+    PipelineStage.STRUCTURE_GRAPH_BUILD: 3.0,  # 文件遍历和解析，最耗时
+    PipelineStage.DEPENDENCY_GRAPH_BUILD: 2.0,  # 依赖分析
+    PipelineStage.SEMANTIC_ANALYSIS: 2.0,  # LLM 生成摘要
+    PipelineStage.MODULE_DETECTION: 1.5,  # 模块检测
+    PipelineStage.VECTOR_DB_STORE: 1.5,  # 向量存储
+}
 
 
 class PipelineStatus(Enum):

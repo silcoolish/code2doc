@@ -35,6 +35,7 @@ class DependencyGraphBuildStage(PipelineStageHandler):
     """
 
     stage = PipelineStage.DEPENDENCY_GRAPH_BUILD
+    weight = 2.0  # 依赖分析
 
     def __init__(self):
         self.graph_db: Optional[GraphDatabaseClient] = None
@@ -53,9 +54,11 @@ class DependencyGraphBuildStage(PipelineStageHandler):
             repo_name = context.repo_name
 
             # 1. 构建文件依赖（USE 关系）
+            context.stage_msg = "正在分析文件依赖关系..."
             file_uses = await self._build_file_dependencies(repo_name)
 
             # 2. 构建方法调用（CALL 关系）
+            context.stage_msg = "正在分析方法调用关系..."
             method_calls = await self._build_method_calls(repo_name)
 
             # 保存结果到上下文
@@ -64,6 +67,7 @@ class DependencyGraphBuildStage(PipelineStageHandler):
                 "method_calls": method_calls,
             }
 
+            context.stage_msg = f"依赖图构建完成：{file_uses} 个文件依赖, {method_calls} 个方法调用"
             logger.info(
                 f"Dependency graph built: {file_uses} file uses, {method_calls} method calls"
             )

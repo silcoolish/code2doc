@@ -13,6 +13,7 @@ from app.domain.models.pipeline import (
     PipelineContext,
     StageResult,
     STAGE_ORDER,
+    STAGE_WEIGHTS,
 )
 from app.infrastructure.csv_storage import (
     get_repo_status_storage,
@@ -28,6 +29,54 @@ class PipelineStageHandler:
     """流水线阶段处理器基类."""
 
     stage: PipelineStage
+    weight: float = 1.0  # 阶段权重，越大所占进度越多
+
+    def advance_progress(
+        self,
+        context: PipelineContext,
+        stage_progress_ratio: float,
+        message: str = "",
+    ) -> None:
+        """推进流水线进度.
+
+        根据当前阶段的权重计算整体进度。
+
+        Args:
+            context: 流水线上下文
+            stage_progress_ratio: 当前阶段的完成比例 (0.0 - 1.0)
+            message: 阶段执行信息
+        """
+        # 获取总权重
+        from app.domain.models.pipeline import STAGE_WEIGHTS
+
+        total_weight = sum(STAGE_WEIGHTS.values())
+        if total_weight == 0:
+            total_weight = 1.0
+
+        # 计算当前阶段之前的累计权重
+        from app.domain.models.pipeline import STAGE_ORDER
+
+        previous_weight = 0.0
+        for stage in STAGE_ORDER:
+            if stage == self.stage:
+                break
+            previous_weight += STAGE_WEIGHTS.get(stage, 1.0)
+
+        # 计算当前阶段的权重
+        current_weight = STAGE_WEIGHTS.get(self.stage, 1.0)
+
+        # 计算整体进度
+        # 已完成部分的进度 + 当前阶段贡献的进度
+        base_progress = (previous_weight / total_weight) * 100
+        stage_contribution = (
+            stage_progress_ratio * current_weight / total_weight
+        ) * 100
+        overall_progress = base_progress + stage_contribution
+
+        # 更新上下文进度和消息
+        context.progress = round(overall_progress, 2)
+        context.stage_msg = message
+        context.updated_at = __import__("datetime").datetime.utcnow()
 
     async def execute(self, context: PipelineContext) -> StageResult:
         """执行阶段任务.
@@ -169,6 +218,27 @@ class PipelineOrchestrator:
 
         return context.pipeline_id
 
+    def _calculate_stage_base_progress(self, stage: PipelineStage) -> float:
+        """计算阶段的起始进度（基于前面所有阶段的权重）.
+
+        Args:
+            stage: 当前阶段
+
+        Returns:
+            起始进度百分比 (0-100)
+        """
+        total_weight = sum(STAGE_WEIGHTS.values())
+        if total_weight == 0:
+            return 0.0
+
+        previous_weight = 0.0
+        for s in STAGE_ORDER:
+            if s == stage:
+                break
+            previous_weight += STAGE_WEIGHTS.get(s, 1.0)
+
+        return (previous_weight / total_weight) * 100
+
     async def _run_pipeline(
         self,
         context: PipelineContext,
@@ -181,6 +251,7 @@ class PipelineOrchestrator:
             start_stage: 起始阶段
         """
         context.overall_status = PipelineStatus.RUNNING
+        context.pipeline_msg = "流水线开始执行"
 
         try:
             # 确定起始阶段索引
@@ -194,6 +265,11 @@ class PipelineOrchestrator:
             for stage in STAGE_ORDER[start_idx:]:
 
                 context.current_stage = stage
+                # 设置阶段开始时的进度（基于权重）
+                base_progress = self._calculate_stage_base_progress(stage)
+                context.progress = round(base_progress, 2)
+                context.pipeline_msg = f"{stage.value}阶段进行中"
+                context.stage_msg = ""
                 # 保存上下文, 保证执行阶段失败可恢复
                 await self._log_manager.save_context(context)
 
@@ -223,6 +299,8 @@ class PipelineOrchestrator:
 
                 # 记录阶段结果
                 if result.status == PipelineStatus.COMPLETED:
+                    # 阶段完成，确保进度到达该阶段的结束位置
+                    context.pipeline_msg = f"{stage.value}阶段完成"
                     self._log_manager.log_stage_completed(
                         repo_id=context.repo_id,
                         pipeline_id=context.pipeline_id,
@@ -246,10 +324,14 @@ class PipelineOrchestrator:
             if context.overall_status != PipelineStatus.FAILED:
                 context.overall_status = PipelineStatus.COMPLETED
                 context.current_stage = PipelineStage.COMPLETED
+                context.progress = 100.0
+                context.pipeline_msg = "流水线执行完成"
+                context.stage_msg = "所有阶段执行完成"
 
 
         except Exception as e:
             context.overall_status = PipelineStatus.FAILED
+            context.pipeline_msg = f"流水线执行失败: {str(e)}"
 
         finally:
             # 更新CSV记录状态
