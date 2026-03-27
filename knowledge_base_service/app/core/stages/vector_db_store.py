@@ -180,8 +180,23 @@ class VectorDBStoreStage(PipelineStageHandler):
         Returns:
             向量列表，每项为 (type, node_id, name, summary, embedding)
         """
-        # 准备批量数据
-        texts = [item["summary"] for item in node_contents]
+        # 准备批量数据 - 过滤并验证文本
+        texts = []
+        valid_items = []
+        for item in node_contents:
+            summary = item.get("summary")
+            # 确保 summary 是有效的字符串
+            if summary and isinstance(summary, str) and summary.strip():
+                texts.append(summary.strip())
+                valid_items.append(item)
+            else:
+                logger.warning(f"Skipping invalid summary for node {item.get('id', 'unknown')}: {type(summary)}")
+
+        if not texts:
+            logger.warning("No valid texts for embedding generation")
+            return []
+
+        logger.info(f"Generating embeddings for {len(texts)} valid items (filtered from {len(node_contents)})")
 
         # 批量生成向量
         embeddings = await self.llm_service.generate_embeddings(
@@ -191,7 +206,7 @@ class VectorDBStoreStage(PipelineStageHandler):
 
         # 组合结果
         results = []
-        for i, item in enumerate(node_contents):
+        for i, item in enumerate(valid_items):
             if i < len(embeddings):
                 results.append((
                     item["type"],

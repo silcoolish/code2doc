@@ -315,10 +315,21 @@ class LLMService:
             嵌入向量列表
         """
         try:
-            # 过滤空文本
-            valid_texts = [t for t in texts if t and len(t.strip()) > 0]
+            # 过滤空文本并验证类型
+            valid_texts = []
+            for i, t in enumerate(texts):
+                if not isinstance(t, str):
+                    logger.warning(f"Skipping non-string text at index {i}: type={type(t)}, value={t!r}")
+                    continue
+                stripped = t.strip()
+                if stripped:
+                    valid_texts.append(stripped)
+
             if not valid_texts:
+                logger.warning("No valid texts for embedding after filtering")
                 return []
+
+            logger.debug(f"Generating embeddings for {len(valid_texts)} texts")
 
             provider = self._get_embedding_provider()
             embedding_model = provider.get_embedding_model()
