@@ -430,39 +430,41 @@ class LLMService:
             模块列表
         """
         prompt = f"""
-        Analyze the following code repository structure and identify functional modules and workflows.
+        分析以下代码仓库结构，识别功能模块和业务流程。
 
-        Repository Structure:
+        仓库结构:
         ```json
         {json.dumps(structure_json, indent=2, ensure_ascii=False)}
         ```
 
-        Please identify:
-        1. High-level functional modules (e.g., "Authentication", "Database", "API")
-        2. Business workflows within each module (e.g., "User Login", "Data Sync")
+        请识别:
+        1. 高层功能模块 (例如: "用户认证", "数据库操作", "API接口")
+        2. 每个模块内的业务工作流 (例如: "用户登录流程", "数据同步流程")
 
-        Return your analysis in JSON format:
+        请用中文返回分析结果，JSON格式如下:
         {{
             "modules": [
                 {{
-                    "name": "Module Name",
-                    "description": "What this module does",
+                    "name": "模块名称(中文)",
+                    "description": "该模块的功能描述(中文)",
                     "files": ["file1.py", "file2.py"],
                     "workflows": [
                         {{
-                            "name": "Workflow Name",
-                            "description": "What this workflow does",
+                            "name": "工作流名称(中文)",
+                            "description": "该工作流的功能描述(中文)",
                             "files": ["file1.py"]
                         }}
                     ]
                 }}
             ]
         }}
+
+        注意: name 和 description 字段必须使用中文。
         """
 
         response = await self.complete(
             prompt=prompt,
-            system_prompt="You are a software architecture expert. Analyze code structure and identify modules.",
+            system_prompt="你是软件架构专家。分析代码结构并识别功能模块，所有描述必须使用中文。",
             max_tokens=4096,
             temperature=0.2,
         )

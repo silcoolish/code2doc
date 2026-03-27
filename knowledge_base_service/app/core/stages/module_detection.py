@@ -22,13 +22,18 @@ class ModuleDetectionStage(PipelineStageHandler):
         - file_summaries: Dict[str, str] - 文件ID到摘要的映射
 
     Output (context.data):
-        - modules: List[Module] - 检测到的模块列表
-        - workflows: List[Workflow] - 检测到的业务流程列表
+        - module_ids: List[str] - 检测到的模块ID列表
+        - workflow_ids: List[str] - 检测到的业务流程ID列表
 
     Side Effects:
         - 在 Neo4j 中创建 Module 和 Workflow 节点
         - 创建 File -> Module, File -> Workflow, Workflow -> Module 的 BELONG_TO 关系
         - 创建 Workflow -> Class/Method 的 CONTAIN 关系（语义图构建）
+
+    Note:
+        - 模块和工作流的描述信息使用中文生成
+        - 只保存节点ID到上下文，完整数据存储在Neo4j中
+        - 后续阶段需要通过ID查询Neo4j获取详细信息
     """
 
     stage = PipelineStage.MODULE_DETECTION
@@ -150,9 +155,9 @@ class ModuleDetectionStage(PipelineStageHandler):
                             rel_type="BELONG_TO",
                         )
 
-            # 保存到上下文
-            context.data["modules"] = created_modules
-            context.data["workflows"] = created_workflows
+            # 只保存节点ID到上下文（不保存完整对象，减少内存占用）
+            context.data["module_ids"] = [m.id for m in created_modules]
+            context.data["workflow_ids"] = [w.id for w in created_workflows]
 
             # 构建语义图关系 (从 semantic_graph_build 阶段合并过来)
             created_relations = await self._build_semantic_graph(
