@@ -316,6 +316,45 @@ class PipelineLogManager:
             context_path.unlink()
             logger.debug(f"Context cleared: {context_path}")
 
+    def reset_repo_logs(self, repo_id: str) -> None:
+        """重置仓库日志目录.
+
+        清除 context.json 并将 execution.log 移入 history 文件夹。
+
+        Args:
+            repo_id: 仓库ID
+        """
+        repo_dir = self._get_repo_dir(repo_id)
+        if not repo_dir.exists():
+            logger.debug(f"Repo log directory does not exist: {repo_dir}")
+            return
+
+        context_path = self._get_context_file_path(repo_id)
+        log_path = self._get_log_file_path(repo_id)
+        history_dir = self._get_history_dir(repo_id)
+
+        # 删除 context.json
+        if context_path.exists():
+            try:
+                context_path.unlink()
+                logger.debug(f"Deleted context: {context_path}")
+            except Exception as e:
+                logger.warning(f"Failed to delete context: {e}")
+
+        # 将 execution.log 移入 history（如果存在）
+        if log_path.exists():
+            try:
+                # 确保 history 目录存在
+                history_dir.mkdir(parents=True, exist_ok=True)
+                timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+                history_log_path = history_dir / f"execution.{timestamp}.log"
+                log_path.rename(history_log_path)
+                logger.debug(f"Moved log to history: {history_log_path}")
+            except Exception as e:
+                logger.warning(f"Failed to move log to history: {e}")
+
+        logger.info(f"Reset repo logs for: {repo_id}")
+
     async def get_active_pipeline_id(self, repo_id: str) -> Optional[str]:
         """获取仓库当前活跃的流水线ID.
 

@@ -207,6 +207,43 @@ class RepoStatusStorage:
 
         return records
 
+    def delete_record(self, repo_id: str) -> bool:
+        """删除指定仓库的记录.
+
+        Args:
+            repo_id: 仓库ID
+
+        Returns:
+            是否成功删除
+        """
+        if not self.csv_path.exists():
+            return False
+
+        records = []
+        found = False
+
+        # 读取所有记录，过滤掉要删除的
+        with open(self.csv_path, "r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if row["repo_id"] == repo_id:
+                    found = True
+                else:
+                    records.append(row)
+
+        if not found:
+            logger.warning(f"Record for repo {repo_id} not found for deletion")
+            return False
+
+        # 写回文件
+        with open(self.csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=CSV_HEADERS)
+            writer.writeheader()
+            writer.writerows(records)
+
+        logger.info(f"Deleted repo status record: {repo_id}")
+        return True
+
 
 # 全局存储实例
 _storage_instance: Optional[RepoStatusStorage] = None

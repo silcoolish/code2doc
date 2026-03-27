@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
 from app.infrastructure.db import get_graph_db_client, get_vector_db_client
-from app.api.routes import initialization, progress
+from app.api.routes import initialization, progress, reset
 from app.core.pipeline import get_orchestrator
 from app.domain.models.pipeline import PipelineStage
 
@@ -133,6 +133,11 @@ def create_app() -> FastAPI:
         progress.router,
         prefix="/api/v1/initialization",
         tags=["progress"],
+    )
+    app.include_router(
+        reset.router,
+        prefix="/api/v1/initialization",
+        tags=["reset"],
     )
 
     @app.get("/health")

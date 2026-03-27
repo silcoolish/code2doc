@@ -20,7 +20,7 @@ from app.domain.models.vector import (
     SemanticSummaryRecord,
     SemanticDetailRecord,
 )
-from app.infrastructure.db.base_client import VectorDatabaseClient
+from app.infrastructure.db.vector.base_client import VectorDatabaseClient
 
 logger = logging.getLogger(__name__)
 

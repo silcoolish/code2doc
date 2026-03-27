@@ -6,12 +6,16 @@
 from typing import Optional
 
 from app.config import get_settings
-from app.infrastructure.db.base_client import (
+from app.infrastructure.db.graph import (
     GraphDatabaseClient,
-    VectorDatabaseClient,
+    Neo4jClient,
+    get_neo4j_client,
 )
-from app.infrastructure.db.milvus_client import MilvusClient, get_milvus_client
-from app.infrastructure.db.neo4j_client import Neo4jClient, get_neo4j_client
+from app.infrastructure.db.vector import (
+    VectorDatabaseClient,
+    MilvusClient,
+    get_milvus_client,
+)
 
 __all__ = [
     # 抽象基类
