@@ -18,6 +18,7 @@ from app.domain.models.vector import (
     FileSummaryRecord,
     ClassSummaryRecord,
     MethodSummaryRecord,
+    SemanticSummaryRecord,
 )
 from app.domain.llm.client import get_llm_service
 from app.infrastructure.db import (
@@ -38,11 +39,11 @@ class VectorDBStoreStage(PipelineStageHandler):
 
     Output (context.data):
         - vector_storage: Dict - 存储统计信息
-          {file_vectors: int, class_vectors: int, method_vectors: int, total_vectors: int}
+          {file_vectors: int, class_vectors: int, method_vectors: int, semantic_vectors: int, total_vectors: int}
 
     Side Effects:
         - 将向量数据插入 Milvus 相应 collection
-        - 更新 Neo4j 中 File, Class, Method 节点的 embeddingId 属性
+        - 更新 Neo4j 中 File, Class, Method, Module, Workflow 节点的 embeddingId 属性
     """
 
     stage = PipelineStage.VECTOR_DB_STORE
@@ -81,7 +82,7 @@ class VectorDBStoreStage(PipelineStageHandler):
                     stage=self.stage,
                     status=PipelineStatus.COMPLETED,
                     message="No content to vectorize",
-                    metadata={"file_vectors": 0, "class_vectors": 0, "method_vectors": 0, "total_vectors": 0},
+                    metadata={"file_vectors": 0, "class_vectors": 0, "method_vectors": 0, "semantic_vectors": 0, "total_vectors": 0},
                 )
 
             # 2. 批量生成 embedding
@@ -162,9 +163,32 @@ class VectorDBStoreStage(PipelineStageHandler):
                     "summary": result["summary"],
                 })
 
+        # 查询 Module 节点
+        module_results = await neo4j.get_nodes_with_summary(repo_name, "Module")
+        for result in module_results:
+            if result.get("summary"):
+                contents.append({
+                    "type": "module",
+                    "id": result["id"],
+                    "name": result.get("name", ""),
+                    "summary": result["summary"],
+                })
+
+        # 查询 Workflow 节点
+        workflow_results = await neo4j.get_nodes_with_summary(repo_name, "Workflow")
+        for result in workflow_results:
+            if result.get("summary"):
+                contents.append({
+                    "type": "workflow",
+                    "id": result["id"],
+                    "name": result.get("name", ""),
+                    "summary": result["summary"],
+                })
+
         logger.info(
             f"Extracted {len(file_results)} files, {len(class_results)} classes, "
-            f"{len(method_results)} methods from Neo4j"
+            f"{len(method_results)} methods, {len(module_results)} modules, "
+            f"{len(workflow_results)} workflows from Neo4j"
         )
 
         return contents
@@ -237,6 +261,7 @@ class VectorDBStoreStage(PipelineStageHandler):
         file_records = []
         class_records = []
         method_records = []
+        semantic_records = []  # Module and Workflow records
 
         # 构建记录
         for item_type, node_id, name, summary, embedding in vectors:
@@ -269,8 +294,28 @@ class VectorDBStoreStage(PipelineStageHandler):
                     summary=summary,
                     embedding=embedding,
                 ))
+            elif item_type == "module":
+                semantic_records.append(SemanticSummaryRecord(
+                    id=vector_id,
+                    name=name,
+                    node_id=node_id,
+                    repo="",
+                    type="Module",
+                    summary=summary,
+                    embedding=embedding,
+                ))
+            elif item_type == "workflow":
+                semantic_records.append(SemanticSummaryRecord(
+                    id=vector_id,
+                    name=name,
+                    node_id=node_id,
+                    repo="",
+                    type="Workflow",
+                    summary=summary,
+                    embedding=embedding,
+                ))
 
-        stats = {"file_vectors": 0, "class_vectors": 0, "method_vectors": 0, "total_vectors": 0}
+        stats = {"file_vectors": 0, "class_vectors": 0, "method_vectors": 0, "semantic_vectors": 0, "total_vectors": 0}
 
         # 存储文件向量
         if file_records:
@@ -323,7 +368,24 @@ class VectorDBStoreStage(PipelineStageHandler):
 
             logger.info(f"Stored {len(method_records)} method vectors")
 
+        # 存储语义向量 (Module/Workflow)
+        if semantic_records:
+            records = [v.to_dict() for v in semantic_records]
+            await milvus.insert(
+                collection_name="semantic_summary_collection",
+                records=records,
+            )
+            stats["semantic_vectors"] = len(semantic_records)
+
+            # 更新 Neo4j 中的 embeddingId
+            for vector in semantic_records:
+                await neo4j.update_node_embedding_id(
+                    vector.type, vector.node_id, vector.id
+                )
+
+            logger.info(f"Stored {len(semantic_records)} semantic vectors")
+
         stats["total_vectors"] = (
-            stats["file_vectors"] + stats["class_vectors"] + stats["method_vectors"]
+            stats["file_vectors"] + stats["class_vectors"] + stats["method_vectors"] + stats["semantic_vectors"]
         )
         return stats
