@@ -204,7 +204,16 @@ class MilvusClient(VectorDatabaseClient):
                 data=records,
             )
             logger.debug(f"Inserted {len(records)} records into {collection_name}")
-            return result.primary_keys if result else []
+            # Handle different result types from pymilvus
+            if result is None:
+                return []
+            if hasattr(result, 'primary_keys'):
+                return result.primary_keys
+            if hasattr(result, 'ids'):
+                return result.ids
+            if isinstance(result, dict):
+                return result.get('ids', result.get('primary_keys', []))
+            return []
         except Exception as e:
             logger.error(f"Failed to insert into {collection_name}: {e}")
             raise

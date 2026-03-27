@@ -398,6 +398,11 @@ class LLMService:
         Returns:
             嵌入向量列表
         """
+        # DashScope API 限制 batch size 不能超过 10
+        provider_name = self.settings.embedding_provider or self.settings.llm_provider
+        if provider_name.lower() == "qwen":
+            batch_size = min(batch_size, 10)
+
         results = []
 
         for i in range(0, len(texts), batch_size):
