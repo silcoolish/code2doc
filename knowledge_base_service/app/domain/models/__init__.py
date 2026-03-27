@@ -21,8 +21,6 @@ from .vector import (
     MethodSummaryRecord,
     SemanticSummaryRecord,
     SemanticDetailRecord,
-    ClassCodeRecord,
-    MethodCodeRecord,
 )
 
 __all__ = [
@@ -45,6 +43,4 @@ __all__ = [
     "MethodSummaryRecord",
     "SemanticSummaryRecord",
     "SemanticDetailRecord",
-    "ClassCodeRecord",
-    "MethodCodeRecord",
 ]

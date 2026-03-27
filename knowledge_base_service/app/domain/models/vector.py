@@ -87,31 +87,3 @@ class SemanticDetailRecord(VectorRecord):
         result["type"] = self.type
         result["detail"] = self.detail
         return result
-
-
-@dataclass
-class ClassCodeRecord(VectorRecord):
-    """类代码向量记录."""
-
-    path: str = ""
-    code: str = ""
-
-    def to_dict(self) -> Dict[str, Any]:
-        result = super().to_dict()
-        result["path"] = self.path
-        result["code"] = self.code
-        return result
-
-
-@dataclass
-class MethodCodeRecord(VectorRecord):
-    """方法代码向量记录."""
-
-    path: str = ""
-    code: str = ""
-
-    def to_dict(self) -> Dict[str, Any]:
-        result = super().to_dict()
-        result["path"] = self.path
-        result["code"] = self.code
-        return result

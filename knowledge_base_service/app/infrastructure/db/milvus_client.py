@@ -19,8 +19,6 @@ from app.domain.models.vector import (
     MethodSummaryRecord,
     SemanticSummaryRecord,
     SemanticDetailRecord,
-    ClassCodeRecord,
-    MethodCodeRecord,
 )
 from app.infrastructure.db.base_client import VectorDatabaseClient
 
@@ -33,8 +31,6 @@ COLLECTIONS = {
     "method_summary": "method_summary_collection",
     "semantic_summary": "semantic_summary_collection",
     "semantic_detail": "semantic_detail_collection",
-    "class_code": "class_code_collection",
-    "method_code": "method_code_collection",
 }
 
 
