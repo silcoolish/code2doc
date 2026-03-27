@@ -1,7 +1,7 @@
 """Neo4j 图数据库客户端."""
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from neo4j import AsyncGraphDatabase, AsyncDriver
 from neo4j.exceptions import Neo4jError
@@ -453,7 +453,7 @@ class Neo4jClient(GraphDatabaseClient):
 
         Args:
             repo_name: 仓库名称
-            node_type: 节点类型 (File, Class, Method)
+            node_type: 节点类型 (File, Class, Method, Module, Workflow)
             database: 目标数据库名称
 
         Returns:
@@ -477,10 +477,119 @@ class Neo4jClient(GraphDatabaseClient):
             WHERE m.repo = $repo_name AND m.summary IS NOT NULL
             RETURN m.id as id, m.name as name, m.summary as summary
             """
+        elif node_type == "Module":
+            query = """
+            MATCH (mod:Module)
+            WHERE mod.repo = $repo_name AND mod.summary IS NOT NULL
+            RETURN mod.id as id, mod.name as name, mod.summary as summary
+            """
+        elif node_type == "Workflow":
+            query = """
+            MATCH (w:Workflow)
+            WHERE w.repo = $repo_name AND w.summary IS NOT NULL
+            RETURN w.id as id, w.name as name, w.summary as summary
+            """
         else:
             return []
 
         return await self.execute_query(query, {"repo_name": repo_name}, database)
+
+    async def count_nodes_with_summary(
+        self,
+        repo_name: str,
+        node_type: str,
+        database: Optional[str] = None,
+    ) -> int:
+        """获取指定类型的包含 summary 的节点总数.
+
+        Args:
+            repo_name: 仓库名称
+            node_type: 节点类型 (File, Class, Method, Module, Workflow)
+            database: 目标数据库名称
+
+        Returns:
+            节点总数
+        """
+        if node_type not in ["File", "Class", "Method", "Module", "Workflow"]:
+            return 0
+
+        query = f"""
+        MATCH (n:{node_type})
+        WHERE n.repo = $repo_name AND n.summary IS NOT NULL
+        RETURN count(n) as total
+        """
+
+        result = await self.execute_query(
+            query, {"repo_name": repo_name}, database
+        )
+        return result[0]["total"] if result else 0
+
+    async def get_nodes_with_summary_paginated(
+        self,
+        repo_name: str,
+        node_type: str,
+        skip: int = 0,
+        limit: int = 100,
+        database: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """分页获取指定类型的包含 summary 的节点.
+
+        Args:
+            repo_name: 仓库名称
+            node_type: 节点类型 (File, Class, Method, Module, Workflow)
+            skip: 跳过的记录数
+            limit: 返回的最大记录数
+            database: 目标数据库名称
+
+        Returns:
+            节点列表，包含 id, name, summary 等字段
+        """
+        params = {"repo_name": repo_name, "skip": skip, "limit": limit}
+
+        if node_type == "File":
+            query = """
+            MATCH (f:File)
+            WHERE f.repo = $repo_name AND f.summary IS NOT NULL
+            RETURN f.id as id, f.name as name, f.summary as summary, f.path as path
+            ORDER BY f.id
+            SKIP $skip LIMIT $limit
+            """
+        elif node_type == "Class":
+            query = """
+            MATCH (c:Class)
+            WHERE c.repo = $repo_name AND c.summary IS NOT NULL
+            RETURN c.id as id, c.name as name, c.summary as summary
+            ORDER BY c.id
+            SKIP $skip LIMIT $limit
+            """
+        elif node_type == "Method":
+            query = """
+            MATCH (m:Method)
+            WHERE m.repo = $repo_name AND m.summary IS NOT NULL
+            RETURN m.id as id, m.name as name, m.summary as summary
+            ORDER BY m.id
+            SKIP $skip LIMIT $limit
+            """
+        elif node_type == "Module":
+            query = """
+            MATCH (mod:Module)
+            WHERE mod.repo = $repo_name AND mod.summary IS NOT NULL
+            RETURN mod.id as id, mod.name as name, mod.summary as summary
+            ORDER BY mod.id
+            SKIP $skip LIMIT $limit
+            """
+        elif node_type == "Workflow":
+            query = """
+            MATCH (w:Workflow)
+            WHERE w.repo = $repo_name AND w.summary IS NOT NULL
+            RETURN w.id as id, w.name as name, w.summary as summary
+            ORDER BY w.id
+            SKIP $skip LIMIT $limit
+            """
+        else:
+            return []
+
+        return await self.execute_query(query, params, database)
 
     async def update_node_embedding_id(
         self,
@@ -510,6 +619,50 @@ class Neo4jClient(GraphDatabaseClient):
         except Exception as e:
             logger.warning(f"Failed to update embeddingId for {label} {node_id}: {e}")
             return False
+
+    async def update_node_embedding_ids_batch(
+        self,
+        label: str,
+        updates: List[Tuple[str, str]],
+        database: Optional[str] = None,
+    ) -> int:
+        """批量更新节点的 embeddingId 属性.
+
+        使用 UNWIND 语句优化批量更新性能，减少网络往返。
+
+        Args:
+            label: 节点标签
+            updates: 更新列表，每项为 (node_id, embedding_id) 元组
+            database: 目标数据库名称
+
+        Returns:
+            成功更新的节点数量
+        """
+        if not updates:
+            return 0
+
+        # 转换为字典列表供 UNWIND 使用
+        updates_dict = [
+            {"node_id": node_id, "embedding_id": embedding_id}
+            for node_id, embedding_id in updates
+        ]
+
+        query = f"""
+        UNWIND $updates as update
+        MATCH (n:{label} {{id: update.node_id}})
+        SET n.embeddingId = update.embedding_id
+        RETURN count(n) as updated_count
+        """
+
+        try:
+            result = await self.execute_query(
+                query, {"updates": updates_dict}, database
+            )
+            updated_count = result[0]["updated_count"] if result else 0
+            return updated_count
+        except Exception as e:
+            logger.warning(f"Failed to batch update embeddingIds for {label}: {e}")
+            return 0
 
 
 # 全局客户端实例

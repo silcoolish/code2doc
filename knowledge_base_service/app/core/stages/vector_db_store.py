@@ -1,10 +1,10 @@
 """向量数据库存储阶段处理器.
 
 该阶段合并了原 embedding_generation 和 vector_db_store 的功能：
-1. 从 Neo4j 查询 File/Class/Method 节点及其 summary
-2. 批量生成 embedding 向量
-3. 存储到 Milvus 向量数据库
-4. 更新 Neo4j 节点的 embeddingId 属性
+1. 从图数据库分页查询 File/Class/Method/Module/Workflow 节点及其 summary
+2. 分批生成 embedding 向量
+3. 分批存储到向量数据库
+4. 批量更新图数据库节点的 embeddingId 属性
 """
 
 import logging
@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 
 class VectorDBStoreStage(PipelineStageHandler):
-    """向量数据库存储阶段处理器 - 提取内容、生成向量并存储.
+    """向量数据库存储阶段处理器 - 分页提取内容、分批生成向量并存储.
 
     Input (context.data):
         - node_ids: Dict - 包含 file_ids, class_ids, method_ids（可选，如不提供则查询所有）
@@ -42,8 +42,8 @@ class VectorDBStoreStage(PipelineStageHandler):
           {file_vectors: int, class_vectors: int, method_vectors: int, semantic_vectors: int, total_vectors: int}
 
     Side Effects:
-        - 将向量数据插入 Milvus 相应 collection
-        - 更新 Neo4j 中 File, Class, Method, Module, Workflow 节点的 embeddingId 属性
+        - 将向量数据分批插入向量数据库相应 collection
+        - 批量更新图数据库中 File, Class, Method, Module, Workflow 节点的 embeddingId 属性
     """
 
     stage = PipelineStage.VECTOR_DB_STORE
@@ -56,10 +56,10 @@ class VectorDBStoreStage(PipelineStageHandler):
         """执行向量存储.
 
         流程：
-        1. 从 Neo4j 查询节点及其 summary
-        2. 批量生成 embedding
-        3. 存储到 Milvus
-        4. 更新 Neo4j 的 embeddingId
+        1. 按节点类型分页从图数据库查询节点及其 summary
+        2. 分批生成 embedding
+        3. 分批存储到向量数据库
+        4. 批量更新图数据库的 embeddingId
 
         Args:
             context: 流水线上下文
@@ -68,30 +68,44 @@ class VectorDBStoreStage(PipelineStageHandler):
             阶段执行结果
         """
         try:
-            neo4j: GraphDatabaseClient = get_graph_db_client()
-            milvus: VectorDatabaseClient = get_vector_db_client()
+            graph_db: GraphDatabaseClient = get_graph_db_client()
+            vector_db: VectorDatabaseClient = get_vector_db_client()
             repo_name = context.repo_name
+            batch_size = self.settings.batch_size
 
-            # 1. 从 Neo4j 提取节点内容（包含 summary）
-            logger.info("Extracting node contents from Neo4j...")
-            node_contents = await self._extract_node_contents(neo4j, repo_name)
+            # 初始化统计信息
+            stats = {
+                "file_vectors": 0,
+                "class_vectors": 0,
+                "method_vectors": 0,
+                "semantic_vectors": 0,
+                "total_vectors": 0,
+            }
 
-            if not node_contents:
-                logger.warning("No node contents found for vectorization")
-                return StageResult(
-                    stage=self.stage,
-                    status=PipelineStatus.COMPLETED,
-                    message="No content to vectorize",
-                    metadata={"file_vectors": 0, "class_vectors": 0, "method_vectors": 0, "semantic_vectors": 0, "total_vectors": 0},
+            # 定义要处理的节点类型配置
+            # (node_type, stat_key, collection_name, is_semantic)
+            node_type_configs = [
+                ("File", "file_vectors", "file_summary_collection", False),
+                ("Class", "class_vectors", "class_summary_collection", False),
+                ("Method", "method_vectors", "method_summary_collection", False),
+                ("Module", "semantic_vectors", "semantic_summary_collection", True),
+                ("Workflow", "semantic_vectors", "semantic_summary_collection", True),
+            ]
+
+            # 顺序处理各类型节点（降低并发复杂度，控制内存使用）
+            for node_type, stat_key, collection_name, is_semantic in node_type_configs:
+                count = await self._process_node_type_in_batches(
+                    graph_db=graph_db,
+                    vector_db=vector_db,
+                    repo_name=repo_name,
+                    node_type=node_type,
+                    collection_name=collection_name,
+                    stat_key=stat_key,
+                    is_semantic=is_semantic,
+                    batch_size=batch_size,
                 )
-
-            # 2. 批量生成 embedding
-            logger.info(f"Generating embeddings for {len(node_contents)} items...")
-            vectors = await self._generate_embeddings(node_contents)
-
-            # 3. 存储到 Milvus 并更新 Neo4j
-            logger.info("Storing vectors to Milvus...")
-            stats = await self._store_vectors(milvus, neo4j, vectors)
+                stats[stat_key] += count
+                stats["total_vectors"] += count
 
             # 保存结果到上下文
             context.data["vector_storage"] = stats
@@ -101,7 +115,7 @@ class VectorDBStoreStage(PipelineStageHandler):
             return StageResult(
                 stage=self.stage,
                 status=PipelineStatus.COMPLETED,
-                message="Vector extraction, generation and storage completed",
+                message="Vector extraction, generation and storage completed with pagination",
                 metadata=stats,
             )
 
@@ -113,124 +127,161 @@ class VectorDBStoreStage(PipelineStageHandler):
                 message=str(e),
             )
 
-    async def _extract_node_contents(
-        self, neo4j: GraphDatabaseClient, repo_name: str
-    ) -> List[Dict[str, str]]:
-        """从 Neo4j 提取节点内容.
-
-        查询所有 File、Class、Method 节点，获取其 id、name、summary。
+    async def _process_node_type_in_batches(
+        self,
+        graph_db: GraphDatabaseClient,
+        vector_db: VectorDatabaseClient,
+        repo_name: str,
+        node_type: str,
+        collection_name: str,
+        stat_key: str,
+        is_semantic: bool,
+        batch_size: int = 100,
+    ) -> int:
+        """分页处理指定类型的节点.
 
         Args:
-            neo4j: 图数据库客户端
+            graph_db: 图数据库客户端
+            vector_db: 向量数据库客户端
             repo_name: 仓库名称
+            node_type: 节点类型 (File, Class, Method, Module, Workflow)
+            collection_name: 向量数据库 collection 名称
+            stat_key: 统计信息中的键名
+            is_semantic: 是否为语义节点 (Module/Workflow)
+            batch_size: 每批处理的节点数
 
         Returns:
-            节点内容列表，每项包含 type, id, name, summary
+            处理的向量数量
+        """
+        # 获取总数用于进度计算
+        total = await graph_db.count_nodes_with_summary(repo_name, node_type)
+        if total == 0:
+            logger.debug(f"No {node_type} nodes found for repo: {repo_name}")
+            return 0
+
+        logger.info(f"Processing {total} {node_type} nodes in batches of {batch_size}")
+
+        total_processed = 0
+        skip = 0
+
+        while skip < total:
+            # 1. 分页查询节点
+            nodes = await graph_db.get_nodes_with_summary_paginated(
+                repo_name=repo_name,
+                node_type=node_type,
+                skip=skip,
+                limit=batch_size,
+            )
+
+            if not nodes:
+                break
+
+            # 2. 转换节点数据并生成 embedding
+            contents = self._convert_nodes_to_contents(nodes, node_type)
+            vectors = await self._generate_embeddings_for_batch(contents)
+
+            if not vectors:
+                logger.warning(f"No embeddings generated for {node_type} batch (skip={skip})")
+                skip += len(nodes)
+                continue
+
+            # 3. 构建记录并存储到向量数据库
+            records, updates = self._build_records_and_updates(
+                vectors=vectors,
+                node_type=node_type,
+                is_semantic=is_semantic,
+            )
+
+            if records:
+                await vector_db.insert(collection_name, records)
+
+            # 4. 批量更新图数据库的 embeddingId
+            if updates:
+                updated_count = await graph_db.update_node_embedding_ids_batch(
+                    label=node_type,
+                    updates=updates,
+                )
+                if updated_count != len(updates):
+                    logger.warning(
+                        f"Updated {updated_count}/{len(updates)} {node_type} embeddingIds"
+                    )
+
+            total_processed += len(records)
+            skip += len(nodes)
+
+            logger.info(
+                f"{node_type} progress: {min(skip, total)}/{total} "
+                f"(batch: {len(records)} vectors)"
+            )
+
+        logger.info(f"Completed processing {total_processed} {node_type} vectors")
+        return total_processed
+
+    def _convert_nodes_to_contents(
+        self, nodes: List[Dict[str, str]], node_type: str
+    ) -> List[Dict[str, str]]:
+        """将节点数据转换为内容列表.
+
+        Args:
+            nodes: 节点列表
+            node_type: 节点类型
+
+        Returns:
+            内容列表，每项包含 type, id, name, summary, path(可选)
         """
         contents = []
+        type_lower = node_type.lower()
 
-        # 查询 File 节点
-        file_results = await neo4j.get_nodes_with_summary(repo_name, "File")
-        for result in file_results:
-            if result.get("summary"):
-                contents.append({
-                    "type": "file",
-                    "id": result["id"],
-                    "name": result.get("name", ""),
-                    "summary": result["summary"],
-                    "path": result.get("path", ""),
-                })
+        for node in nodes:
+            summary = node.get("summary")
+            if not summary or not isinstance(summary, str) or not summary.strip():
+                continue
 
-        # 查询 Class 节点
-        class_results = await neo4j.get_nodes_with_summary(repo_name, "Class")
-        for result in class_results:
-            if result.get("summary"):
-                contents.append({
-                    "type": "class",
-                    "id": result["id"],
-                    "name": result.get("name", ""),
-                    "summary": result["summary"],
-                })
+            content = {
+                "type": type_lower,
+                "id": node["id"],
+                "name": node.get("name", ""),
+                "summary": summary.strip(),
+            }
 
-        # 查询 Method 节点
-        method_results = await neo4j.get_nodes_with_summary(repo_name, "Method")
-        for result in method_results:
-            if result.get("summary"):
-                contents.append({
-                    "type": "method",
-                    "id": result["id"],
-                    "name": result.get("name", ""),
-                    "summary": result["summary"],
-                })
+            # File 节点包含 path
+            if node_type == "File" and "path" in node:
+                content["path"] = node["path"]
 
-        # 查询 Module 节点
-        module_results = await neo4j.get_nodes_with_summary(repo_name, "Module")
-        for result in module_results:
-            if result.get("summary"):
-                contents.append({
-                    "type": "module",
-                    "id": result["id"],
-                    "name": result.get("name", ""),
-                    "summary": result["summary"],
-                })
-
-        # 查询 Workflow 节点
-        workflow_results = await neo4j.get_nodes_with_summary(repo_name, "Workflow")
-        for result in workflow_results:
-            if result.get("summary"):
-                contents.append({
-                    "type": "workflow",
-                    "id": result["id"],
-                    "name": result.get("name", ""),
-                    "summary": result["summary"],
-                })
-
-        logger.info(
-            f"Extracted {len(file_results)} files, {len(class_results)} classes, "
-            f"{len(method_results)} methods, {len(module_results)} modules, "
-            f"{len(workflow_results)} workflows from Neo4j"
-        )
+            contents.append(content)
 
         return contents
 
-    async def _generate_embeddings(
-        self, node_contents: List[Dict[str, str]]
+    async def _generate_embeddings_for_batch(
+        self, contents: List[Dict[str, str]]
     ) -> List[Tuple[str, str, str, str, List[float]]]:
-        """批量生成 embedding.
+        """为一批内容生成 embedding.
 
         Args:
-            node_contents: 节点内容列表
+            contents: 内容列表，每项包含 type, id, name, summary
 
         Returns:
             向量列表，每项为 (type, node_id, name, summary, embedding)
         """
-        # 准备批量数据 - 过滤并验证文本
-        texts = []
-        valid_items = []
-        for item in node_contents:
-            summary = item.get("summary")
-            # 确保 summary 是有效的字符串
-            if summary and isinstance(summary, str) and summary.strip():
-                texts.append(summary.strip())
-                valid_items.append(item)
-            else:
-                logger.warning(f"Skipping invalid summary for node {item.get('id', 'unknown')}: {type(summary)}")
-
-        if not texts:
-            logger.warning("No valid texts for embedding generation")
+        if not contents:
             return []
 
-        logger.info(f"Generating embeddings for {len(texts)} valid items (filtered from {len(node_contents)})")
+        # 提取文本用于 embedding
+        texts = [item["summary"] for item in contents]
 
-        # 批量生成向量
-        embeddings = await self.llm_service.generate_embeddings(
-            texts=texts,
-            batch_size=self.settings.batch_size,
-        )
+        try:
+            # 批量生成向量
+            embeddings = await self.llm_service.generate_embeddings(
+                texts=texts,
+                batch_size=self.settings.batch_size,
+            )
+        except Exception as e:
+            logger.error(f"Failed to generate embeddings for batch: {e}")
+            return []
 
         # 组合结果
         results = []
-        for i, item in enumerate(valid_items):
+        for i, item in enumerate(contents):
             if i < len(embeddings):
                 results.append((
                     item["type"],
@@ -242,150 +293,72 @@ class VectorDBStoreStage(PipelineStageHandler):
 
         return results
 
-    async def _store_vectors(
+    def _build_records_and_updates(
         self,
-        milvus: VectorDatabaseClient,
-        neo4j: GraphDatabaseClient,
         vectors: List[Tuple[str, str, str, str, List[float]]],
-    ) -> Dict[str, int]:
-        """存储向量到 Milvus 并更新 Neo4j.
+        node_type: str,
+        is_semantic: bool,
+    ) -> Tuple[List[Dict], List[Tuple[str, str]]]:
+        """构建向量数据库记录和图数据库更新列表.
 
         Args:
-            milvus: 向量数据库客户端
-            neo4j: 图数据库客户端
-            vectors: 向量列表 (type, node_id, name, summary, embedding)
+            vectors: 向量列表，每项为 (type, node_id, name, summary, embedding)
+            node_type: 节点类型
+            is_semantic: 是否为语义节点
 
         Returns:
-            存储统计
+            (records, updates) 元组
+            - records: 向量数据库记录列表
+            - updates: 图数据库更新列表，每项为 (node_id, embedding_id)
         """
-        file_records = []
-        class_records = []
-        method_records = []
-        semantic_records = []  # Module and Workflow records
+        records = []
+        updates = []
 
-        # 构建记录
         for item_type, node_id, name, summary, embedding in vectors:
             vector_id = str(uuid4())
 
-            if item_type == "file":
-                file_records.append(FileSummaryRecord(
+            if is_semantic:
+                # Module 或 Workflow 使用 SemanticSummaryRecord
+                record = SemanticSummaryRecord(
                     id=vector_id,
                     name=name,
                     node_id=node_id,
-                    repo="",  # 从 node_id 可以推断
+                    repo="",
+                    type=node_type,
                     summary=summary,
                     embedding=embedding,
-                ))
+                )
+            elif item_type == "file":
+                record = FileSummaryRecord(
+                    id=vector_id,
+                    name=name,
+                    node_id=node_id,
+                    repo="",
+                    summary=summary,
+                    embedding=embedding,
+                )
             elif item_type == "class":
-                class_records.append(ClassSummaryRecord(
+                record = ClassSummaryRecord(
                     id=vector_id,
                     name=name,
                     node_id=node_id,
                     repo="",
                     summary=summary,
                     embedding=embedding,
-                ))
+                )
             elif item_type == "method":
-                method_records.append(MethodSummaryRecord(
+                record = MethodSummaryRecord(
                     id=vector_id,
                     name=name,
                     node_id=node_id,
                     repo="",
                     summary=summary,
                     embedding=embedding,
-                ))
-            elif item_type == "module":
-                semantic_records.append(SemanticSummaryRecord(
-                    id=vector_id,
-                    name=name,
-                    node_id=node_id,
-                    repo="",
-                    type="Module",
-                    summary=summary,
-                    embedding=embedding,
-                ))
-            elif item_type == "workflow":
-                semantic_records.append(SemanticSummaryRecord(
-                    id=vector_id,
-                    name=name,
-                    node_id=node_id,
-                    repo="",
-                    type="Workflow",
-                    summary=summary,
-                    embedding=embedding,
-                ))
-
-        stats = {"file_vectors": 0, "class_vectors": 0, "method_vectors": 0, "semantic_vectors": 0, "total_vectors": 0}
-
-        # 存储文件向量
-        if file_records:
-            records = [v.to_dict() for v in file_records]
-            await milvus.insert(
-                collection_name="file_summary_collection",
-                records=records,
-            )
-            stats["file_vectors"] = len(file_records)
-
-            # 更新 Neo4j 中的 embeddingId
-            for vector in file_records:
-                await neo4j.update_node_embedding_id(
-                    "File", vector.node_id, vector.id
                 )
+            else:
+                continue
 
-            logger.info(f"Stored {len(file_records)} file vectors")
+            records.append(record.to_dict())
+            updates.append((node_id, vector_id))
 
-        # 存储类向量
-        if class_records:
-            records = [v.to_dict() for v in class_records]
-            await milvus.insert(
-                collection_name="class_summary_collection",
-                records=records,
-            )
-            stats["class_vectors"] = len(class_records)
-
-            # 更新 Neo4j
-            for vector in class_records:
-                await neo4j.update_node_embedding_id(
-                    "Class", vector.node_id, vector.id
-                )
-
-            logger.info(f"Stored {len(class_records)} class vectors")
-
-        # 存储方法向量
-        if method_records:
-            records = [v.to_dict() for v in method_records]
-            await milvus.insert(
-                collection_name="method_summary_collection",
-                records=records,
-            )
-            stats["method_vectors"] = len(method_records)
-
-            # 更新 Neo4j
-            for vector in method_records:
-                await neo4j.update_node_embedding_id(
-                    "Method", vector.node_id, vector.id
-                )
-
-            logger.info(f"Stored {len(method_records)} method vectors")
-
-        # 存储语义向量 (Module/Workflow)
-        if semantic_records:
-            records = [v.to_dict() for v in semantic_records]
-            await milvus.insert(
-                collection_name="semantic_summary_collection",
-                records=records,
-            )
-            stats["semantic_vectors"] = len(semantic_records)
-
-            # 更新 Neo4j 中的 embeddingId
-            for vector in semantic_records:
-                await neo4j.update_node_embedding_id(
-                    vector.type, vector.node_id, vector.id
-                )
-
-            logger.info(f"Stored {len(semantic_records)} semantic vectors")
-
-        stats["total_vectors"] = (
-            stats["file_vectors"] + stats["class_vectors"] + stats["method_vectors"] + stats["semantic_vectors"]
-        )
-        return stats
+        return records, updates

@@ -4,7 +4,7 @@
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 class GraphDatabaseClient(ABC):
@@ -278,7 +278,49 @@ class GraphDatabaseClient(ABC):
 
         Args:
             repo_name: 仓库名称
-            node_type: 节点类型 (File, Class, Method)
+            node_type: 节点类型 (File, Class, Method, Module, Workflow)
+            database: 目标数据库名称
+
+        Returns:
+            节点列表，包含 id, name, summary 等字段
+        """
+        pass
+
+    @abstractmethod
+    async def count_nodes_with_summary(
+        self,
+        repo_name: str,
+        node_type: str,
+        database: Optional[str] = None,
+    ) -> int:
+        """获取指定类型的包含 summary 的节点总数.
+
+        Args:
+            repo_name: 仓库名称
+            node_type: 节点类型 (File, Class, Method, Module, Workflow)
+            database: 目标数据库名称
+
+        Returns:
+            节点总数
+        """
+        pass
+
+    @abstractmethod
+    async def get_nodes_with_summary_paginated(
+        self,
+        repo_name: str,
+        node_type: str,
+        skip: int = 0,
+        limit: int = 100,
+        database: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """分页获取指定类型的包含 summary 的节点.
+
+        Args:
+            repo_name: 仓库名称
+            node_type: 节点类型 (File, Class, Method, Module, Workflow)
+            skip: 跳过的记录数
+            limit: 返回的最大记录数
             database: 目标数据库名称
 
         Returns:
@@ -304,6 +346,25 @@ class GraphDatabaseClient(ABC):
 
         Returns:
             是否成功更新
+        """
+        pass
+
+    @abstractmethod
+    async def update_node_embedding_ids_batch(
+        self,
+        label: str,
+        updates: List[Tuple[str, str]],
+        database: Optional[str] = None,
+    ) -> int:
+        """批量更新节点的 embeddingId 属性.
+
+        Args:
+            label: 节点标签
+            updates: 更新列表，每项为 (node_id, embedding_id) 元组
+            database: 目标数据库名称
+
+        Returns:
+            成功更新的节点数量
         """
         pass
 
