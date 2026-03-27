@@ -75,7 +75,8 @@ class QwenProvider(LLMProvider):
             model=self.settings.qwen_embedding_model,
             api_key=self.settings.dashscope_api_key,
             base_url=self.settings.qwen_base_url,
-            dimensions=self.settings.embedding_dimensions,
+            # Note: DashScope 需要禁用 token 长度检查，否则会以 token 列表格式发送
+            check_embedding_ctx_length=False,
         )
 
     def get_chat_model(self) -> BaseChatModel:
