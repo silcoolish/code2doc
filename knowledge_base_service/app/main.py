@@ -11,6 +11,7 @@ from app.config import get_settings
 from app.infrastructure.db import get_graph_db_client, get_vector_db_client
 from app.api.routes import initialization, progress, reset
 from app.core.pipeline import get_orchestrator
+from app.mcp import router as mcp_router
 from app.domain.models.pipeline import PipelineStage
 
 # 导入所有阶段处理器
@@ -139,6 +140,9 @@ def create_app() -> FastAPI:
         prefix="/api/v1/initialization",
         tags=["reset"],
     )
+
+    # MCP 路由 (HTTP 方式)
+    app.include_router(mcp_router)
 
     @app.get("/health")
     async def health_check():
