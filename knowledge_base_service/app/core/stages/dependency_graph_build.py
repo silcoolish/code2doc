@@ -51,15 +51,15 @@ class DependencyGraphBuildStage(PipelineStageHandler):
         """
         try:
             self.graph_db = get_graph_db_client()
-            repo_name = context.repo_name
+            repo_id = getattr(context, 'repo_id', context.repo_name)
 
             # 1. 构建文件依赖（USE 关系）
             context.stage_msg = "正在分析文件依赖关系..."
-            file_uses = await self._build_file_dependencies(repo_name)
+            file_uses = await self._build_file_dependencies(repo_id)
 
             # 2. 构建方法调用（CALL 关系）
             context.stage_msg = "正在分析方法调用关系..."
-            method_calls = await self._build_method_calls(repo_name)
+            method_calls = await self._build_method_calls(repo_id)
 
             # 保存结果到上下文
             context.data["dependencies"] = {
@@ -90,19 +90,19 @@ class DependencyGraphBuildStage(PipelineStageHandler):
                 message=str(e),
             )
 
-    async def _build_file_dependencies(self, repo_name: str) -> int:
+    async def _build_file_dependencies(self, repo_id: str) -> int:
         """构建文件间的 USE 依赖关系.
 
         分析 File 节点的 import/include 语句，匹配到对应的文件。
 
         Args:
-            repo_name: 仓库名称
+            repo_id: 仓库ID
 
         Returns:
             创建的 USE 关系数量
         """
         # 获取所有代码文件
-        files = await self._get_code_files(repo_name)
+        files = await self._get_code_files(repo_id)
         if not files:
             return 0
 
@@ -137,19 +137,19 @@ class DependencyGraphBuildStage(PipelineStageHandler):
 
         return created_count
 
-    async def _build_method_calls(self, repo_name: str) -> int:
+    async def _build_method_calls(self, repo_id: str) -> int:
         """构建方法间的 CALL 调用关系.
 
         分析 Method 节点的代码内容，提取方法调用。
 
         Args:
-            repo_name: 仓库名称
+            repo_id: 仓库ID
 
         Returns:
             创建的 CALL 关系数量
         """
         # 获取所有方法
-        methods = await self._get_all_methods(repo_name)
+        methods = await self._get_all_methods(repo_id)
         if not methods:
             return 0
 
@@ -195,27 +195,27 @@ class DependencyGraphBuildStage(PipelineStageHandler):
 
         return created_count
 
-    async def _get_code_files(self, repo_name: str) -> List[Dict]:
+    async def _get_code_files(self, repo_id: str) -> List[Dict]:
         """获取所有代码文件节点.
 
         Args:
-            repo_name: 仓库名称
+            repo_id: 仓库ID
 
         Returns:
             File 节点列表
         """
-        return await self.graph_db.get_code_files(repo_name)
+        return await self.graph_db.get_code_files(repo_id)
 
-    async def _get_all_methods(self, repo_name: str) -> List[Dict]:
+    async def _get_all_methods(self, repo_id: str) -> List[Dict]:
         """获取所有 Method 节点.
 
         Args:
-            repo_name: 仓库名称
+            repo_id: 仓库ID
 
         Returns:
             Method 节点列表
         """
-        return await self.graph_db.get_all_methods(repo_name)
+        return await self.graph_db.get_all_methods(repo_id)
 
     def _build_file_path_index(self, files: List[Dict]) -> Dict[str, str]:
         """构建文件路径索引.

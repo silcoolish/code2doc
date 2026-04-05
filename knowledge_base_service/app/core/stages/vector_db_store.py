@@ -71,7 +71,7 @@ class VectorDBStoreStage(PipelineStageHandler):
         try:
             graph_db: GraphDatabaseClient = get_graph_db_client()
             vector_db: VectorDatabaseClient = get_vector_db_client()
-            repo_name = context.repo_name
+            repo_id = getattr(context, 'repo_id', context.repo_name)  # 获取初始化时传入的 repo_id
             batch_size = self.settings.batch_size
 
             # 初始化统计信息
@@ -99,7 +99,7 @@ class VectorDBStoreStage(PipelineStageHandler):
                 count = await self._process_node_type_in_batches(
                     graph_db=graph_db,
                     vector_db=vector_db,
-                    repo_name=repo_name,
+                    repo_id=repo_id,
                     node_type=node_type,
                     collection_name=collection_name,
                     stat_key=stat_key,
@@ -135,7 +135,7 @@ class VectorDBStoreStage(PipelineStageHandler):
         self,
         graph_db: GraphDatabaseClient,
         vector_db: VectorDatabaseClient,
-        repo_name: str,
+        repo_id: str,
         node_type: str,
         collection_name: str,
         stat_key: str,
@@ -148,7 +148,7 @@ class VectorDBStoreStage(PipelineStageHandler):
         Args:
             graph_db: 图数据库客户端
             vector_db: 向量数据库客户端
-            repo_name: 仓库名称
+            repo_id: 仓库ID
             node_type: 节点类型 (File, Class, Method, Module, Workflow)
             collection_name: 向量数据库 collection 名称
             stat_key: 统计信息中的键名
@@ -159,7 +159,7 @@ class VectorDBStoreStage(PipelineStageHandler):
             处理的向量数量
         """
         # 获取总数用于进度计算
-        total = await graph_db.count_nodes_with_summary(repo_name, node_type)
+        total = await graph_db.count_nodes_with_summary(repo_id, node_type)
         if total == 0:
             logger.debug(f"No {node_type} nodes found for repo: {repo_name}")
             return 0
@@ -172,7 +172,7 @@ class VectorDBStoreStage(PipelineStageHandler):
         while skip < total:
             # 1. 分页查询节点
             nodes = await graph_db.get_nodes_with_summary_paginated(
-                repo_name=repo_name,
+                repo_id=repo_id,
                 node_type=node_type,
                 skip=skip,
                 limit=batch_size,
@@ -195,6 +195,7 @@ class VectorDBStoreStage(PipelineStageHandler):
                 vectors=vectors,
                 node_type=node_type,
                 is_semantic=is_semantic,
+                repo_id=repo_id,
             )
 
             if records:
@@ -309,6 +310,7 @@ class VectorDBStoreStage(PipelineStageHandler):
         vectors: List[Tuple[str, str, str, str, List[float]]],
         node_type: str,
         is_semantic: bool,
+        repo_id: str,
     ) -> Tuple[List[Dict], List[Tuple[str, str]]]:
         """构建向量数据库记录和图数据库更新列表.
 
@@ -316,6 +318,7 @@ class VectorDBStoreStage(PipelineStageHandler):
             vectors: 向量列表，每项为 (type, node_id, name, summary, embedding)
             node_type: 节点类型
             is_semantic: 是否为语义节点
+            repo_id: 仓库ID
 
         Returns:
             (records, updates) 元组
@@ -334,7 +337,8 @@ class VectorDBStoreStage(PipelineStageHandler):
                     id=vector_id,
                     name=name,
                     node_id=node_id,
-                    repo="",
+                    repo=repo_id,
+                    repo_id=repo_id,
                     type=node_type,
                     summary=summary,
                     embedding=embedding,
@@ -344,7 +348,8 @@ class VectorDBStoreStage(PipelineStageHandler):
                     id=vector_id,
                     name=name,
                     node_id=node_id,
-                    repo="",
+                    repo=repo_id,
+                    repo_id=repo_id,
                     summary=summary,
                     embedding=embedding,
                 )
@@ -353,7 +358,8 @@ class VectorDBStoreStage(PipelineStageHandler):
                     id=vector_id,
                     name=name,
                     node_id=node_id,
-                    repo="",
+                    repo=repo_id,
+                    repo_id=repo_id,
                     summary=summary,
                     embedding=embedding,
                 )
@@ -362,7 +368,8 @@ class VectorDBStoreStage(PipelineStageHandler):
                     id=vector_id,
                     name=name,
                     node_id=node_id,
-                    repo="",
+                    repo=repo_id,
+                    repo_id=repo_id,
                     summary=summary,
                     embedding=embedding,
                 )

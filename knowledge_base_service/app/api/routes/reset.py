@@ -52,12 +52,7 @@ async def reset_initialization(repo_id: str) -> ResetResponse:
         # 1. 删除图数据库中对应仓库所有节点数据
         try:
             graph_db = get_graph_db_client()
-            # 获取CSV记录中的仓库名称
-            repo_storage = get_repo_status_storage()
-            record = repo_storage.get_record(repo_id)
-            repo_name = record.repo_name if record else repo_id
-
-            deleted_count = await graph_db.delete_repo_data(repo_name)
+            deleted_count = await graph_db.delete_repo_data(repo_id)
             details["graph_db_deleted"] = True
             details["graph_db_deleted_count"] = deleted_count
             logger.info(f"Deleted {deleted_count} nodes from graph DB for repo: {repo_id}")
@@ -68,8 +63,7 @@ async def reset_initialization(repo_id: str) -> ResetResponse:
         # 2. 删除向量数据库中对应仓库所有数据
         try:
             vector_db = get_vector_db_client()
-            repo_name = record.repo_name if record else repo_id
-            deleted_stats = await vector_db.delete_repo_data(repo_name)
+            deleted_stats = await vector_db.delete_repo_data(repo_id)
             details["vector_db_deleted"] = True
             details["vector_db_deleted_stats"] = deleted_stats
             logger.info(f"Deleted vectors from DB for repo: {repo_id}, stats: {deleted_stats}")

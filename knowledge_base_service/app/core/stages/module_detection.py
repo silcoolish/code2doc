@@ -77,6 +77,9 @@ class ModuleDetectionStage(PipelineStageHandler):
             created_modules = []
             created_workflows = []
 
+            # 从 context 获取 repo_id（初始化请求传入的）
+            pipeline_repo_id = getattr(context, 'repo_id', repo_name)
+
             for idx, module_data in enumerate(modules_data):
                 context.stage_msg = f"正在创建模块节点: {idx + 1}/{len(modules_data)}"
                 module_id = f"module_{repo_name}_{uuid4().hex[:8]}"
@@ -85,6 +88,7 @@ class ModuleDetectionStage(PipelineStageHandler):
                     id=module_id,
                     name=module_data.get("name", "Unknown Module"),
                     type="Module",
+                    repo_id=pipeline_repo_id,
                     description=module_data.get("description", ""),
                     summary=module_data.get("description", ""),
                     keywords=module_data.get("files", []),
@@ -121,6 +125,7 @@ class ModuleDetectionStage(PipelineStageHandler):
                         id=workflow_id,
                         name=workflow_data.get("name", "Unknown Workflow"),
                         type="Workflow",
+                        repo_id=pipeline_repo_id,
                         description=workflow_data.get("description", ""),
                         summary=workflow_data.get("description", ""),
                         keywords=workflow_data.get("files", []),

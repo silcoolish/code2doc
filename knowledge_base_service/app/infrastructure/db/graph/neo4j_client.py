@@ -184,11 +184,11 @@ class Neo4jClient(GraphDatabaseClient):
         result = await self.execute_query(query, params, database)
         return result[0]["created"] > 0 if result else False
 
-    async def delete_repo_data(self, repo_name: str, database: Optional[str] = None) -> int:
+    async def delete_repo_data(self, repo_id: str, database: Optional[str] = None) -> int:
         """删除仓库相关数据.
 
         Args:
-            repo_name: 仓库名称
+            repo_id: 仓库ID
             database: 目标数据库名称
 
         Returns:
@@ -196,18 +196,18 @@ class Neo4jClient(GraphDatabaseClient):
         """
         query = """
         MATCH (n)
-        WHERE n.repo = $repo_name OR n.name = $repo_name
+        WHERE n.repo = $repo_id OR n.repo_id = $repo_id
         OPTIONAL MATCH (n)-[r]-()
         DELETE r, n
         RETURN count(DISTINCT n) as deleted
         """
         result = await self.execute_query(
             query,
-            {"repo_name": repo_name},
+            {"repo_id": repo_id},
             database,
         )
         deleted = result[0]["deleted"] if result else 0
-        logger.info(f"Deleted {deleted} nodes for repo: {repo_name}")
+        logger.info(f"Deleted {deleted} nodes for repo: {repo_id}")
         return deleted
 
     async def get_node_by_id(
@@ -273,11 +273,11 @@ class Neo4jClient(GraphDatabaseClient):
             database,
         )
 
-    async def get_code_files(self, repo_name: str, database: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def get_code_files(self, repo_id: str, database: Optional[str] = None) -> List[Dict[str, Any]]:
         """获取指定仓库的所有代码文件节点.
 
         Args:
-            repo_name: 仓库名称
+            repo_id: 仓库ID
             database: 目标数据库名称
 
         Returns:
@@ -285,10 +285,10 @@ class Neo4jClient(GraphDatabaseClient):
         """
         query = """
         MATCH (f:File)
-        WHERE f.repo = $repo_name AND f.fileType = 'code'
+        WHERE f.repo = $repo_id AND f.fileType = 'code'
         RETURN f.id as id, f.path as path, f.code as code, f.suffix as suffix
         """
-        result = await self.execute_query(query, {"repo_name": repo_name}, database)
+        result = await self.execute_query(query, {"repo_id": repo_id}, database)
 
         # 添加 language 字段
         language_map = {
@@ -312,11 +312,11 @@ class Neo4jClient(GraphDatabaseClient):
 
         return result
 
-    async def get_all_methods(self, repo_name: str, database: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def get_all_methods(self, repo_id: str, database: Optional[str] = None) -> List[Dict[str, Any]]:
         """获取指定仓库的所有 Method 节点.
 
         Args:
-            repo_name: 仓库名称
+            repo_id: 仓库ID
             database: 目标数据库名称
 
         Returns:
@@ -324,17 +324,17 @@ class Neo4jClient(GraphDatabaseClient):
         """
         query = """
         MATCH (m:Method)
-        WHERE m.repo = $repo_name
+        WHERE m.repo = $repo_id
         RETURN m.id as id, m.name as name, m.code as code,
                m.language as language, m.filePath as file_path
         """
-        return await self.execute_query(query, {"repo_name": repo_name}, database)
+        return await self.execute_query(query, {"repo_id": repo_id}, database)
 
-    async def get_methods_with_calls(self, repo_name: str, database: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def get_methods_with_calls(self, repo_id: str, database: Optional[str] = None) -> List[Dict[str, Any]]:
         """获取所有 Method 节点及其 CALL 关系.
 
         Args:
-            repo_name: 仓库名称
+            repo_id: 仓库ID
             database: 目标数据库名称
 
         Returns:
@@ -342,19 +342,19 @@ class Neo4jClient(GraphDatabaseClient):
         """
         query = """
         MATCH (m:Method)
-        WHERE m.repo = $repo_name
+        WHERE m.repo = $repo_id
         OPTIONAL MATCH (m)-[:CALL]->(callee:Method)
         RETURN m.id as id, m.code as code, m.docstring as docstring,
                m.language as language, m.name as name, m.summary as summary,
                collect(DISTINCT callee.id) as callee_ids
         """
-        return await self.execute_query(query, {"repo_name": repo_name}, database)
+        return await self.execute_query(query, {"repo_id": repo_id}, database)
 
-    async def get_classes_with_methods(self, repo_name: str, database: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def get_classes_with_methods(self, repo_id: str, database: Optional[str] = None) -> List[Dict[str, Any]]:
         """获取所有 Class 节点及其包含的 Method summaries.
 
         Args:
-            repo_name: 仓库名称
+            repo_id: 仓库ID
             database: 目标数据库名称
 
         Returns:
@@ -362,19 +362,19 @@ class Neo4jClient(GraphDatabaseClient):
         """
         query = """
         MATCH (c:Class)
-        WHERE c.repo = $repo_name
+        WHERE c.repo = $repo_id
         OPTIONAL MATCH (c)-[:CONTAIN]->(m:Method)
         RETURN c.id as id, c.code as code, c.docstring as docstring,
                c.language as language, c.name as name, c.summary as summary,
                collect(DISTINCT m.summary) as method_summaries
         """
-        return await self.execute_query(query, {"repo_name": repo_name}, database)
+        return await self.execute_query(query, {"repo_id": repo_id}, database)
 
-    async def get_files_for_summary(self, repo_name: str, database: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def get_files_for_summary(self, repo_id: str, database: Optional[str] = None) -> List[Dict[str, Any]]:
         """获取所有 File 节点及其包含的 Class/Method summaries.
 
         Args:
-            repo_name: 仓库名称
+            repo_id: 仓库ID
             database: 目标数据库名称
 
         Returns:
@@ -382,7 +382,7 @@ class Neo4jClient(GraphDatabaseClient):
         """
         query = """
         MATCH (f:File)
-        WHERE f.repo = $repo_name
+        WHERE f.repo = $repo_id
         OPTIONAL MATCH (f)-[:CONTAIN]->(c:Class)
         OPTIONAL MATCH (f)-[:CONTAIN]->(m:Method)
         RETURN f.id as id, f.code as code, f.fileType as file_type,
@@ -390,7 +390,7 @@ class Neo4jClient(GraphDatabaseClient):
                collect(DISTINCT c.summary) as class_summaries,
                collect(DISTINCT m.summary) as method_summaries
         """
-        return await self.execute_query(query, {"repo_name": repo_name}, database)
+        return await self.execute_query(query, {"repo_id": repo_id}, database)
 
     async def update_node_summary(
         self,
@@ -445,14 +445,14 @@ class Neo4jClient(GraphDatabaseClient):
 
     async def get_nodes_with_summary(
         self,
-        repo_name: str,
+        repo_id: str,
         node_type: str,
         database: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """获取指定类型的所有包含 summary 的节点.
 
         Args:
-            repo_name: 仓库名称
+            repo_id: 仓库ID
             node_type: 节点类型 (File, Class, Method, Module, Workflow)
             database: 目标数据库名称
 
@@ -462,48 +462,48 @@ class Neo4jClient(GraphDatabaseClient):
         if node_type == "File":
             query = """
             MATCH (f:File)
-            WHERE f.repo = $repo_name AND f.summary IS NOT NULL
+            WHERE f.repo = $repo_id AND f.summary IS NOT NULL
             RETURN f.id as id, f.name as name, f.summary as summary, f.path as path
             """
         elif node_type == "Class":
             query = """
             MATCH (c:Class)
-            WHERE c.repo = $repo_name AND c.summary IS NOT NULL
+            WHERE c.repo = $repo_id AND c.summary IS NOT NULL
             RETURN c.id as id, c.name as name, c.summary as summary
             """
         elif node_type == "Method":
             query = """
             MATCH (m:Method)
-            WHERE m.repo = $repo_name AND m.summary IS NOT NULL
+            WHERE m.repo = $repo_id AND m.summary IS NOT NULL
             RETURN m.id as id, m.name as name, m.summary as summary
             """
         elif node_type == "Module":
             query = """
             MATCH (mod:Module)
-            WHERE mod.repo = $repo_name AND mod.summary IS NOT NULL
+            WHERE mod.repo = $repo_id AND mod.summary IS NOT NULL
             RETURN mod.id as id, mod.name as name, mod.summary as summary
             """
         elif node_type == "Workflow":
             query = """
             MATCH (w:Workflow)
-            WHERE w.repo = $repo_name AND w.summary IS NOT NULL
+            WHERE w.repo = $repo_id AND w.summary IS NOT NULL
             RETURN w.id as id, w.name as name, w.summary as summary
             """
         else:
             return []
 
-        return await self.execute_query(query, {"repo_name": repo_name}, database)
+        return await self.execute_query(query, {"repo_id": repo_id}, database)
 
     async def count_nodes_with_summary(
         self,
-        repo_name: str,
+        repo_id: str,
         node_type: str,
         database: Optional[str] = None,
     ) -> int:
         """获取指定类型的包含 summary 的节点总数.
 
         Args:
-            repo_name: 仓库名称
+            repo_id: 仓库ID
             node_type: 节点类型 (File, Class, Method, Module, Workflow)
             database: 目标数据库名称
 
@@ -515,18 +515,18 @@ class Neo4jClient(GraphDatabaseClient):
 
         query = f"""
         MATCH (n:{node_type})
-        WHERE n.repo = $repo_name AND n.summary IS NOT NULL
+        WHERE n.repo = $repo_id AND n.summary IS NOT NULL
         RETURN count(n) as total
         """
 
         result = await self.execute_query(
-            query, {"repo_name": repo_name}, database
+            query, {"repo_id": repo_id}, database
         )
         return result[0]["total"] if result else 0
 
     async def get_nodes_with_summary_paginated(
         self,
-        repo_name: str,
+        repo_id: str,
         node_type: str,
         skip: int = 0,
         limit: int = 100,
@@ -535,7 +535,7 @@ class Neo4jClient(GraphDatabaseClient):
         """分页获取指定类型的包含 summary 的节点.
 
         Args:
-            repo_name: 仓库名称
+            repo_id: 仓库ID
             node_type: 节点类型 (File, Class, Method, Module, Workflow)
             skip: 跳过的记录数
             limit: 返回的最大记录数
@@ -544,12 +544,12 @@ class Neo4jClient(GraphDatabaseClient):
         Returns:
             节点列表，包含 id, name, summary 等字段
         """
-        params = {"repo_name": repo_name, "skip": skip, "limit": limit}
+        params = {"repo_id": repo_id, "skip": skip, "limit": limit}
 
         if node_type == "File":
             query = """
             MATCH (f:File)
-            WHERE f.repo = $repo_name AND f.summary IS NOT NULL
+            WHERE f.repo = $repo_id AND f.summary IS NOT NULL
             RETURN f.id as id, f.name as name, f.summary as summary, f.path as path
             ORDER BY f.id
             SKIP $skip LIMIT $limit
@@ -557,7 +557,7 @@ class Neo4jClient(GraphDatabaseClient):
         elif node_type == "Class":
             query = """
             MATCH (c:Class)
-            WHERE c.repo = $repo_name AND c.summary IS NOT NULL
+            WHERE c.repo = $repo_id AND c.summary IS NOT NULL
             RETURN c.id as id, c.name as name, c.summary as summary
             ORDER BY c.id
             SKIP $skip LIMIT $limit
@@ -565,7 +565,7 @@ class Neo4jClient(GraphDatabaseClient):
         elif node_type == "Method":
             query = """
             MATCH (m:Method)
-            WHERE m.repo = $repo_name AND m.summary IS NOT NULL
+            WHERE m.repo = $repo_id AND m.summary IS NOT NULL
             RETURN m.id as id, m.name as name, m.summary as summary
             ORDER BY m.id
             SKIP $skip LIMIT $limit
@@ -573,7 +573,7 @@ class Neo4jClient(GraphDatabaseClient):
         elif node_type == "Module":
             query = """
             MATCH (mod:Module)
-            WHERE mod.repo = $repo_name AND mod.summary IS NOT NULL
+            WHERE mod.repo = $repo_id AND mod.summary IS NOT NULL
             RETURN mod.id as id, mod.name as name, mod.summary as summary
             ORDER BY mod.id
             SKIP $skip LIMIT $limit
@@ -581,7 +581,7 @@ class Neo4jClient(GraphDatabaseClient):
         elif node_type == "Workflow":
             query = """
             MATCH (w:Workflow)
-            WHERE w.repo = $repo_name AND w.summary IS NOT NULL
+            WHERE w.repo = $repo_id AND w.summary IS NOT NULL
             RETURN w.id as id, w.name as name, w.summary as summary
             ORDER BY w.id
             SKIP $skip LIMIT $limit
@@ -663,6 +663,121 @@ class Neo4jClient(GraphDatabaseClient):
         except Exception as e:
             logger.warning(f"Failed to batch update embeddingIds for {label}: {e}")
             return 0
+
+    async def get_project_structure(
+        self,
+        repo_id: str,
+        database: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """获取项目目录结构.
+
+        Args:
+            repo_id: 仓库ID
+            database: 目标数据库名称
+
+        Returns:
+            目录和文件列表，每项包含 id, path, type, labels, summary 字段
+        """
+        query = """
+        MATCH (r:Repository {repo_id: $repo_id})-[:CONTAIN*]->(n)
+        WHERE n:Directory OR n:File
+        RETURN n.id as id, n.path as path, n.type as type, labels(n) as labels, n.summary as summary
+        ORDER BY path
+        """
+        return await self.execute_query(query, {"repo_id": repo_id}, database)
+
+    async def get_modules(
+        self,
+        repo_id: str,
+        database: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """获取项目的 Module 列表.
+
+        Args:
+            repo_id: 仓库ID
+            database: 目标数据库名称
+
+        Returns:
+            Module 列表，每项包含 id, name, description, summary 字段
+        """
+        query = """
+        MATCH (m:Module)
+        WHERE m.repo = $repo_id
+        RETURN m.id as id, m.name as name, m.description as description, m.summary as summary
+        """
+        return await self.execute_query(
+            query,
+            {"repo_id": repo_id},
+            database,
+        )
+
+    async def get_module_workflows(
+        self,
+        module_id: str,
+        database: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """获取 Module 对应的 Workflow 列表.
+
+        Args:
+            module_id: Module ID
+            database: 目标数据库名称
+
+        Returns:
+            Workflow 列表，每项包含 id, name, description, summary 字段
+        """
+        query = """
+        MATCH (w:Workflow)-[:BELONG_TO]->(m:Module {id: $module_id})
+        RETURN w.id as id, w.name as name, w.description as description, w.summary as summary
+        """
+        return await self.execute_query(query, {"module_id": module_id}, database)
+
+    async def get_node_dependencies(
+        self,
+        node_id: str,
+        depth: int = 1,
+        database: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """获取节点的依赖关系图.
+
+        Args:
+            node_id: 节点ID
+            depth: 搜索深度
+            database: 目标数据库名称
+
+        Returns:
+            依赖关系列表，每项包含 source, target, relationships, distance 字段
+        """
+        query = """
+        MATCH path = (n {id: $node_id})-[r*1..$depth]-(m)
+        WHERE n <> m
+        RETURN n.id as source_id, labels(n) as source_labels,
+               m.id as target_id, labels(m) as target_labels,
+               [rel in r | type(rel)] as rel_types,
+               length(path) as distance
+        LIMIT 100
+        """
+        results = await self.execute_query(
+            query,
+            {"node_id": node_id, "depth": depth},
+            database,
+        )
+
+        dependencies = []
+        for result in results:
+            dependencies.append({
+                "source": {
+                    "id": result["source_id"],
+                    "labels": result["source_labels"],
+                },
+                "target": {
+                    "id": result["target_id"],
+                    "labels": result["target_labels"],
+                },
+                "relationships": result["rel_types"],
+                "distance": result["distance"],
+            })
+
+        return dependencies
 
 
 # 全局客户端实例

@@ -102,6 +102,11 @@ class MilvusClient(VectorDatabaseClient):
                     max_length=128,
                 ),
                 FieldSchema(
+                    name="repo_id",
+                    dtype=DataType.VARCHAR,
+                    max_length=64,
+                ),
+                FieldSchema(
                     name="embedding",
                     dtype=DataType.FLOAT_VECTOR,
                     dim=self._dimensions,
@@ -249,7 +254,7 @@ class MilvusClient(VectorDatabaseClient):
                 collection_name=collection_name,
                 data=[query_vector],
                 limit=top_k,
-                output_fields=["id", "name", "node_id", "repo"],
+                output_fields=["id", "name", "node_id", "repo", "repo_id"],
                 filter=filter_expr,
                 search_params=search_params,
             )
@@ -264,6 +269,7 @@ class MilvusClient(VectorDatabaseClient):
                             "name": hit.get("name"),
                             "node_id": hit.get("node_id"),
                             "repo": hit.get("repo"),
+                            "repo_id": hit.get("repo_id"),
                             "distance": hit.get("distance", 0),
                         })
 
@@ -275,13 +281,13 @@ class MilvusClient(VectorDatabaseClient):
     async def delete_by_repo(
         self,
         collection_name: str,
-        repo: str,
+        repo_id: str,
     ) -> int:
         """删除指定仓库的数据.
 
         Args:
             collection_name: Collection 名称
-            repo: 仓库名称
+            repo_id: 仓库ID
 
         Returns:
             删除的记录数量
@@ -292,27 +298,27 @@ class MilvusClient(VectorDatabaseClient):
         try:
             result = await self._client.delete(
                 collection_name=collection_name,
-                expr=f'repo == "{repo}"',
+                expr=f'repo == "{repo_id}"',
             )
             deleted = result.delete_count if result else 0
-            logger.info(f"Deleted {deleted} records from {collection_name} for repo: {repo}")
+            logger.info(f"Deleted {deleted} records from {collection_name} for repo: {repo_id}")
             return deleted
         except Exception as e:
             logger.error(f"Failed to delete from {collection_name}: {e}")
             raise
 
-    async def delete_repo_data(self, repo: str) -> Dict[str, int]:
+    async def delete_repo_data(self, repo_id: str) -> Dict[str, int]:
         """删除指定仓库的所有数据.
 
         Args:
-            repo: 仓库名称
+            repo_id: 仓库ID
 
         Returns:
             各 collection 删除数量统计
         """
         results = {}
         for key, collection_name in COLLECTIONS.items():
-            results[key] = await self.delete_by_repo(collection_name, repo)
+            results[key] = await self.delete_by_repo(collection_name, repo_id)
         return results
 
 

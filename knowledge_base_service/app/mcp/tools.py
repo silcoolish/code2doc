@@ -13,37 +13,37 @@ logger = logging.getLogger(__name__)
 class KnowledgeBaseTools:
     """知识底座工具类."""
 
-    def __init__(self, neo4j: GraphDatabaseClient, milvus: VectorDatabaseClient):
-        self.neo4j = neo4j
-        self.milvus = milvus
+    def __init__(self, graph_db: GraphDatabaseClient, vector_db: VectorDatabaseClient):
+        self.graph_db = graph_db
+        self.vector_db = vector_db
         self.llm_service = get_llm_service()
 
-    async def get_project_structure(self, repo_name: str) -> str:
+    async def get_project_structure(self, repo_id: str) -> str:
         """获取项目目录结构."""
-        query = """
-        MATCH (r:Repository {name: $repo_name})-[:CONTAIN*]->(n)
-        WHERE n:Directory OR n:File
-        RETURN n.path as path, n.type as type, labels(n) as labels
-        ORDER BY path
-        """
-        results = await self.neo4j.execute_query(query, {"repo_name": repo_name})
+        results = await self.graph_db.get_project_structure(repo_id)
 
         if not results:
-            return f"Repository '{repo_name}' not found or empty."
+            return f"Repository '{repo_id}' not found or empty."
 
         # 构建树形结构
-        structure = {"repository": repo_name, "items": []}
+        structure = {"repository": repo_id, "items": []}
         for result in results:
-            structure["items"].append({
-                "path": result["path"],
-                "type": result["labels"][0] if result["labels"] else "Unknown",
-            })
+            item = {
+                "id": result.get("id", ""),
+                "path": result.get("path", ""),
+                "type": result["labels"][0] if result.get("labels") else "Unknown",
+            }
+            # 添加 summary（如果有）
+            summary = result.get("summary")
+            if summary:
+                item["summary"] = summary
+            structure["items"].append(item)
 
         return json.dumps(structure, indent=2, ensure_ascii=False)
 
     async def search_nodes(
         self,
-        repo_name: str,
+        repo_id: str,
         query: str,
         node_types: List[str],
         top_k: int = 10,
@@ -75,11 +75,11 @@ class KnowledgeBaseTools:
                 continue
 
             try:
-                filter_expr = f'repo == "{repo_name}"'
+                filter_expr = f'repo == "{repo_id}"'
                 if node_type in ["Module", "Workflow"]:
                     filter_expr += f' && type == "{node_type}"'
 
-                results = await self.milvus.search(
+                results = await self.vector_db.search(
                     collection_name=collection,
                     query_vector=query_vector,
                     top_k=top_k,
@@ -96,7 +96,7 @@ class KnowledgeBaseTools:
         # 3. 获取详细信息
         detailed_results = []
         for result in all_results[:top_k]:
-            node_info = await self.neo4j.get_node_by_id(result["node_id"])
+            node_info = await self.graph_db.get_node_by_id(result["node_id"])
             if node_info:
                 detailed_results.append({
                     "node_id": result["node_id"],
@@ -111,17 +111,9 @@ class KnowledgeBaseTools:
             "results": detailed_results,
         }, indent=2, ensure_ascii=False)
 
-    async def get_modules(self, repo_name: str) -> str:
+    async def get_modules(self, repo_id: str) -> str:
         """获取项目的 Module 列表."""
-        query = """
-        MATCH (m:Module)
-        WHERE m.repo = $repo_name OR m.id STARTS WITH $repo_prefix
-        RETURN m.id as id, m.name as name, m.description as description, m.summary as summary
-        """
-        results = await self.neo4j.execute_query(
-            query,
-            {"repo_name": repo_name, "repo_prefix": f"module_{repo_name}_"},
-        )
+        results = await self.graph_db.get_modules(repo_id)
 
         modules = []
         for result in results:
@@ -133,17 +125,13 @@ class KnowledgeBaseTools:
             })
 
         return json.dumps({
-            "repo_name": repo_name,
+            "repo_id": repo_id,
             "modules": modules,
         }, indent=2, ensure_ascii=False)
 
-    async def get_module_workflows(self, repo_name: str, module_id: str) -> str:
+    async def get_module_workflows(self, repo_id: str, module_id: str) -> str:
         """获取 Module 对应的 Workflow 列表."""
-        query = """
-        MATCH (w:Workflow)-[:BELONG_TO]->(m:Module {id: $module_id})
-        RETURN w.id as id, w.name as name, w.description as description, w.summary as summary
-        """
-        results = await self.neo4j.execute_query(query, {"module_id": module_id})
+        results = await self.graph_db.get_module_workflows(module_id)
 
         workflows = []
         for result in results:
@@ -162,12 +150,12 @@ class KnowledgeBaseTools:
     async def get_node_by_id(self, node_id: str) -> str:
         """根据节点 ID 获取节点信息."""
         # 获取节点基本信息
-        node_info = await self.neo4j.get_node_by_id(node_id)
+        node_info = await self.graph_db.get_node_by_id(node_id)
         if not node_info:
             return f"Node not found: {node_id}"
 
         # 获取节点关系
-        relationships = await self.neo4j.get_node_relationships(node_id)
+        relationships = await self.graph_db.get_node_relationships(node_id)
 
         return json.dumps({
             "node": node_info.get("node", {}),
@@ -181,34 +169,7 @@ class KnowledgeBaseTools:
         depth: int = 1,
     ) -> str:
         """获取节点的依赖关系图."""
-        query = """
-        MATCH path = (n {id: $node_id})-[r*1..$depth]-(m)
-        WHERE n <> m
-        RETURN n.id as source_id, labels(n) as source_labels,
-               m.id as target_id, labels(m) as target_labels,
-               [rel in r | type(rel)] as rel_types,
-               length(path) as distance
-        LIMIT 100
-        """
-        results = await self.neo4j.execute_query(
-            query,
-            {"node_id": node_id, "depth": depth},
-        )
-
-        dependencies = []
-        for result in results:
-            dependencies.append({
-                "source": {
-                    "id": result["source_id"],
-                    "labels": result["source_labels"],
-                },
-                "target": {
-                    "id": result["target_id"],
-                    "labels": result["target_labels"],
-                },
-                "relationships": result["rel_types"],
-                "distance": result["distance"],
-            })
+        dependencies = await self.graph_db.get_node_dependencies(node_id, depth)
 
         return json.dumps({
             "node_id": node_id,
@@ -219,7 +180,7 @@ class KnowledgeBaseTools:
     async def get_file_content(self, file_id: str) -> str:
         """获取文件内容."""
         # 获取文件节点
-        node_info = await self.neo4j.get_node_by_id(file_id)
+        node_info = await self.graph_db.get_node_by_id(file_id)
         if not node_info:
             return f"File not found: {file_id}"
 
@@ -251,7 +212,7 @@ class KnowledgeBaseTools:
 
     async def search_code(
         self,
-        repo_name: str,
+        repo_id: str,
         query: str,
         top_k: int = 10,
     ) -> str:
@@ -272,11 +233,11 @@ class KnowledgeBaseTools:
 
         for collection in collections:
             try:
-                results = await self.milvus.search(
+                results = await self.vector_db.search(
                     collection_name=collection,
                     query_vector=query_vector,
                     top_k=top_k,
-                    filter_expr=f'repo == "{repo_name}"',
+                    filter_expr=f'repo == "{repo_id}"',
                 )
 
                 for result in results:
@@ -289,7 +250,7 @@ class KnowledgeBaseTools:
         # 3. 获取代码详情
         detailed_results = []
         for result in all_results[:top_k]:
-            node_info = await self.neo4j.get_node_by_id(result["node_id"])
+            node_info = await self.graph_db.get_node_by_id(result["node_id"])
             if node_info:
                 node = node_info.get("node", {})
                 detailed_results.append({

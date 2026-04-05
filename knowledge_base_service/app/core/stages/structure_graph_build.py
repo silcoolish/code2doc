@@ -70,10 +70,13 @@ class StructureGraphBuildStage(PipelineStageHandler):
         try:
             self.graph_db = get_graph_db_client()
 
+            # 从 context 获取 repo_id（初始化请求传入的）
+            pipeline_repo_id = getattr(context, 'repo_id', context.repo_name)
+
             # 1. 遍历仓库并直接创建结构节点
             context.stage_msg = "正在遍历仓库文件..."
             repository, directories, files = await self._traverse_and_create_structure(
-                context.repo_path, context.repo_name
+                context.repo_path, context.repo_name, pipeline_repo_id
             )
 
             # 节点ID记录（只存ID，不存完整数据）
@@ -92,7 +95,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
             # 2. 解析代码文件并创建 File/Class/Method 节点
             context.stage_msg = f"正在解析 {len(files)} 个代码文件..."
             file_node_ids, class_node_ids, method_node_ids = await self._process_code_files(
-                files, directories, repository.id, context.repo_name, context.repo_path, context
+                files, directories, repository.id, context.repo_name, context.repo_path, context, pipeline_repo_id
             )
             node_ids["file_ids"] = file_node_ids
             node_ids["class_ids"] = class_node_ids
@@ -131,13 +134,14 @@ class StructureGraphBuildStage(PipelineStageHandler):
             )
 
     async def _traverse_and_create_structure(
-        self, repo_path: str, repo_name: str
+        self, repo_path: str, repo_name: str, pipeline_repo_id: str
     ) -> tuple[Repository, List[Directory], List[File]]:
         """遍历仓库并直接创建结构节点.
 
         Args:
             repo_path: 仓库路径
             repo_name: 仓库名称
+            pipeline_repo_id: 初始化请求传入的repo_id
 
         Returns:
             (repository, directories, code_files)
@@ -151,6 +155,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
             id=f"repo_{repo_name}",
             name=repo_name,
             type="Repository",
+            repo_id=pipeline_repo_id,
             path=str(repo_root),
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow(),
@@ -185,6 +190,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
                         id=f"dir_{repo_name}_{str_path}",
                         name=path.name,
                         type="Directory",
+                        repo_id=pipeline_repo_id,
                         path=str_path,
                     )
                     await self._create_directory(directory, repository.id)
@@ -200,6 +206,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
                         id=f"file_{repo_name}_{str_path}",
                         name=path.name,
                         type="File",
+                        repo_id=pipeline_repo_id,
                         path=str_path,
                         file_type=file_type,
                         suffix=suffix,
@@ -321,15 +328,18 @@ class StructureGraphBuildStage(PipelineStageHandler):
         repo_name: str,
         repo_path: str,
         context: PipelineContext,
+        pipeline_repo_id: str = "",
     ) -> tuple[List[str], List[str], List[str]]:
         """处理代码文件：解析并创建节点.
 
         Args:
             code_files: 代码文件列表（已过滤的代码类型文件）
             directories: 目录列表
-            repo_id: 仓库ID
+            repo_id: 仓库节点ID
             repo_name: 仓库名称
             repo_path: 仓库路径
+            context: 流水线上下文
+            pipeline_repo_id: 初始化请求传入的repo_id
 
         Returns:
             (file_ids, class_ids, method_ids)
@@ -354,7 +364,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
 
             # 并发处理
             tasks = [
-                self._parse_and_store_file(f, directories, repo_id, repo_name, repo_path)
+                self._parse_and_store_file(f, directories, repo_id, repo_name, repo_path, pipeline_repo_id)
                 for f in batch
             ]
             batch_results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -385,15 +395,17 @@ class StructureGraphBuildStage(PipelineStageHandler):
         repo_id: str,
         repo_name: str,
         repo_path: str,
+        pipeline_repo_id: str = "",
     ) -> tuple[List[str], List[str], List[str]]:
         """解析单个文件并存储到图数据库.
 
         Args:
             file_node: 文件节点
             directories: 目录列表
-            repo_id: 仓库ID
+            repo_id: 仓库节点ID
             repo_name: 仓库名称
             repo_path: 仓库路径
+            pipeline_repo_id: 初始化请求传入的repo_id
 
         Returns:
             (file_ids, class_ids, method_ids)
@@ -433,7 +445,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
         class_name_to_id: dict = {}
         for class_symbol in parse_result.classes:
             class_node_id = await self._create_class_from_symbol(
-                class_symbol, file_id, file_node.path, parse_result.language, repo_name
+                class_symbol, file_id, file_node.path, parse_result.language, repo_name, pipeline_repo_id
             )
             class_ids.append(class_node_id)
             class_name_to_id[class_symbol.name] = class_node_id
@@ -450,6 +462,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
                     file_node.path,
                     parse_result.language,
                     repo_name,
+                    pipeline_repo_id,
                     class_name=method_symbol.parent_name,
                 )
             else:
@@ -460,6 +473,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
                     file_node.path,
                     parse_result.language,
                     repo_name,
+                    pipeline_repo_id,
                 )
             method_ids.append(method_node_id)
 
@@ -468,7 +482,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
     async def _create_repository(self, repository: Repository) -> None:
         """创建 Repository 节点."""
         properties = repository.to_dict()
-        properties["repo"] = repository.name
+        properties["repo"] = repository.repo_id
         properties = self._filter_properties(properties)
 
         await self.graph_db.merge_node(
@@ -536,8 +550,12 @@ class StructureGraphBuildStage(PipelineStageHandler):
         file_path: str,
         language: str,
         repo_name: str,
+        pipeline_repo_id: str = "",
     ) -> str:
         """从 ParsedSymbol 创建 Class 节点.
+
+        Args:
+            pipeline_repo_id: 初始化请求传入的repo_id
 
         Returns:
             创建的 Class 节点ID
@@ -553,6 +571,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
             id=class_node_id,
             name=class_symbol.name,
             type="Class",
+            repo_id=pipeline_repo_id,
             file_path=file_path,
             start_line=class_symbol.start_line,
             end_line=class_symbol.end_line,
@@ -563,7 +582,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
         )
 
         properties = class_node.to_dict()
-        properties["repo"] = repo_name
+        properties["repo"] = pipeline_repo_id
         properties = self._filter_properties(properties)
 
         await self.graph_db.merge_node(
@@ -593,9 +612,13 @@ class StructureGraphBuildStage(PipelineStageHandler):
         file_path: str,
         language: str,
         repo_name: str,
+        pipeline_repo_id: str = "",
         class_name: str = "",
     ) -> str:
         """从 ParsedSymbol 创建 Method 节点.
+
+        Args:
+            pipeline_repo_id: 初始化请求传入的repo_id
 
         Returns:
             创建的 Method 节点ID
@@ -609,6 +632,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
             id=method_node_id,
             name=method_symbol.name,
             type="Method",
+            repo_id=pipeline_repo_id,
             file_path=file_path,
             start_line=method_symbol.start_line,
             end_line=method_symbol.end_line,
@@ -619,7 +643,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
         )
 
         properties = method_node.to_dict()
-        properties["repo"] = repo_name
+        properties["repo"] = pipeline_repo_id
         properties = self._filter_properties(properties)
 
         await self.graph_db.merge_node(

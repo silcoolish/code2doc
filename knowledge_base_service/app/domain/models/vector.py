@@ -12,6 +12,7 @@ class VectorRecord:
     name: str
     node_id: str
     repo: str
+    repo_id: str = ""  # 初始化时传入的 repo_id 参数
     embedding: Optional[List[float]] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -21,6 +22,7 @@ class VectorRecord:
             "name": self.name,
             "node_id": self.node_id,
             "repo": self.repo,
+            "repo_id": self.repo_id,
             "embedding": self.embedding,
         }
 

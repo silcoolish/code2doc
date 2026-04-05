@@ -13,6 +13,7 @@ class BaseNode(ABC):
     id: str
     name: str
     type: str
+    repo_id: str = ""
     description: str = ""
     extra: Dict[str, Any] = field(default_factory=dict)
 
@@ -22,6 +23,7 @@ class BaseNode(ABC):
             "id": self.id,
             "name": self.name,
             "type": self.type,
+            "repo_id": self.repo_id,
             "description": self.description,
         }
         # 只添加非空的 extra 字段

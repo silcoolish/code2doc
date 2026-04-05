@@ -116,11 +116,11 @@ class GraphDatabaseClient(ABC):
         pass
 
     @abstractmethod
-    async def delete_repo_data(self, repo_name: str, database: Optional[str] = None) -> int:
+    async def delete_repo_data(self, repo_id: str, database: Optional[str] = None) -> int:
         """删除仓库相关数据.
 
         Args:
-            repo_name: 仓库名称
+            repo_id: 仓库ID
             database: 目标数据库名称
 
         Returns:
@@ -165,11 +165,11 @@ class GraphDatabaseClient(ABC):
         pass
 
     @abstractmethod
-    async def get_code_files(self, repo_name: str, database: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def get_code_files(self, repo_id: str, database: Optional[str] = None) -> List[Dict[str, Any]]:
         """获取指定仓库的所有代码文件节点.
 
         Args:
-            repo_name: 仓库名称
+            repo_id: 仓库ID
             database: 目标数据库名称
 
         Returns:
@@ -178,11 +178,11 @@ class GraphDatabaseClient(ABC):
         pass
 
     @abstractmethod
-    async def get_all_methods(self, repo_name: str, database: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def get_all_methods(self, repo_id: str, database: Optional[str] = None) -> List[Dict[str, Any]]:
         """获取指定仓库的所有 Method 节点.
 
         Args:
-            repo_name: 仓库名称
+            repo_id: 仓库ID
             database: 目标数据库名称
 
         Returns:
@@ -191,11 +191,11 @@ class GraphDatabaseClient(ABC):
         pass
 
     @abstractmethod
-    async def get_methods_with_calls(self, repo_name: str, database: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def get_methods_with_calls(self, repo_id: str, database: Optional[str] = None) -> List[Dict[str, Any]]:
         """获取所有 Method 节点及其 CALL 关系.
 
         Args:
-            repo_name: 仓库名称
+            repo_id: 仓库ID
             database: 目标数据库名称
 
         Returns:
@@ -204,11 +204,11 @@ class GraphDatabaseClient(ABC):
         pass
 
     @abstractmethod
-    async def get_classes_with_methods(self, repo_name: str, database: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def get_classes_with_methods(self, repo_id: str, database: Optional[str] = None) -> List[Dict[str, Any]]:
         """获取所有 Class 节点及其包含的 Method summaries.
 
         Args:
-            repo_name: 仓库名称
+            repo_id: 仓库ID
             database: 目标数据库名称
 
         Returns:
@@ -217,11 +217,11 @@ class GraphDatabaseClient(ABC):
         pass
 
     @abstractmethod
-    async def get_files_for_summary(self, repo_name: str, database: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def get_files_for_summary(self, repo_id: str, database: Optional[str] = None) -> List[Dict[str, Any]]:
         """获取所有 File 节点及其包含的 Class/Method summaries.
 
         Args:
-            repo_name: 仓库名称
+            repo_id: 仓库ID
             database: 目标数据库名称
 
         Returns:
@@ -270,14 +270,14 @@ class GraphDatabaseClient(ABC):
     @abstractmethod
     async def get_nodes_with_summary(
         self,
-        repo_name: str,
+        repo_id: str,
         node_type: str,
         database: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """获取指定类型的所有包含 summary 的节点.
 
         Args:
-            repo_name: 仓库名称
+            repo_id: 仓库ID
             node_type: 节点类型 (File, Class, Method, Module, Workflow)
             database: 目标数据库名称
 
@@ -289,14 +289,14 @@ class GraphDatabaseClient(ABC):
     @abstractmethod
     async def count_nodes_with_summary(
         self,
-        repo_name: str,
+        repo_id: str,
         node_type: str,
         database: Optional[str] = None,
     ) -> int:
         """获取指定类型的包含 summary 的节点总数.
 
         Args:
-            repo_name: 仓库名称
+            repo_id: 仓库ID
             node_type: 节点类型 (File, Class, Method, Module, Workflow)
             database: 目标数据库名称
 
@@ -308,7 +308,7 @@ class GraphDatabaseClient(ABC):
     @abstractmethod
     async def get_nodes_with_summary_paginated(
         self,
-        repo_name: str,
+        repo_id: str,
         node_type: str,
         skip: int = 0,
         limit: int = 100,
@@ -317,7 +317,7 @@ class GraphDatabaseClient(ABC):
         """分页获取指定类型的包含 summary 的节点.
 
         Args:
-            repo_name: 仓库名称
+            repo_id: 仓库ID
             node_type: 节点类型 (File, Class, Method, Module, Workflow)
             skip: 跳过的记录数
             limit: 返回的最大记录数
@@ -365,5 +365,75 @@ class GraphDatabaseClient(ABC):
 
         Returns:
             成功更新的节点数量
+        """
+        pass
+
+    @abstractmethod
+    async def get_project_structure(
+        self,
+        repo_id: str,
+        database: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """获取项目目录结构.
+
+        Args:
+            repo_id: 仓库ID
+            database: 目标数据库名称
+
+        Returns:
+            目录和文件列表，每项包含 path, type, labels 字段
+        """
+        pass
+
+    @abstractmethod
+    async def get_modules(
+        self,
+        repo_id: str,
+        database: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """获取项目的 Module 列表.
+
+        Args:
+            repo_id: 仓库ID
+            database: 目标数据库名称
+
+        Returns:
+            Module 列表，每项包含 id, name, description, summary 字段
+        """
+        pass
+
+    @abstractmethod
+    async def get_module_workflows(
+        self,
+        module_id: str,
+        database: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """获取 Module 对应的 Workflow 列表.
+
+        Args:
+            module_id: Module ID
+            database: 目标数据库名称
+
+        Returns:
+            Workflow 列表，每项包含 id, name, description, summary 字段
+        """
+        pass
+
+    @abstractmethod
+    async def get_node_dependencies(
+        self,
+        node_id: str,
+        depth: int = 1,
+        database: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """获取节点的依赖关系图.
+
+        Args:
+            node_id: 节点ID
+            depth: 搜索深度
+            database: 目标数据库名称
+
+        Returns:
+            依赖关系列表，每项包含 source, target, relationships, distance 字段
         """
         pass

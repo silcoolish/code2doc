@@ -25,24 +25,24 @@ async def app_lifespan(server: Server) -> AsyncIterator[KnowledgeBaseTools]:
     # 启动时
     logger.info("Starting MCP server...")
 
-    neo4j = get_graph_db_client()
-    milvus = get_vector_db_client()
+    graph_db = get_graph_db_client()
+    vector_db = get_vector_db_client()
 
     try:
-        await neo4j.connect()
-        await milvus.connect()
+        await graph_db.connect()
+        await vector_db.connect()
     except Exception as e:
         logger.error(f"Failed to connect to databases: {e}")
         raise
 
-    tools = KnowledgeBaseTools(neo4j, milvus)
+    tools = KnowledgeBaseTools(graph_db, vector_db)
 
     yield tools
 
     # 关闭时
     logger.info("Shutting down MCP server...")
-    await neo4j.close()
-    await milvus.close()
+    await graph_db.close()
+    await vector_db.close()
 
 
 # 创建 MCP 服务器
@@ -62,12 +62,12 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "repo_name": {
+                    "repo_id": {
                         "type": "string",
-                        "description": "仓库名称",
+                        "description": "仓库ID",
                     },
                 },
-                "required": ["repo_name"],
+                "required": ["repo_id"],
             },
         ),
         Tool(
@@ -76,9 +76,9 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "repo_name": {
+                    "repo_id": {
                         "type": "string",
-                        "description": "仓库名称",
+                        "description": "仓库ID",
                     },
                     "query": {
                         "type": "string",
@@ -95,7 +95,7 @@ async def list_tools() -> list[Tool]:
                         "default": 10,
                     },
                 },
-                "required": ["repo_name", "query"],
+                "required": ["repo_id", "query"],
             },
         ),
         Tool(
@@ -104,12 +104,12 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "repo_name": {
+                    "repo_id": {
                         "type": "string",
-                        "description": "仓库名称",
+                        "description": "仓库ID",
                     },
                 },
-                "required": ["repo_name"],
+                "required": ["repo_id"],
             },
         ),
         Tool(
@@ -118,16 +118,16 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "repo_name": {
+                    "repo_id": {
                         "type": "string",
-                        "description": "仓库名称",
+                        "description": "仓库ID",
                     },
                     "module_id": {
                         "type": "string",
                         "description": "模块ID",
                     },
                 },
-                "required": ["repo_name", "module_id"],
+                "required": ["repo_id", "module_id"],
             },
         ),
         Tool(
@@ -183,9 +183,9 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "repo_name": {
+                    "repo_id": {
                         "type": "string",
-                        "description": "仓库名称",
+                        "description": "仓库ID",
                     },
                     "query": {
                         "type": "string",
@@ -197,7 +197,7 @@ async def list_tools() -> list[Tool]:
                         "default": 10,
                     },
                 },
-                "required": ["repo_name", "query"],
+                "required": ["repo_id", "query"],
             },
         ),
     ]
@@ -217,13 +217,13 @@ async def call_tool(
     try:
         if name == "get_project_structure":
             result = await tools.get_project_structure(
-                repo_name=arguments["repo_name"],
+                repo_id=arguments["repo_id"],
             )
             return [TextContent(type="text", text=result)]
 
         elif name == "search_nodes":
             result = await tools.search_nodes(
-                repo_name=arguments["repo_name"],
+                repo_id=arguments["repo_id"],
                 query=arguments["query"],
                 node_types=arguments.get("node_types", ["File", "Class", "Method"]),
                 top_k=arguments.get("top_k", 10),
@@ -232,13 +232,13 @@ async def call_tool(
 
         elif name == "get_modules":
             result = await tools.get_modules(
-                repo_name=arguments["repo_name"],
+                repo_id=arguments["repo_id"],
             )
             return [TextContent(type="text", text=result)]
 
         elif name == "get_module_workflows":
             result = await tools.get_module_workflows(
-                repo_name=arguments["repo_name"],
+                repo_id=arguments["repo_id"],
                 module_id=arguments["module_id"],
             )
             return [TextContent(type="text", text=result)]
@@ -264,7 +264,7 @@ async def call_tool(
 
         elif name == "search_code":
             result = await tools.search_code(
-                repo_name=arguments["repo_name"],
+                repo_id=arguments["repo_id"],
                 query=arguments["query"],
                 top_k=arguments.get("top_k", 10),
             )

@@ -54,19 +54,19 @@ class SemanticAnalysisStage(PipelineStageHandler):
         """
         try:
             self.graph_db = get_graph_db_client()
-            repo_name = context.repo_name
+            repo_id = getattr(context, 'repo_id', context.repo_name)
 
             # 1. 生成 Method 节点的 summary
             context.stage_msg = "正在生成 Method 摘要..."
-            method_count = await self._generate_method_summaries(repo_name, context)
+            method_count = await self._generate_method_summaries(repo_id, context)
 
             # 2. 生成 Class 节点的 summary
             context.stage_msg = "正在生成 Class 摘要..."
-            class_count = await self._generate_class_summaries(repo_name)
+            class_count = await self._generate_class_summaries(repo_id)
 
             # 3. 生成 File 节点的 summary
             context.stage_msg = "正在生成 File 摘要..."
-            file_count = await self._generate_file_summaries(repo_name)
+            file_count = await self._generate_file_summaries(repo_id)
 
             # 保存结果到上下文
             context.data["semantic_analysis"] = {
@@ -101,20 +101,20 @@ class SemanticAnalysisStage(PipelineStageHandler):
                 message=str(e),
             )
 
-    async def _generate_method_summaries(self, repo_name: str, context: PipelineContext) -> int:
+    async def _generate_method_summaries(self, repo_id: str, context: PipelineContext) -> int:
         """生成所有 Method 节点的 summary.
 
         使用拓扑排序处理 CALL 依赖关系，确保先生成被调用方法的 summary。
 
         Args:
-            repo_name: 仓库名称
+            repo_id: 仓库ID
             context: 流水线上下文
 
         Returns:
             生成的摘要数量
         """
         # 获取所有 method 及其 CALL 关系
-        methods = await self._get_methods_with_calls(repo_name)
+        methods = await self._get_methods_with_calls(repo_id)
         if not methods:
             return 0
 
@@ -159,16 +159,16 @@ class SemanticAnalysisStage(PipelineStageHandler):
         context.stage_msg = f"已完成 {count} 个 Method 摘要"
         return count
 
-    async def _get_methods_with_calls(self, repo_name: str) -> List[Dict]:
+    async def _get_methods_with_calls(self, repo_id: str) -> List[Dict]:
         """获取所有 Method 节点及其 CALL 关系.
 
         Args:
-            repo_name: 仓库名称
+            repo_id: 仓库ID
 
         Returns:
             Method 节点列表，包含 code, docstring, language 和 calls 关系
         """
-        return await self.graph_db.get_methods_with_calls(repo_name)
+        return await self.graph_db.get_methods_with_calls(repo_id)
 
     def _build_call_graph(
         self, methods: List[Dict]
@@ -280,18 +280,18 @@ class SemanticAnalysisStage(PipelineStageHandler):
             logger.warning(f"Failed to generate summary for method {name}: {e}")
             return ""
 
-    async def _generate_class_summaries(self, repo_name: str) -> int:
+    async def _generate_class_summaries(self, repo_id: str) -> int:
         """生成所有 Class 节点的 summary.
 
         基于 Class 包含的 Method 的 summaries 生成。
 
         Args:
-            repo_name: 仓库名称
+            repo_id: 仓库ID
 
         Returns:
             生成的摘要数量
         """
-        classes = await self._get_classes_with_methods(repo_name)
+        classes = await self._get_classes_with_methods(repo_id)
         if not classes:
             return 0
 
@@ -308,16 +308,16 @@ class SemanticAnalysisStage(PipelineStageHandler):
 
         return count
 
-    async def _get_classes_with_methods(self, repo_name: str) -> List[Dict]:
+    async def _get_classes_with_methods(self, repo_id: str) -> List[Dict]:
         """获取所有 Class 节点及其包含的 Method summaries.
 
         Args:
-            repo_name: 仓库名称
+            repo_id: 仓库ID
 
         Returns:
             Class 节点列表
         """
-        return await self.graph_db.get_classes_with_methods(repo_name)
+        return await self.graph_db.get_classes_with_methods(repo_id)
 
     async def _generate_class_summary(self, class_node: Dict) -> str:
         """为单个类生成 summary.
@@ -353,19 +353,19 @@ class SemanticAnalysisStage(PipelineStageHandler):
             logger.warning(f"Failed to generate summary for class {name}: {e}")
             return ""
 
-    async def _generate_file_summaries(self, repo_name: str) -> int:
+    async def _generate_file_summaries(self, repo_id: str) -> int:
         """生成所有 File 节点的 summary.
 
         代码文件基于包含的 Class/Method summaries 生成，
         非代码文件基于文件内容生成。
 
         Args:
-            repo_name: 仓库名称
+            repo_id: 仓库ID
 
         Returns:
             生成的摘要数量
         """
-        files = await self._get_files_for_summary(repo_name)
+        files = await self._get_files_for_summary(repo_id)
         if not files:
             return 0
 
@@ -382,16 +382,16 @@ class SemanticAnalysisStage(PipelineStageHandler):
 
         return count
 
-    async def _get_files_for_summary(self, repo_name: str) -> List[Dict]:
+    async def _get_files_for_summary(self, repo_id: str) -> List[Dict]:
         """获取所有 File 节点及其包含的 Class/Method summaries.
 
         Args:
-            repo_name: 仓库名称
+            repo_id: 仓库ID
 
         Returns:
             File 节点列表
         """
-        return await self.graph_db.get_files_for_summary(repo_name)
+        return await self.graph_db.get_files_for_summary(repo_id)
 
     async def _generate_file_summary(self, file_node: Dict) -> str:
         """为单个文件生成 summary.
