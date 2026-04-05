@@ -1,12 +1,12 @@
 """Agent工作流定义."""
 
-import asyncio
 from typing import Any, Dict
 
 from langgraph.graph import END, StateGraph
 
 from app.core.content_generator import ContentGenerator
-from app.core.state import AgentState, ContentBlock, GenerationStatus
+from app.core.nodes import BuildDocumentNode, GenerateContentNode, ParseTemplateNode
+from app.core.state import AgentState, GenerationStatus
 from app.infrastructure.docx_handler import DocxHandler
 from app.infrastructure.mcp_client import MCPClient
 from app.utils.logger import get_logger
@@ -41,147 +41,18 @@ class DocumentGenerator:
         Returns:
             LangGraph工作流
         """
-        from app.core.template_parser import TemplateParser
-
         workflow = StateGraph(AgentState)
 
-        # 定义节点
-        async def parse_template(state: AgentState) -> AgentState:
-            """解析模板."""
-            logger.info(
-                "workflow_node",
-                node="parse_template",
-                repo_id=state["repo_id"],
-            )
+        # 创建节点实例
+        nodes = [
+            ParseTemplateNode(),
+            GenerateContentNode(self.content_generator),
+            BuildDocumentNode(self.docx_handler),
+        ]
 
-            try:
-                parser = TemplateParser()
-                blocks = parser.parse(state["template_path"])
-
-                state["content_blocks"] = blocks
-                state["total_blocks"] = len(blocks)
-                state["current_block_index"] = 0
-                state["status"] = GenerationStatus.GENERATING.value
-                state["message"] = f"解析完成，共{len(blocks)}个内容块待生成"
-
-                logger.info(
-                    "parse_template_success",
-                    block_count=len(blocks),
-                )
-
-            except Exception as e:
-                logger.error(
-                    "parse_template_failed",
-                    error=str(e),
-                )
-                state["error"] = str(e)
-                state["status"] = GenerationStatus.FAILED.value
-                state["message"] = f"模板解析失败: {str(e)}"
-
-            return state
-
-        async def generate_content(state: AgentState) -> AgentState:
-            """生成内容."""
-            idx = state["current_block_index"]
-            total = state["total_blocks"]
-
-            if idx >= total:
-                return state
-
-            block = state["content_blocks"][idx]
-
-            logger.info(
-                "workflow_node",
-                node="generate_content",
-                current=idx + 1,
-                total=total,
-                block_id=block.id,
-            )
-
-            try:
-                # 更新状态
-                state["status"] = GenerationStatus.GENERATING.value
-                state["message"] = f"正在生成第{idx + 1}/{total}个内容块: {block.prompt[:30]}..."
-
-                # 生成内容
-                content = await self.content_generator.generate(
-                    block=block,
-                    repo_id=state["repo_id"],
-                )
-
-                # 保存结果
-                state["generated_contents"][block.id] = content
-                state["current_block_index"] = idx + 1
-
-                logger.info(
-                    "generate_content_success",
-                    block_id=block.id,
-                    content_length=len(content),
-                )
-
-            except Exception as e:
-                logger.error(
-                    "generate_content_failed",
-                    block_id=block.id,
-                    error=str(e),
-                )
-                # 记录错误但继续处理
-                state["generated_contents"][block.id] = f"[生成失败: {str(e)}]"
-                state["current_block_index"] = idx + 1
-
-            return state
-
-        async def build_document(state: AgentState) -> AgentState:
-            """构建文档."""
-            logger.info(
-                "workflow_node",
-                node="build_document",
-                output_path=state["output_path"],
-            )
-
-            try:
-                state["status"] = GenerationStatus.BUILDING.value
-                state["message"] = "正在构建最终文档..."
-
-                # 替换内容块
-                output_path = self.docx_handler.replace_blocks(
-                    template_path=state["template_path"],
-                    output_path=state["output_path"],
-                    block_contents=state["generated_contents"],
-                )
-
-                state["status"] = GenerationStatus.COMPLETED.value
-                state["message"] = f"文档生成完成: {output_path}"
-
-                logger.info(
-                    "build_document_success",
-                    output_path=output_path,
-                )
-
-            except Exception as e:
-                logger.error(
-                    "build_document_failed",
-                    error=str(e),
-                )
-                state["error"] = str(e)
-                state["status"] = GenerationStatus.FAILED.value
-                state["message"] = f"文档构建失败: {str(e)}"
-
-            return state
-
-        # 条件边
-        def should_continue(state: AgentState) -> str:
-            """判断是否继续生成."""
-            if state.get("error"):
-                return "error"
-            if state["current_block_index"] < state["total_blocks"]:
-                return "continue"
-            return "done"
-
-        # 添加节点
-        workflow.add_node("parse_template", parse_template)
-        workflow.add_node("generate_content", generate_content)
-        workflow.add_node("build_document", build_document)
+        # 添加节点到工作流 - 只使用抽象基类接口
+        for node in nodes:
+            workflow.add_node(node.name, node.execute)
 
         # 设置入口
         workflow.set_entry_point("parse_template")
@@ -191,7 +62,7 @@ class DocumentGenerator:
 
         workflow.add_conditional_edges(
             "generate_content",
-            should_continue,
+            self._should_continue,
             {
                 "continue": "generate_content",
                 "done": "build_document",
@@ -202,6 +73,21 @@ class DocumentGenerator:
         workflow.add_edge("build_document", END)
 
         return workflow.compile()
+
+    def _should_continue(self, state: AgentState) -> str:
+        """判断是否继续生成.
+
+        Args:
+            state: 当前工作流状态
+
+        Returns:
+            下一个节点的路由标识
+        """
+        if state.get("error"):
+            return "error"
+        if state["current_block_index"] < state["total_blocks"]:
+            return "continue"
+        return "done"
 
     async def run(self, initial_state: AgentState) -> AgentState:
         """运行工作流.
