@@ -1,0 +1,30 @@
+# Web框架
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+
+# Agent框架
+langgraph>=0.0.50
+langchain>=0.1.0
+langchain-community>=0.0.20
+
+# MCP客户端
+mcp>=0.5.0
+
+# 文档处理
+python-docx>=1.1.0
+
+# 配置与验证
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+
+# 日志
+structlog>=24.1.0
+
+# 工具
+python-json-logger>=2.0.7
+aiofiles>=23.2.0
+httpx>=0.26.0
+
+# 测试
+pytest>=8.0.0
+pytest-asyncio>=0.23.0

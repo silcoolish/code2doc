@@ -1,0 +1,72 @@
+"""配置管理."""
+
+from functools import lru_cache
+from pathlib import Path
+from typing import Optional
+
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """应用配置."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    # FastAPI配置
+    app_name: str = Field(default="doc-handle-agent", alias="APP_NAME")
+    app_host: str = Field(default="0.0.0.0", alias="APP_HOST")
+    app_port: int = Field(default=8001, alias="APP_PORT")
+    debug: bool = Field(default=False, alias="DEBUG")
+
+    # LLM配置
+    llm_provider: str = Field(default="qwen", alias="LLM_PROVIDER")
+    dashscope_api_key: str = Field(default="", alias="DASHSCOPE_API_KEY")
+    dashscope_base_url: str = Field(
+        default="https://dashscope.aliyuncs.com/api/v1",
+        alias="DASHSCOPE_BASE_URL",
+    )
+    llm_model: str = Field(default="qwen-max-latest", alias="LLM_MODEL")
+
+    # MCP配置
+    mcp_server_url: str = Field(
+        default="http://localhost:8000/sse",
+        alias="MCP_SERVER_URL",
+    )
+
+    # 路径配置
+    template_dir: str = Field(default="./templates", alias="TEMPLATE_DIR")
+    output_dir: str = Field(default="./output", alias="OUTPUT_DIR")
+    log_dir: str = Field(default="./log", alias="LOG_DIR")
+
+    # 日志配置
+    log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+
+    @property
+    def template_path(self) -> Path:
+        """获取模板目录路径."""
+        return Path(self.template_dir).resolve()
+
+    @property
+    def output_path(self) -> Path:
+        """获取输出目录路径."""
+        path = Path(self.output_dir)
+        path.mkdir(parents=True, exist_ok=True)
+        return path.resolve()
+
+    @property
+    def log_path(self) -> Path:
+        """获取日志目录路径."""
+        path = Path(self.log_dir)
+        path.mkdir(parents=True, exist_ok=True)
+        return path.resolve()
+
+
+@lru_cache()
+def get_settings() -> Settings:
+    """获取配置单例."""
+    return Settings()
