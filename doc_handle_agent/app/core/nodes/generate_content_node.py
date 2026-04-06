@@ -1,8 +1,10 @@
 """生成内容节点."""
 
+from typing import List, Union
+
 from app.core.content_generator import ContentGenerator
 from app.core.nodes.base import WorkflowNode
-from app.core.state import AgentState, GenerationStatus
+from app.core.state import AgentState, GenerationStatus, ListBlockResult
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -34,11 +36,16 @@ class GenerateContentNode(WorkflowNode):
             current=idx + 1,
             total=total,
             block_id=block.id,
+            is_list=block.is_list,
         )
 
         try:
             state["status"] = GenerationStatus.GENERATING.value
-            state["message"] = f"正在生成第{idx + 1}/{total}个内容块: {block.prompt[:30]}..."
+
+            if block.is_list:
+                state["message"] = f"正在生成第{idx + 1}/{total}个列表: {block.prompt[:30]}..."
+            else:
+                state["message"] = f"正在生成第{idx + 1}/{total}个内容块: {block.prompt[:30]}..."
 
             content = await self.content_generator.generate(
                 block=block,
@@ -48,11 +55,22 @@ class GenerateContentNode(WorkflowNode):
             state["generated_contents"][block.id] = content
             state["current_block_index"] = idx + 1
 
-            logger.info(
-                "generate_content_success",
-                block_id=block.id,
-                content_length=len(content),
-            )
+            # 记录生成结果
+            if isinstance(content, ListBlockResult):
+                logger.info(
+                    "generate_content_success",
+                    block_id=block.id,
+                    is_list=True,
+                    item_count=len(content.items),
+                    has_children=bool(block.list_children),
+                )
+            else:
+                logger.info(
+                    "generate_content_success",
+                    block_id=block.id,
+                    is_list=False,
+                    content_length=len(content),
+                )
 
         except Exception as e:
             logger.error(

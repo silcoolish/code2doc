@@ -1,33 +1,33 @@
-"""MCP客户端封装."""
+"""MCP客户端封装 - 使用langchain-mcp-adapters的MultiServerMCPClient."""
 
-import json
 from contextlib import asynccontextmanager
-from typing import Any, Dict, List, Optional
+from typing import Any, AsyncGenerator, List, Optional
 
-from mcp import ClientSession
-from mcp.client.sse import sse_client
-from mcp.types import TextContent
+from langchain_mcp_adapters.client import MultiServerMCPClient
 
+from app.config import get_settings
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 
 class MCPClient:
-    """MCP客户端封装."""
+    """MCP客户端封装 - 基于MultiServerMCPClient."""
 
-    def __init__(self, server_url: str):
+    def __init__(self, server_url: Optional[str] = None):
         """初始化MCP客户端.
 
         Args:
             server_url: MCP服务器HTTP地址 (如 http://localhost:8000/sse)
+                       默认从配置读取
         """
-        self.server_url = server_url
-        self.session: Optional[ClientSession] = None
-        self._tools: List[Dict[str, Any]] = []
+        settings = get_settings()
+        self.server_url = server_url or settings.mcp_server_url
+        self._client: Optional[MultiServerMCPClient] = None
+        self._session: Optional[Any] = None
 
     @asynccontextmanager
-    async def connect(self):
+    async def connect(self) -> AsyncGenerator["MCPClient", None]:
         """建立MCP连接.
 
         Yields:
@@ -39,21 +39,34 @@ class MCPClient:
         )
 
         try:
-            async with sse_client(self.server_url) as (read, write):
-                async with ClientSession(read, write) as session:
-                    self.session = session
-                    await session.initialize()
-                    self._tools = await session.list_tools()
+            # 创建MultiServerMCPClient连接配置
+            connections = {
+                "knowledge_base": {
+                    "url": self.server_url,
+                    "transport": "http",
+                }
+            }
 
-                    logger.info(
-                        "mcp_connect_success",
-                        tool_count=len(self._tools),
-                    )
+            # 初始化客户端并建立连接
+            self._client = MultiServerMCPClient(connections)
 
-                    yield self
+            # 获取session（用于load_mcp_tools）
+            async with self._client.session("knowledge_base") as session:
+                self._session = session
 
-                    self.session = None
-                    self._tools = []
+                # 获取工具列表用于日志
+                tools = await self._client.get_tools()
+                logger.info(
+                    "mcp_connect_success",
+                    tool_count=len(tools),
+                    tools=[t.name for t in tools],
+                )
+
+                yield self
+
+                self._session = None
+                self._client = None
+
         except Exception as e:
             logger.error(
                 "mcp_connect_failed",
@@ -78,7 +91,7 @@ class MCPClient:
         Raises:
             RuntimeError: 如果客户端未连接
         """
-        if not self.session:
+        if not self._client:
             raise RuntimeError("MCP client not connected")
 
         logger.info(
@@ -88,13 +101,26 @@ class MCPClient:
         )
 
         try:
-            result = await self.session.call_tool(tool_name, arguments)
+            # 获取工具并执行
+            tools = await self._client.get_tools()
+            target_tool = None
 
-            # 提取文本内容
-            text_content = ""
-            for content in result.content:
-                if isinstance(content, TextContent):
-                    text_content += content.text
+            for tool in tools:
+                if tool.name == tool_name:
+                    target_tool = tool
+                    break
+
+            if not target_tool:
+                raise ValueError(f"Tool not found: {tool_name}")
+
+            # 执行工具调用
+            result = await target_tool.ainvoke(arguments)
+
+            # 处理结果
+            if isinstance(result, str):
+                text_content = result
+            else:
+                text_content = str(result)
 
             logger.info(
                 "tool_call_success",
@@ -116,170 +142,36 @@ class MCPClient:
     def get_available_tools(self) -> List[Dict[str, Any]]:
         """获取可用工具列表 (用于LLM工具调用).
 
+        注意：此方法需要在connect之后调用
+
         Returns:
             工具列表，格式符合OpenAI函数调用规范
         """
+        if not self._session:
+            logger.warning("get_available_tools called before connect")
+            return []
+
+        # 从session获取工具信息
         tools = []
-        for tool in self._tools:
-            tools.append({
-                "type": "function",
-                "function": {
-                    "name": tool.name,
-                    "description": tool.description,
-                    "parameters": tool.inputSchema,
-                },
-            })
+        if hasattr(self._session, '_tools'):
+            for tool in self._session._tools:
+                tools.append({
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.inputSchema,
+                    },
+                })
+
         return tools
 
-    # ========== 便捷工具方法 ==========
+    @property
+    def session(self) -> Optional[Any]:
+        """获取当前MCP session (用于langchain-mcp-adapters)."""
+        return self._session
 
-    async def get_project_structure(self, repo_id: str) -> Dict[str, Any]:
-        """获取项目目录结构.
-
-        Args:
-            repo_id: 仓库ID
-
-        Returns:
-            项目结构JSON
-        """
-        result = await self.call_tool(
-            "get_project_structure",
-            {"repo_id": repo_id},
-        )
-        return json.loads(result)
-
-    async def search_nodes(
-        self,
-        repo_id: str,
-        query: str,
-        node_types: List[str],
-        top_k: int = 10,
-    ) -> Dict[str, Any]:
-        """根据关键字语义查询节点.
-
-        Args:
-            repo_id: 仓库ID
-            query: 查询关键字
-            node_types: 节点类型列表
-            top_k: 返回结果数量
-
-        Returns:
-            搜索结果JSON
-        """
-        result = await self.call_tool(
-            "search_nodes",
-            {
-                "repo_id": repo_id,
-                "query": query,
-                "node_types": node_types,
-                "top_k": top_k,
-            },
-        )
-        return json.loads(result)
-
-    async def get_modules(self, repo_id: str) -> Dict[str, Any]:
-        """获取项目的模块列表.
-
-        Args:
-            repo_id: 仓库ID
-
-        Returns:
-            模块列表JSON
-        """
-        result = await self.call_tool(
-            "get_modules",
-            {"repo_id": repo_id},
-        )
-        return json.loads(result)
-
-    async def get_module_workflows(
-        self,
-        repo_id: str,
-        module_id: str,
-    ) -> Dict[str, Any]:
-        """获取模块对应的Workflow列表.
-
-        Args:
-            repo_id: 仓库ID
-            module_id: 模块ID
-
-        Returns:
-            Workflow列表JSON
-        """
-        result = await self.call_tool(
-            "get_module_workflows",
-            {"repo_id": repo_id, "module_id": module_id},
-        )
-        return json.loads(result)
-
-    async def get_node_by_id(self, node_id: str) -> Dict[str, Any]:
-        """根据节点ID获取节点信息.
-
-        Args:
-            node_id: 节点ID
-
-        Returns:
-            节点信息JSON
-        """
-        result = await self.call_tool(
-            "get_node_by_id",
-            {"node_id": node_id},
-        )
-        return json.loads(result)
-
-    async def get_node_dependencies(
-        self,
-        node_id: str,
-        depth: int = 1,
-    ) -> Dict[str, Any]:
-        """获取节点的依赖关系图.
-
-        Args:
-            node_id: 节点ID
-            depth: 依赖深度
-
-        Returns:
-            依赖关系JSON
-        """
-        result = await self.call_tool(
-            "get_node_dependencies",
-            {"node_id": node_id, "depth": depth},
-        )
-        return json.loads(result)
-
-    async def get_file_content(self, file_id: str) -> Dict[str, Any]:
-        """获取文件内容.
-
-        Args:
-            file_id: 文件ID
-
-        Returns:
-            文件内容JSON
-        """
-        result = await self.call_tool(
-            "get_file_content",
-            {"file_id": file_id},
-        )
-        return json.loads(result)
-
-    async def search_code(
-        self,
-        repo_id: str,
-        query: str,
-        top_k: int = 10,
-    ) -> Dict[str, Any]:
-        """语义搜索代码.
-
-        Args:
-            repo_id: 仓库ID
-            query: 查询关键字
-            top_k: 返回结果数量
-
-        Returns:
-            搜索结果JSON
-        """
-        result = await self.call_tool(
-            "search_code",
-            {"repo_id": repo_id, "query": query, "top_k": top_k},
-        )
-        return json.loads(result)
+    @property
+    def client(self) -> Optional[MultiServerMCPClient]:
+        """获取MultiServerMCPClient实例."""
+        return self._client
