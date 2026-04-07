@@ -63,16 +63,22 @@ async def reset_initialization(repo_id: str) -> ResetResponse:
         # 2. 删除向量数据库中对应仓库所有数据
         try:
             vector_db = get_vector_db_client()
-            deleted_stats = await vector_db.delete_repo_data(repo_id)
-            details["vector_db_deleted"] = True
-            details["vector_db_deleted_stats"] = deleted_stats
-            logger.info(f"Deleted vectors from DB for repo: {repo_id}, stats: {deleted_stats}")
+            logger.info(f"Deleting vector data for repo_id: {repo_id!r}")
+            if not repo_id:
+                logger.error("repo_id is empty or None")
+                details["vector_db_error"] = "repo_id is empty"
+            else:
+                deleted_stats = await vector_db.delete_repo_data(repo_id)
+                details["vector_db_deleted"] = True
+                details["vector_db_deleted_stats"] = deleted_stats
+                logger.info(f"Deleted vectors from DB for repo: {repo_id}, stats: {deleted_stats}")
         except Exception as e:
             logger.error(f"Failed to delete vector DB data for repo {repo_id}: {e}")
             details["vector_db_error"] = str(e)
 
         # 3. 在 CSV 文件中删除对应仓库数据
         try:
+            repo_storage = get_repo_status_storage()
             csv_deleted = repo_storage.delete_record(repo_id)
             details["csv_record_deleted"] = csv_deleted
             if csv_deleted:

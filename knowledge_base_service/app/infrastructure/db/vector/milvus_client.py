@@ -343,16 +343,44 @@ class MilvusClient(VectorDatabaseClient):
         Returns:
             删除的记录数量
         """
+        # 空值检查
+        if not repo_id:
+            logger.error(f"repo_id is empty or None for collection {collection_name}")
+            return 0
+
+        if not collection_name:
+            logger.error(f"collection_name is empty or None for repo {repo_id}")
+            return 0
+
         if self._client is None:
             await self.connect()
 
         try:
+            # 检查 collection 是否存在
+            if not await self._client.has_collection(collection_name):
+                logger.warning(f"Collection {collection_name} does not exist, skipping delete")
+                return 0
+
+            # 加载 collection（Milvus 删除前需要先加载）
+            await self._client.load_collection(collection_name)
+
+            # 构建删除表达式
+            delete_expr = f"repo == '{repo_id}'"
+            logger.debug(f"Deleting from {collection_name} with expr: {delete_expr}")
+
             result = await self._client.delete(
                 collection_name=collection_name,
-                expr=f'repo == "{repo_id}"',
+                expression=delete_expr,
             )
             deleted = result.delete_count if result else 0
             logger.info(f"Deleted {deleted} records from {collection_name} for repo: {repo_id}")
+
+            # Flush 以确保删除操作持久化
+            await self._client.flush(collection_name)
+
+            # 释放 collection
+            await self._client.release_collection(collection_name)
+
             return deleted
         except Exception as e:
             logger.error(f"Failed to delete from {collection_name}: {e}")

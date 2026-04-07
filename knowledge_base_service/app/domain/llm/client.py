@@ -452,12 +452,14 @@ class LLMService:
             "modules": [
                 {{
                     "name": "模块名称(中文)",
-                    "description": "该模块的功能描述(中文)",
+                    "description": "该模块的简述(中文，50字以内)",
+                    "detail": "该模块的详细说明(中文，200-500字，包含功能描述、职责、关键逻辑等)",
                     "files": ["file1.py", "file2.py"],
                     "workflows": [
                         {{
                             "name": "工作流名称(中文)",
-                            "description": "该工作流的功能描述(中文)",
+                            "description": "该工作流的简述(中文，50字以内)",
+                            "detail": "该工作流的详细说明(中文，200-500字，包含流程描述、处理步骤、关键逻辑等)",
                             "files": ["file1.py"]
                         }}
                     ]
@@ -465,7 +467,10 @@ class LLMService:
             ]
         }}
 
-        注意: name 和 description 字段必须使用中文。
+        注意:
+        - name、description、detail 字段必须使用中文
+        - description 是简要描述，用于快速了解功能
+        - detail 是详细说明，包含更多技术细节和实现逻辑
         """
 
         response = await self.complete(

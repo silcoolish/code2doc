@@ -574,7 +574,7 @@ class Neo4jClient(GraphDatabaseClient):
             query = """
             MATCH (mod:Module)
             WHERE mod.repo = $repo_id AND mod.summary IS NOT NULL
-            RETURN mod.id as id, mod.name as name, mod.summary as summary
+            RETURN mod.id as id, mod.name as name, mod.summary as summary, mod.detail as detail
             ORDER BY mod.id
             SKIP $skip LIMIT $limit
             """
@@ -582,7 +582,7 @@ class Neo4jClient(GraphDatabaseClient):
             query = """
             MATCH (w:Workflow)
             WHERE w.repo = $repo_id AND w.summary IS NOT NULL
-            RETURN w.id as id, w.name as name, w.summary as summary
+            RETURN w.id as id, w.name as name, w.summary as summary, w.detail as detail
             ORDER BY w.id
             SKIP $skip LIMIT $limit
             """

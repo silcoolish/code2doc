@@ -8,7 +8,7 @@
 """
 
 import logging
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 from uuid import uuid4
 
 from app.config import get_settings
@@ -19,6 +19,7 @@ from app.domain.models.vector import (
     ClassSummaryRecord,
     MethodSummaryRecord,
     SemanticSummaryRecord,
+    SemanticDetailRecord,
 )
 from app.domain.llm.client import get_llm_service
 from app.infrastructure.db import (
@@ -191,7 +192,7 @@ class VectorDBStoreStage(PipelineStageHandler):
                 continue
 
             # 3. 构建记录并存储到向量数据库
-            records, updates = self._build_records_and_updates(
+            records, detail_records, updates = self._build_records_and_updates(
                 vectors=vectors,
                 node_type=node_type,
                 is_semantic=is_semantic,
@@ -200,6 +201,10 @@ class VectorDBStoreStage(PipelineStageHandler):
 
             if records:
                 await vector_db.insert(collection_name, records)
+
+            # 存储 detail 记录到 semantic_detail_collection
+            if detail_records:
+                await vector_db.insert("semantic_detail_collection", detail_records)
 
             # 4. 批量更新图数据库的 embeddingId
             if updates:
@@ -239,10 +244,11 @@ class VectorDBStoreStage(PipelineStageHandler):
             node_type: 节点类型
 
         Returns:
-            内容列表，每项包含 type, id, name, summary, path(可选)
+            内容列表，每项包含 type, id, name, summary, detail(可选), path(可选)
         """
         contents = []
         type_lower = node_type.lower()
+        is_semantic = node_type in ["Module", "Workflow"]
 
         for node in nodes:
             summary = node.get("summary")
@@ -260,26 +266,44 @@ class VectorDBStoreStage(PipelineStageHandler):
             if node_type == "File" and "path" in node:
                 content["path"] = node["path"]
 
+            # Module/Workflow 节点包含 detail
+            if is_semantic:
+                detail = node.get("detail")
+                if detail and isinstance(detail, str) and detail.strip():
+                    content["detail"] = detail.strip()
+
             contents.append(content)
 
         return contents
 
     async def _generate_embeddings_for_batch(
         self, contents: List[Dict[str, str]]
-    ) -> List[Tuple[str, str, str, str, List[float]]]:
+    ) -> List[Tuple[str, str, str, str, List[float], Optional[str]]]:
         """为一批内容生成 embedding.
 
         Args:
-            contents: 内容列表，每项包含 type, id, name, summary
+            contents: 内容列表，每项包含 type, id, name, summary, detail(可选)
 
         Returns:
-            向量列表，每项为 (type, node_id, name, summary, embedding)
+            向量列表，每项为 (type, node_id, name, text, embedding, detail)
+            - detail: 如果是detail向量则包含detail内容，否则为None
         """
         if not contents:
             return []
 
-        # 提取文本用于 embedding
-        texts = [item["summary"] for item in contents]
+        # 构建文本列表（summary + detail）
+        texts = []
+        content_indices = []  # 记录每个文本对应的原始内容索引和类型
+
+        for idx, item in enumerate(contents):
+            # 首先添加 summary
+            texts.append(item["summary"])
+            content_indices.append((idx, "summary"))
+
+            # 如果有 detail，也添加
+            if "detail" in item and item["detail"]:
+                texts.append(item["detail"])
+                content_indices.append((idx, "detail"))
 
         try:
             # 批量生成向量
@@ -293,56 +317,86 @@ class VectorDBStoreStage(PipelineStageHandler):
 
         # 组合结果
         results = []
-        for i, item in enumerate(contents):
-            if i < len(embeddings):
-                results.append((
-                    item["type"],
-                    item["id"],
-                    item["name"],
-                    item["summary"],
-                    embeddings[i],
-                ))
+        for i, (orig_idx, text_type) in enumerate(content_indices):
+            if i >= len(embeddings):
+                continue
+
+            item = contents[orig_idx]
+            text = item["summary"] if text_type == "summary" else item.get("detail", "")
+            detail = item.get("detail") if text_type == "detail" else None
+
+            results.append((
+                item["type"],
+                item["id"],
+                item["name"],
+                text,
+                embeddings[i],
+                detail,
+            ))
 
         return results
 
     def _build_records_and_updates(
         self,
-        vectors: List[Tuple[str, str, str, str, List[float]]],
+        vectors: List[Tuple[str, str, str, str, List[float], Optional[str]]],
         node_type: str,
         is_semantic: bool,
         repo_id: str,
-    ) -> Tuple[List[Dict], List[Tuple[str, str]]]:
+    ) -> Tuple[List[Dict], List[Dict], List[Tuple[str, str]]]:
         """构建向量数据库记录和图数据库更新列表.
 
         Args:
-            vectors: 向量列表，每项为 (type, node_id, name, summary, embedding)
+            vectors: 向量列表，每项为 (type, node_id, name, text, embedding, detail)
             node_type: 节点类型
             is_semantic: 是否为语义节点
             repo_id: 仓库ID
 
         Returns:
-            (records, updates) 元组
+            (records, detail_records, updates) 元组
             - records: 向量数据库记录列表
+            - detail_records: detail 向量记录列表（用于 semantic_detail_collection）
             - updates: 图数据库更新列表，每项为 (node_id, embedding_id)
         """
         records = []
+        detail_records = []
         updates = []
+        updated_nodes = set()  # 用于去重，确保每个节点只更新一次embeddingId
 
-        for item_type, node_id, name, summary, embedding in vectors:
+        for item_type, node_id, name, text, embedding, detail in vectors:
             vector_id = str(uuid4())
 
             if is_semantic:
-                # Module 或 Workflow 使用 SemanticSummaryRecord
-                record = SemanticSummaryRecord(
-                    id=vector_id,
-                    name=name,
-                    node_id=node_id,
-                    repo=repo_id,
-                    repo_id=repo_id,
-                    type=node_type,
-                    summary=summary,
-                    embedding=embedding,
-                )
+                # Module 或 Workflow
+                if detail is not None:
+                    # detail 向量
+                    record = SemanticDetailRecord(
+                        id=vector_id,
+                        name=f"{name}_detail",
+                        node_id=node_id,
+                        repo=repo_id,
+                        repo_id=repo_id,
+                        type=node_type,
+                        detail=text,
+                        embedding=embedding,
+                    )
+                    detail_records.append(record.to_dict())
+                else:
+                    # summary 向量
+                    record = SemanticSummaryRecord(
+                        id=vector_id,
+                        name=name,
+                        node_id=node_id,
+                        repo=repo_id,
+                        repo_id=repo_id,
+                        type=node_type,
+                        summary=text,
+                        embedding=embedding,
+                    )
+                    records.append(record.to_dict())
+                    # 只为主向量（summary）更新节点的 embeddingId
+                    if node_id not in updated_nodes:
+                        updates.append((node_id, vector_id))
+                        updated_nodes.add(node_id)
             elif item_type == "file":
                 record = FileSummaryRecord(
                     id=vector_id,
@@ -350,9 +404,13 @@ class VectorDBStoreStage(PipelineStageHandler):
                     node_id=node_id,
                     repo=repo_id,
                     repo_id=repo_id,
-                    summary=summary,
+                    summary=text,
                     embedding=embedding,
                 )
+                records.append(record.to_dict())
+                if node_id not in updated_nodes:
+                    updates.append((node_id, vector_id))
+                    updated_nodes.add(node_id)
             elif item_type == "class":
                 record = ClassSummaryRecord(
                     id=vector_id,
@@ -360,9 +418,13 @@ class VectorDBStoreStage(PipelineStageHandler):
                     node_id=node_id,
                     repo=repo_id,
                     repo_id=repo_id,
-                    summary=summary,
+                    summary=text,
                     embedding=embedding,
                 )
+                records.append(record.to_dict())
+                if node_id not in updated_nodes:
+                    updates.append((node_id, vector_id))
+                    updated_nodes.add(node_id)
             elif item_type == "method":
                 record = MethodSummaryRecord(
                     id=vector_id,
@@ -370,13 +432,12 @@ class VectorDBStoreStage(PipelineStageHandler):
                     node_id=node_id,
                     repo=repo_id,
                     repo_id=repo_id,
-                    summary=summary,
+                    summary=text,
                     embedding=embedding,
                 )
-            else:
-                continue
+                records.append(record.to_dict())
+                if node_id not in updated_nodes:
+                    updates.append((node_id, vector_id))
+                    updated_nodes.add(node_id)
 
-            records.append(record.to_dict())
-            updates.append((node_id, vector_id))
-
-        return records, updates
+        return records, detail_records, updates

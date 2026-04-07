@@ -91,6 +91,7 @@ class ModuleDetectionStage(PipelineStageHandler):
                     repo_id=pipeline_repo_id,
                     description=module_data.get("description", ""),
                     summary=module_data.get("description", ""),
+                    detail=module_data.get("detail", module_data.get("description", "")),
                     keywords=module_data.get("files", []),
                     confidence=module_data.get("confidence", 0.8),
                 )
@@ -130,6 +131,7 @@ class ModuleDetectionStage(PipelineStageHandler):
                         repo_id=pipeline_repo_id,
                         description=workflow_data.get("description", ""),
                         summary=workflow_data.get("description", ""),
+                        detail=workflow_data.get("detail", workflow_data.get("description", "")),
                         keywords=workflow_data.get("files", []),
                         confidence=workflow_data.get("confidence", 0.8),
                         module_id=module_id,
