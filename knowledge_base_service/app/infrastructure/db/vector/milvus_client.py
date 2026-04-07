@@ -76,112 +76,128 @@ class MilvusClient(VectorDatabaseClient):
             await self._create_collection_if_not_exists(collection_name)
 
     async def _create_collection_if_not_exists(self, collection_name: str) -> None:
-        """如果不存在则创建 collection."""
-        if not await self._client.has_collection(collection_name):
-            # 定义字段
-            fields = [
-                FieldSchema(
-                    name="id",
-                    dtype=DataType.VARCHAR,
-                    is_primary=True,
-                    max_length=64,
-                ),
-                FieldSchema(
-                    name="name",
-                    dtype=DataType.VARCHAR,
-                    max_length=256,
-                ),
-                FieldSchema(
-                    name="node_id",
-                    dtype=DataType.VARCHAR,
-                    max_length=64,
-                ),
-                FieldSchema(
-                    name="repo",
-                    dtype=DataType.VARCHAR,
-                    max_length=128,
-                ),
-                FieldSchema(
-                    name="repo_id",
-                    dtype=DataType.VARCHAR,
-                    max_length=64,
-                ),
-                FieldSchema(
-                    name="embedding",
-                    dtype=DataType.FLOAT_VECTOR,
-                    dim=self._dimensions,
-                ),
-            ]
+        """如果不存在则创建 collection 并同步创建索引."""
+        if await self._client.has_collection(collection_name):
+            logger.info(f"Collection already exists: {collection_name}")
+            return
 
-            # 根据 collection 类型添加额外字段
-            if "summary" in collection_name:
-                fields.append(
-                    FieldSchema(
-                        name="summary",
-                        dtype=DataType.VARCHAR,
-                        max_length=4096,
-                    )
+        # 定义字段
+        fields = [
+            FieldSchema(
+                name="id",
+                dtype=DataType.VARCHAR,
+                is_primary=True,
+                max_length=64,
+            ),
+            FieldSchema(
+                name="name",
+                dtype=DataType.VARCHAR,
+                max_length=256,
+            ),
+            FieldSchema(
+                name="node_id",
+                dtype=DataType.VARCHAR,
+                max_length=64,
+            ),
+            FieldSchema(
+                name="repo",
+                dtype=DataType.VARCHAR,
+                max_length=128,
+            ),
+            FieldSchema(
+                name="repo_id",
+                dtype=DataType.VARCHAR,
+                max_length=64,
+            ),
+            FieldSchema(
+                name="embedding",
+                dtype=DataType.FLOAT_VECTOR,
+                dim=self._dimensions,
+            ),
+        ]
+
+        # 根据 collection 类型添加额外字段
+        if "summary" in collection_name:
+            fields.append(
+                FieldSchema(
+                    name="summary",
+                    dtype=DataType.VARCHAR,
+                    max_length=4096,
                 )
-
-            if "semantic" in collection_name:
-                fields.append(
-                    FieldSchema(
-                        name="type",
-                        dtype=DataType.VARCHAR,
-                        max_length=32,
-                    )
-                )
-
-            if "detail" in collection_name:
-                fields.append(
-                    FieldSchema(
-                        name="detail",
-                        dtype=DataType.VARCHAR,
-                        max_length=8192,
-                    )
-                )
-
-            if "code" in collection_name:
-                fields.extend([
-                    FieldSchema(
-                        name="path",
-                        dtype=DataType.VARCHAR,
-                        max_length=512,
-                    ),
-                    FieldSchema(
-                        name="code",
-                        dtype=DataType.VARCHAR,
-                        max_length=65535,
-                    ),
-                ])
-
-            # 创建 schema 和 collection
-            schema = CollectionSchema(
-                fields=fields,
-                description=f"Collection for {collection_name}",
             )
 
-            await self._client.create_collection(
-                collection_name=collection_name,
-                schema=schema,
+        if "semantic" in collection_name:
+            fields.append(
+                FieldSchema(
+                    name="type",
+                    dtype=DataType.VARCHAR,
+                    max_length=32,
+                )
             )
 
-            # 创建索引（忽略错误，不影响服务启动）
-            try:
-                from pymilvus import Collection
-                collection = Collection(collection_name)
-                collection.create_index(
-                    field_name="embedding",
-                    index_params={
-                        "index_type": "IVF_FLAT",
-                        "metric_type": "COSINE",
-                        "params": {"nlist": 128},
-                    },
+        if "detail" in collection_name:
+            fields.append(
+                FieldSchema(
+                    name="detail",
+                    dtype=DataType.VARCHAR,
+                    max_length=8192,
                 )
-            except Exception as e:
-                logger.warning(f"Failed to create index for {collection_name}: {e}")
+            )
 
-            logger.info(f"Created collection: {collection_name}")
+        if "code" in collection_name:
+            fields.extend([
+                FieldSchema(
+                    name="path",
+                    dtype=DataType.VARCHAR,
+                    max_length=512,
+                ),
+                FieldSchema(
+                    name="code",
+                    dtype=DataType.VARCHAR,
+                    max_length=65535,
+                ),
+            ])
+
+        # 创建 schema 和 collection
+        schema = CollectionSchema(
+            fields=fields,
+            description=f"Collection for {collection_name}",
+        )
+
+        await self._client.create_collection(
+            collection_name=collection_name,
+            schema=schema,
+        )
+        logger.info(f"Created collection: {collection_name}")
+
+        # 同步创建索引 - 使用同步 Collection 接口等待索引构建完成
+        import asyncio
+
+        def _create_index_sync():
+            """同步创建索引并等待构建完成."""
+            collection = Collection(collection_name)
+            collection.create_index(
+                field_name="embedding",
+                index_params={
+                    "index_type": "IVF_FLAT",
+                    "metric_type": "COSINE",
+                    "params": {"nlist": 128},
+                },
+            )
+            # 等待索引构建完成
+            utility.wait_for_index_building_complete(collection_name)
+            return True
+
+        try:
+            # 在线程池中执行同步索引创建，避免阻塞事件循环
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, _create_index_sync)
+            logger.info(f"Created index for collection: {collection_name}")
+        except Exception as e:
+            logger.error(f"Failed to create index for {collection_name}: {e}")
+            raise RuntimeError(
+                f"Failed to create index for {collection_name}: {e}"
+            ) from e
 
     async def insert(
         self,
