@@ -96,11 +96,13 @@ class ModuleDetectionStage(PipelineStageHandler):
                 )
 
                 # 创建 Module 节点
+                module_props = module.to_dict()
+                module_props["repo"] = pipeline_repo_id
                 await neo4j.merge_node(
                     label="Module",
                     key_property="id",
                     key_value=module_id,
-                    properties=module.to_dict(),
+                    properties=module_props,
                 )
                 created_modules.append(module)
 
@@ -134,11 +136,13 @@ class ModuleDetectionStage(PipelineStageHandler):
                     )
 
                     # 创建 Workflow 节点
+                    workflow_props = workflow.to_dict()
+                    workflow_props["repo"] = pipeline_repo_id
                     await neo4j.merge_node(
                         label="Workflow",
                         key_property="id",
                         key_value=workflow_id,
-                        properties=workflow.to_dict(),
+                        properties=workflow_props,
                     )
                     created_workflows.append(workflow)
 

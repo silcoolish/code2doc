@@ -161,7 +161,7 @@ class VectorDBStoreStage(PipelineStageHandler):
         # 获取总数用于进度计算
         total = await graph_db.count_nodes_with_summary(repo_id, node_type)
         if total == 0:
-            logger.debug(f"No {node_type} nodes found for repo: {repo_name}")
+            logger.debug(f"No {node_type} nodes found for repo: {repo_id}")
             return 0
 
         logger.info(f"Processing {total} {node_type} nodes in batches of {batch_size}")

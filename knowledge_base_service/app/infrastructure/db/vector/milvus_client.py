@@ -170,23 +170,58 @@ class MilvusClient(VectorDatabaseClient):
         )
         logger.info(f"Created collection: {collection_name}")
 
-        # 同步创建索引 - 使用同步 Collection 接口等待索引构建完成
+        # 同步创建索引 - 需要建立同步连接
         import asyncio
+        from pymilvus import connections
+
+        settings = get_settings()
 
         def _create_index_sync():
             """同步创建索引并等待构建完成."""
-            collection = Collection(collection_name)
-            collection.create_index(
-                field_name="embedding",
-                index_params={
-                    "index_type": "IVF_FLAT",
-                    "metric_type": "COSINE",
-                    "params": {"nlist": 128},
-                },
-            )
-            # 等待索引构建完成
-            utility.wait_for_index_building_complete(collection_name)
-            return True
+            # 建立同步连接（使用独立的别名避免冲突）
+            conn_alias = f"sync_conn_{collection_name}"
+            try:
+                connections.connect(
+                    alias=conn_alias,
+                    host=settings.milvus_host,
+                    port=settings.milvus_port,
+                )
+                logger.debug(f"Established sync connection: {conn_alias}")
+            except Exception as conn_err:
+                # 如果已经存在，尝试断开重连
+                try:
+                    connections.disconnect(conn_alias)
+                except Exception:
+                    pass
+                connections.connect(
+                    alias=conn_alias,
+                    host=settings.milvus_host,
+                    port=settings.milvus_port,
+                )
+
+            try:
+                # 使用指定连接别名创建 Collection
+                collection = Collection(collection_name, using=conn_alias)
+                collection.create_index(
+                    field_name="embedding",
+                    index_params={
+                        "index_type": "IVF_FLAT",
+                        "metric_type": "COSINE",
+                        "params": {"nlist": 128},
+                    },
+                    using=conn_alias,
+                )
+                # 等待索引构建完成
+                utility.wait_for_index_building_complete(
+                    collection_name, using=conn_alias
+                )
+                return True
+            finally:
+                # 断开同步连接
+                try:
+                    connections.disconnect(conn_alias)
+                except Exception:
+                    pass
 
         try:
             # 在线程池中执行同步索引创建，避免阻塞事件循环

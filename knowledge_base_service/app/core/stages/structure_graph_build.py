@@ -418,7 +418,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
         parent_id = self._get_parent_directory_id(file_node.path, directories, repo_id)
 
         # 创建 File 节点
-        await self._create_file(file_node, parent_id)
+        await self._create_file(file_node, parent_id, repo_path)
         file_ids.append(file_node.id)
 
         # 解析文件
@@ -495,7 +495,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
     async def _create_directory(self, directory: Directory, repo_id: str) -> None:
         """创建 Directory 节点和关系."""
         properties = directory.to_dict()
-        properties["repo"] = repo_id.replace("repo_", "")
+        properties["repo"] = directory.repo_id
         properties = self._filter_properties(properties)
 
         await self.graph_db.merge_node(
@@ -518,10 +518,25 @@ class StructureGraphBuildStage(PipelineStageHandler):
                 rel_type="CONTAIN",
             )
 
-    async def _create_file(self, file_node: File, parent_id: str) -> None:
-        """创建 File 节点和关系."""
+    async def _create_file(self, file_node: File, parent_id: str, repo_path: str) -> None:
+        """创建 File 节点和关系.
+
+        Args:
+            file_node: 文件节点
+            parent_id: 父目录/仓库ID
+            repo_path: 仓库根路径
+        """
+        # 读取文件内容
+        file_path = Path(repo_path) / file_node.path
+        try:
+            content = file_path.read_text(encoding="utf-8", errors="ignore")
+            file_node.code = content
+        except Exception as e:
+            logger.warning(f"Failed to read file content {file_node.path}: {e}")
+            file_node.code = ""
+
         properties = file_node.to_dict()
-        properties["repo"] = parent_id.replace("repo_", "").split("_dir_")[0]
+        properties["repo"] = file_node.repo_id
         properties = self._filter_properties(properties)
 
         await self.graph_db.merge_node(

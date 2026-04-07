@@ -80,6 +80,7 @@ class File(BaseNode):
     """文件节点."""
 
     path: str = ""
+    code: str = ""  # 文件内容
     summary: str = ""
     embedding_id: str = ""
     file_type: str = ""  # code / doc / config
@@ -93,6 +94,7 @@ class File(BaseNode):
         result = super().to_dict()
         result.update({
             "path": self.path,
+            "code": self.code,
             "summary": self.summary,
             "embeddingId": self.embedding_id,
             "fileType": self.file_type,
