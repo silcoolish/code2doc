@@ -177,39 +177,6 @@ class KnowledgeBaseTools:
             "dependencies": dependencies,
         }, indent=2, ensure_ascii=False)
 
-    async def get_file_content(self, file_id: str) -> str:
-        """获取文件内容."""
-        # 获取文件节点
-        node_info = await self.graph_db.get_node_by_id(file_id)
-        if not node_info:
-            return f"File not found: {file_id}"
-
-        node = node_info.get("node", {})
-        file_path = node.get("path", "")
-        repo_path = node.get("repo", "")
-
-        # 尝试读取文件
-        try:
-            from pathlib import Path
-            full_path = Path(f"./repos/{repo_path}/{file_path}")
-            if full_path.exists():
-                content = full_path.read_text(encoding="utf-8", errors="ignore")
-                return json.dumps({
-                    "file_id": file_id,
-                    "path": file_path,
-                    "content": content,
-                }, indent=2, ensure_ascii=False)
-        except Exception as e:
-            logger.warning(f"Failed to read file {file_id}: {e}")
-
-        # 返回节点信息作为备用
-        return json.dumps({
-            "file_id": file_id,
-            "path": file_path,
-            "note": "File content not available, returning metadata",
-            "metadata": node,
-        }, indent=2, ensure_ascii=False)
-
     async def search_code(
         self,
         repo_id: str,
