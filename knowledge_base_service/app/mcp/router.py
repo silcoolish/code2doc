@@ -56,10 +56,6 @@ class GetNodeDependenciesRequest(BaseModel):
     depth: int = Field(default=1, description="依赖深度")
 
 
-class GetFileContentRequest(BaseModel):
-    file_id: str = Field(..., description="文件ID")
-
-
 class SearchCodeRequest(BaseModel):
     repo_id: str = Field(..., description="仓库ID")
     query: str = Field(..., description="查询关键字")
@@ -171,20 +167,6 @@ async def get_node_dependencies(
         return ToolResponse(success=False, error=str(e))
 
 
-@router.post("/tools/get_file_content", response_model=ToolResponse)
-async def get_file_content(
-    request: GetFileContentRequest,
-    tools: KnowledgeBaseTools = Depends(get_tools),
-) -> ToolResponse:
-    """获取文件内容."""
-    try:
-        result = await tools.get_file_content(file_id=request.file_id)
-        return ToolResponse(success=True, data=json.loads(result))
-    except Exception as e:
-        logger.exception(f"get_file_content failed: {e}")
-        return ToolResponse(success=False, error=str(e))
-
-
 @router.post("/tools/search_code", response_model=ToolResponse)
 async def search_code(
     request: SearchCodeRequest,
@@ -271,15 +253,6 @@ async def list_tools() -> dict:
                 "parameters": {
                     "node_id": {"type": "string", "required": True},
                     "depth": {"type": "integer", "default": 1},
-                },
-            },
-            {
-                "name": "get_file_content",
-                "description": "获取文件内容",
-                "endpoint": "/mcp/tools/get_file_content",
-                "method": "POST",
-                "parameters": {
-                    "file_id": {"type": "string", "required": True},
                 },
             },
             {
