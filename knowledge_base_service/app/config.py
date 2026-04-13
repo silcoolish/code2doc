@@ -65,6 +65,9 @@ class Settings(BaseSettings):
     max_retries: int = Field(default=3)
     retry_delay: float = Field(default=1.0)
 
+    # LLM Context Window Settings (fallback when API detection fails)
+    llm_context_window: int = Field(default=128000)  # 默认 128K tokens
+
     # Logging Settings
     log_dir: str = Field(default="./log")
     log_level: str = Field(default="INFO")

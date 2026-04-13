@@ -421,6 +421,50 @@ class Neo4jClient(GraphDatabaseClient):
             logger.warning(f"Failed to update summary for {label} {node_id}: {e}")
             return False
 
+    async def update_node_summaries_batch(
+        self,
+        label: str,
+        updates: List[Tuple[str, str]],
+        database: Optional[str] = None,
+    ) -> int:
+        """批量更新节点的 summary 属性.
+
+        使用 UNWIND 语句优化批量更新性能，减少网络往返。
+
+        Args:
+            label: 节点标签
+            updates: 更新列表，每项为 (node_id, summary) 元组
+            database: 目标数据库名称
+
+        Returns:
+            成功更新的节点数量
+        """
+        if not updates:
+            return 0
+
+        # 转换为字典列表供 UNWIND 使用
+        updates_dict = [
+            {"node_id": node_id, "summary": summary}
+            for node_id, summary in updates
+        ]
+
+        query = f"""
+        UNWIND $updates as update
+        MATCH (n:{label} {{id: update.node_id}})
+        SET n.summary = update.summary
+        RETURN count(n) as updated_count
+        """
+
+        try:
+            result = await self.execute_query(
+                query, {"updates": updates_dict}, database
+            )
+            updated_count = result[0]["updated_count"] if result else 0
+            return updated_count
+        except Exception as e:
+            logger.warning(f"Failed to batch update summaries for {label}: {e}")
+            return 0
+
     async def find_nodes_by_file_path(
         self,
         keyword: str,

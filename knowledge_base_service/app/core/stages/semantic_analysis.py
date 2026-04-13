@@ -105,6 +105,7 @@ class SemanticAnalysisStage(PipelineStageHandler):
         """生成所有 Method 节点的 summary.
 
         使用拓扑排序处理 CALL 依赖关系，确保先生成被调用方法的 summary。
+        使用批量生成优化，减少 LLM 调用次数。
 
         Args:
             repo_id: 仓库ID
@@ -129,35 +130,77 @@ class SemanticAnalysisStage(PipelineStageHandler):
         # 已生成的 summary 缓存
         summary_cache: Dict[str, str] = {}
 
-        count = 0
-        for idx, method_id in enumerate(sorted_methods):
-            method = method_graph[method_id]["data"]
+        # 按层分批处理：入度为0的节点（无依赖）可以一批处理
+        # 每处理完一批，更新 summary_cache，然后处理下一批
+        processed_count = 0
+        batch_size = 20  # 每批处理数量
 
-            # 每10个方法更新一次进度消息
-            if idx % 10 == 0:
-                context.stage_msg = f"正在生成 Method 摘要: {idx}/{total_methods}"
+        i = 0
+        while i < len(sorted_methods):
+            batch_ids = []
+            batch_methods = []
 
-            # 跳过已有 summary 的方法
-            if method.get("summary"):
-                summary_cache[method_id] = method["summary"]
-                continue
+            # 收集一批可以处理的方法（已满足依赖或已有 summary）
+            while i < len(sorted_methods) and len(batch_ids) < batch_size:
+                method_id = sorted_methods[i]
+                method = method_graph[method_id]["data"]
 
-            # 获取被调用方法的 summaries
-            callee_ids = method_graph[method_id]["callees"]
-            callee_summaries = []
-            for callee_id in callee_ids:
-                if callee_id in summary_cache:
-                    callee_summaries.append(summary_cache[callee_id])
+                # 跳过已有 summary 的方法
+                if method.get("summary"):
+                    summary_cache[method_id] = method["summary"]
+                    i += 1
+                    continue
 
-            # 生成 summary
-            summary = await self._generate_method_summary(method, callee_summaries)
-            if summary:
-                await self._update_node_summary("Method", method_id, summary)
-                summary_cache[method_id] = summary
-                count += 1
+                # 检查依赖是否已满足
+                callee_ids = method_graph[method_id]["callees"]
+                callee_summaries = []
+                all_deps_ready = True
 
-        context.stage_msg = f"已完成 {count} 个 Method 摘要"
-        return count
+                for callee_id in callee_ids:
+                    if callee_id in summary_cache:
+                        callee_summaries.append(summary_cache[callee_id])
+                    elif callee_id in method_graph and not method_graph[callee_id]["data"].get("summary"):
+                        # 依赖还未处理且没有缓存的 summary
+                        all_deps_ready = False
+                        break
+
+                if all_deps_ready:
+                    batch_ids.append(method_id)
+                    batch_methods.append({
+                        "id": method_id,
+                        "code": method.get("code", ""),
+                        "docstring": method.get("docstring", ""),
+                        "name": method.get("name", ""),
+                        "language": method.get("language", "python"),
+                        "callee_summaries": callee_summaries,
+                    })
+                    i += 1
+                else:
+                    # 依赖未满足，跳过这个方法（将在下一轮处理）
+                    break
+
+            if batch_methods:
+                # 批量生成摘要
+                context.stage_msg = f"正在生成 Method 摘要: {i}/{total_methods}"
+
+                summaries = await self._llm_service.generate_summaries_batch(
+                    items=batch_methods,
+                    node_type="method",
+                )
+
+                # 批量更新
+                updates = []
+                for method_id, summary in zip(batch_ids, summaries):
+                    if summary:
+                        updates.append((method_id, summary))
+                        summary_cache[method_id] = summary
+                        processed_count += 1
+
+                if updates:
+                    await self._update_node_summaries_batch("Method", updates)
+
+        context.stage_msg = f"已完成 {processed_count} 个 Method 摘要"
+        return processed_count
 
     async def _get_methods_with_calls(self, repo_id: str) -> List[Dict]:
         """获取所有 Method 节点及其 CALL 关系.
@@ -283,7 +326,7 @@ class SemanticAnalysisStage(PipelineStageHandler):
     async def _generate_class_summaries(self, repo_id: str) -> int:
         """生成所有 Class 节点的 summary.
 
-        基于 Class 包含的 Method 的 summaries 生成。
+        基于 Class 包含的 Method 的 summaries 生成，使用批量生成优化。
 
         Args:
             repo_id: 仓库ID
@@ -295,18 +338,51 @@ class SemanticAnalysisStage(PipelineStageHandler):
         if not classes:
             return 0
 
-        count = 0
+        # 过滤出需要生成 summary 的 class
+        pending_classes = []
         for class_node in classes:
             class_id = class_node.get("id", "")
-            if not class_id or class_node.get("summary"):
-                continue
+            if class_id and not class_node.get("summary"):
+                pending_classes.append(class_node)
 
-            summary = await self._generate_class_summary(class_node)
+        if not pending_classes:
+            return 0
+
+        logger.info(f"Generating summaries for {len(pending_classes)} classes")
+
+        # 准备批量生成数据
+        batch_items = []
+        for class_node in pending_classes:
+            method_summaries = [
+                s for s in class_node.get("method_summaries", [])
+                if s  # 过滤空值
+            ]
+
+            batch_items.append({
+                "id": class_node.get("id", ""),
+                "code": class_node.get("code", ""),
+                "docstring": class_node.get("docstring", ""),
+                "name": class_node.get("name", ""),
+                "language": class_node.get("language", "python"),
+                "callee_summaries": method_summaries if method_summaries else None,
+            })
+
+        # 批量生成摘要
+        summaries = await self._llm_service.generate_summaries_batch(
+            items=batch_items,
+            node_type="class",
+        )
+
+        # 批量更新
+        updates = []
+        for class_node, summary in zip(pending_classes, summaries):
             if summary:
-                await self._update_node_summary("Class", class_id, summary)
-                count += 1
+                updates.append((class_node.get("id", ""), summary))
 
-        return count
+        if updates:
+            await self._update_node_summaries_batch("Class", updates)
+
+        return len(updates)
 
     async def _get_classes_with_methods(self, repo_id: str) -> List[Dict]:
         """获取所有 Class 节点及其包含的 Method summaries.
@@ -357,7 +433,7 @@ class SemanticAnalysisStage(PipelineStageHandler):
         """生成所有 File 节点的 summary.
 
         代码文件基于包含的 Class/Method summaries 生成，
-        非代码文件基于文件内容生成。
+        非代码文件基于文件内容生成，使用批量生成优化。
 
         Args:
             repo_id: 仓库ID
@@ -369,18 +445,71 @@ class SemanticAnalysisStage(PipelineStageHandler):
         if not files:
             return 0
 
-        count = 0
+        # 过滤出需要生成 summary 的 file
+        pending_files = []
         for file_node in files:
             file_id = file_node.get("id", "")
-            if not file_id or file_node.get("summary"):
-                continue
+            if file_id and not file_node.get("summary"):
+                pending_files.append(file_node)
 
-            summary = await self._generate_file_summary(file_node)
+        if not pending_files:
+            return 0
+
+        logger.info(f"Generating summaries for {len(pending_files)} files")
+
+        # 准备批量生成数据
+        batch_items = []
+        for file_node in pending_files:
+            code = file_node.get("code", "")
+            file_type = file_node.get("file_type", "")
+
+            if file_type == "code":
+                # 代码文件：基于 Class/Method summaries
+                class_summaries = [
+                    s for s in file_node.get("class_summaries", [])
+                    if s
+                ]
+                method_summaries = [
+                    s for s in file_node.get("method_summaries", [])
+                    if s
+                ]
+                child_summaries = class_summaries + method_summaries
+
+                batch_items.append({
+                    "id": file_node.get("id", ""),
+                    "code": code[:5000],  # 限制代码长度
+                    "docstring": "",
+                    "name": file_node.get("name", ""),
+                    "language": "",
+                    "callee_summaries": child_summaries if child_summaries else None,
+                })
+            else:
+                # 非代码文件：基于文件内容
+                batch_items.append({
+                    "id": file_node.get("id", ""),
+                    "code": code[:5000],  # 限制代码长度
+                    "docstring": "",
+                    "name": file_node.get("name", ""),
+                    "language": "",
+                    "callee_summaries": None,
+                })
+
+        # 批量生成摘要
+        summaries = await self._llm_service.generate_summaries_batch(
+            items=batch_items,
+            node_type="file",
+        )
+
+        # 批量更新
+        updates = []
+        for file_node, summary in zip(pending_files, summaries):
             if summary:
-                await self._update_node_summary("File", file_id, summary)
-                count += 1
+                updates.append((file_node.get("id", ""), summary))
 
-        return count
+        if updates:
+            await self._update_node_summaries_batch("File", updates)
+
+        return len(updates)
 
     async def _get_files_for_summary(self, repo_id: str) -> List[Dict]:
         """获取所有 File 节点及其包含的 Class/Method summaries.
@@ -456,3 +585,40 @@ class SemanticAnalysisStage(PipelineStageHandler):
             summary: 摘要内容
         """
         await self.graph_db.update_node_summary(label, node_id, summary)
+
+    async def _update_node_summaries_batch(
+        self, label: str, updates: List[Tuple[str, str]]
+    ) -> int:
+        """批量更新节点的 summary 属性.
+
+        Args:
+            label: 节点标签
+            updates: 更新列表，每项为 (node_id, summary) 元组
+
+        Returns:
+            更新的节点数量
+        """
+        if not updates:
+            return 0
+
+        # 过滤掉 summary 为空的更新
+        valid_updates = [(node_id, summary) for node_id, summary in updates if summary]
+
+        if not valid_updates:
+            return 0
+
+        try:
+            # 批量更新
+            count = await self.graph_db.update_node_summaries_batch(label, valid_updates)
+            return count
+        except Exception as e:
+            logger.warning(f"Failed to batch update {label} summaries: {e}")
+            # 降级：逐个更新
+            count = 0
+            for node_id, summary in valid_updates:
+                try:
+                    await self.graph_db.update_node_summary(label, node_id, summary)
+                    count += 1
+                except Exception as inner_e:
+                    logger.warning(f"Failed to update summary for {label} {node_id}: {inner_e}")
+            return count

@@ -251,6 +251,25 @@ class GraphDatabaseClient(ABC):
         pass
 
     @abstractmethod
+    async def update_node_summaries_batch(
+        self,
+        label: str,
+        updates: List[Tuple[str, str]],
+        database: Optional[str] = None,
+    ) -> int:
+        """批量更新节点的 summary 属性.
+
+        Args:
+            label: 节点标签
+            updates: 更新列表，每项为 (node_id, summary) 元组
+            database: 目标数据库名称
+
+        Returns:
+            成功更新的节点数量
+        """
+        pass
+
+    @abstractmethod
     async def find_nodes_by_file_path(
         self,
         keyword: str,

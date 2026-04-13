@@ -18,6 +18,9 @@ logger = logging.getLogger(__name__)
 class LLMProvider(ABC):
     """LLM 提供商抽象基类."""
 
+    # 内置的模型上下文窗口映射表（作为 API 查询失败的 fallback）
+    CONTEXT_WINDOW_MAP: Dict[str, int] = {}
+
     @abstractmethod
     def get_chat_model(self) -> BaseChatModel:
         """获取聊天模型实例."""
@@ -28,9 +31,40 @@ class LLMProvider(ABC):
         """获取嵌入模型实例."""
         raise NotImplementedError
 
+    @abstractmethod
+    async def get_context_window(self) -> int:
+        """获取当前模型的上下文窗口大小.
+
+        Returns:
+            上下文窗口的 token 数量
+        """
+        raise NotImplementedError
+
+    def _get_fallback_context_window(self, model_name: str) -> int:
+        """从内置映射表获取上下文窗口（fallback）.
+
+        Args:
+            model_name: 模型名称
+
+        Returns:
+            上下文窗口大小，默认 128K
+        """
+        return self.CONTEXT_WINDOW_MAP.get(model_name, 128000)
+
 
 class QwenProvider(LLMProvider):
     """通义千问/Qwen 提供商 (通过 DashScope)."""
+
+    # Qwen 模型上下文窗口映射（备用）
+    CONTEXT_WINDOW_MAP = {
+        "qwen3.5-turbo": 128000,
+        "qwen3.5-plus": 128000,
+        "qwen3.5-max": 128000,
+        "qwen2.5-72b-instruct": 131072,
+        "qwen2.5-14b-instruct": 131072,
+        "qwen2.5-7b-instruct": 131072,
+        "qwen-long": 10000000,  # 1千万 tokens
+    }
 
     def __init__(self):
         self.settings = get_settings()
@@ -91,9 +125,51 @@ class QwenProvider(LLMProvider):
             self._embedding_model = self._create_embedding_model()
         return self._embedding_model
 
+    async def get_context_window(self) -> int:
+        """获取 Qwen 模型的上下文窗口.
+
+        DashScope 兼容 OpenAI 接口，尝试调用 models.retrieve()，
+        失败时使用内置映射表。
+        """
+        try:
+            from openai import AsyncOpenAI
+
+            client = AsyncOpenAI(
+                api_key=self.settings.dashscope_api_key,
+                base_url=self.settings.qwen_base_url,
+            )
+
+            model_id = self.settings.qwen_model
+
+            # 尝试获取模型信息
+            try:
+                model_info = await client.models.retrieve(model_id)
+                # 如果 API 返回 context_window 字段
+                if hasattr(model_info, 'context_window') and model_info.context_window:
+                    return model_info.context_window
+            except Exception:
+                pass  # 兼容模式可能不支持，使用 fallback
+
+            # 使用内置映射表
+            return self._get_fallback_context_window(model_id)
+
+        except Exception as e:
+            logger.warning(f"Failed to get context window for Qwen: {e}")
+            return self._get_fallback_context_window(self.settings.qwen_model)
+
 
 class OpenAIProvider(LLMProvider):
     """OpenAI 提供商."""
+
+    # OpenAI 模型上下文窗口映射（备用）
+    CONTEXT_WINDOW_MAP = {
+        "gpt-4o": 128000,
+        "gpt-4o-mini": 128000,
+        "gpt-4-turbo": 128000,
+        "gpt-4": 8192,
+        "gpt-3.5-turbo": 16385,
+        "gpt-3.5-turbo-16k": 16385,
+    }
 
     def __init__(self):
         self.settings = get_settings()
@@ -151,9 +227,41 @@ class OpenAIProvider(LLMProvider):
             self._embedding_model = self._create_embedding_model()
         return self._embedding_model
 
+    async def get_context_window(self) -> int:
+        """获取 OpenAI 模型的上下文窗口."""
+        try:
+            from openai import AsyncOpenAI
+
+            client = AsyncOpenAI(api_key=self.settings.openai_api_key)
+            model_id = self.settings.openai_model
+
+            # 尝试从 API 获取
+            try:
+                model_info = await client.models.retrieve(model_id)
+                if hasattr(model_info, 'context_window') and model_info.context_window:
+                    return model_info.context_window
+            except Exception:
+                pass
+
+            return self._get_fallback_context_window(model_id)
+
+        except Exception as e:
+            logger.warning(f"Failed to get context window for OpenAI: {e}")
+            return self._get_fallback_context_window(self.settings.openai_model)
+
 
 class AnthropicProvider(LLMProvider):
     """Anthropic Claude 提供商."""
+
+    # Claude 模型上下文窗口映射（备用）
+    CONTEXT_WINDOW_MAP = {
+        "claude-opus-4-6": 200000,
+        "claude-sonnet-4-6": 200000,
+        "claude-haiku-4-5": 200000,
+        "claude-3-opus-20240229": 200000,
+        "claude-3-sonnet-20240229": 200000,
+        "claude-3-haiku-20240307": 200000,
+    }
 
     def __init__(self):
         self.settings = get_settings()
@@ -191,6 +299,28 @@ class AnthropicProvider(LLMProvider):
             "Anthropic does not provide embedding models. "
             "Please use 'openai' or 'qwen' as the embedding_provider."
         )
+
+    async def get_context_window(self) -> int:
+        """获取 Claude 模型的上下文窗口."""
+        try:
+            import anthropic
+
+            client = anthropic.AsyncAnthropic(api_key=self.settings.anthropic_api_key)
+            model_id = self.settings.anthropic_model
+
+            # Anthropic 提供 models API (beta)
+            try:
+                model_info = await client.models.retrieve(model_id)
+                if hasattr(model_info, 'context_window') and model_info.context_window:
+                    return model_info.context_window
+            except Exception:
+                pass
+
+            return self._get_fallback_context_window(model_id)
+
+        except Exception as e:
+            logger.warning(f"Failed to get context window for Anthropic: {e}")
+            return self._get_fallback_context_window(self.settings.anthropic_model)
 
 
 class ProviderFactory:
@@ -242,6 +372,68 @@ class LLMService:
         self.settings = get_settings()
         self._llm_provider: Optional[LLMProvider] = None
         self._embedding_provider: Optional[LLMProvider] = None
+        self._context_window: Optional[int] = None  # 缓存上下文窗口大小
+
+    async def initialize_context_window(self) -> int:
+        """初始化上下文窗口大小（服务启动时调用）.
+
+        尝试从 API 获取，失败则使用配置默认值。
+
+        Returns:
+            有效的上下文窗口大小
+        """
+        try:
+            provider = self._get_llm_provider()
+            context_window = await provider.get_context_window()
+            logger.info(f"Successfully detected context window from API: {context_window}")
+        except Exception as e:
+            # API 获取失败，使用配置默认值
+            context_window = self.settings.llm_context_window
+            logger.warning(
+                f"Failed to get context window from API: {e}. "
+                f"Using default value from config: {context_window}"
+            )
+
+        # 预留空间给输出和系统提示词（10% 或至少 8192 tokens）
+        reserved = max(int(context_window * 0.1), 8192)
+        effective_window = context_window - reserved
+
+        self._context_window = effective_window
+        logger.info(
+            f"Effective context window: {effective_window} "
+            f"(raw: {context_window}, reserved: {reserved})"
+        )
+
+        return effective_window
+
+    def get_context_window(self) -> int:
+        """获取当前缓存的上下文窗口大小.
+
+        必须在 initialize_context_window() 之后调用。
+
+        Returns:
+            有效的上下文窗口大小
+
+        Raises:
+            RuntimeError: 如果上下文窗口尚未初始化
+        """
+        if self._context_window is None:
+            raise RuntimeError(
+                "Context window not initialized. "
+                "Call initialize_context_window() during service startup."
+            )
+        return self._context_window
+
+    def get_context_window_or_default(self, default: int = 100000) -> int:
+        """获取上下文窗口，如未初始化则返回默认值.
+
+        Args:
+            default: 未初始化时的默认值
+
+        Returns:
+            上下文窗口大小或默认值
+        """
+        return self._context_window if self._context_window is not None else default
 
     def _get_llm_provider(self) -> LLMProvider:
         """获取 LLM 提供商."""
@@ -495,6 +687,238 @@ class LLMService:
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse module detection response: {e}")
             return []
+
+    def _calculate_batch_size(
+        self,
+        items: List[Dict[str, Any]],
+        context_window: int,
+    ) -> int:
+        """根据代码总大小和上下文窗口计算每批节点数量.
+
+        策略：
+        1. 估算每个节点的 token 数（字符数 / 4）
+        2. 每批输入 + 预留输出空间不超过上下文限制
+        3. 每批最少 5 个，最多 50 个节点
+
+        Args:
+            items: 节点列表
+            context_window: 当前模型的有效上下文窗口（已预留输出空间）
+        """
+        total_chars = sum(len(item.get("code", "")) for item in items)
+        estimated_input_tokens = total_chars / 4
+
+        # 预留输出空间（每个 summary 约 100 tokens）
+        estimated_output_per_item = 100
+
+        if estimated_input_tokens <= context_window * 0.7:  # 如果总量不大，一次处理
+            return len(items)
+
+        # 动态计算每批数量
+        avg_input_tokens = estimated_input_tokens / len(items)
+        # 每批 = 输入 tokens + 输出 tokens <= context_window
+        batch_size = int(context_window / (avg_input_tokens + estimated_output_per_item))
+
+        return max(5, min(batch_size, 50))  # 限制在 5-50 之间
+
+    def _build_batch_summary_prompt(
+        self,
+        items: List[Dict[str, Any]],
+        node_type: str = "method",
+    ) -> str:
+        """构建批量摘要生成提示词."""
+        parts = [
+            f"你是一个代码分析专家。请为以下多个 {node_type} 生成中文摘要。",
+            "",
+            f"对于每个代码片段，请生成 1-2 句话的中文描述，说明：",
+            "- 这段代码的功能",
+            "- 主要用途或目的",
+            "",
+            "请按以下 JSON 格式返回，确保 ID 与输入顺序一致：",
+            "{\n"
+            '  "summaries": [\n'
+            '    {"id": "node_id_1", "summary": "摘要内容"},\n'
+            '    {"id": "node_id_2", "summary": "摘要内容"},\n'
+            "    ...\n"
+            "  ]\n"
+            "}",
+            "",
+        ]
+
+        for i, item in enumerate(items, 1):
+            node_id = item.get("id", "")
+            code = item.get("code", "")[:3000]  # 限制代码长度
+            docstring = item.get("docstring", "")
+            language = item.get("language", "python")
+            name = item.get("name", "")
+            callee_summaries = item.get("callee_summaries", [])
+
+            parts.append(f"=== 代码片段 {i} [ID: {node_id}] ===")
+            parts.append(f"名称: {name}")
+            parts.append(f"语言: {language}")
+
+            if docstring:
+                parts.append(f"文档注释: {docstring}")
+
+            if callee_summaries:
+                parts.append("调用的函数摘要:")
+                for j, summary in enumerate(callee_summaries[:3], 1):
+                    parts.append(f"  {j}. {summary}")
+
+            parts.append("代码:")
+            parts.append("```")
+            parts.append(code)
+            parts.append("```")
+            parts.append("")
+
+        parts.append("请返回 JSON 格式的摘要结果：")
+        return "\n".join(parts)
+
+    def _parse_batch_response(
+        self,
+        response: str,
+        expected_ids: List[str],
+    ) -> Dict[str, str]:
+        """解析批量生成的响应.
+
+        处理以下情况：
+        1. 正常 JSON 返回
+        2. JSON 格式损坏（尝试修复）
+        3. 缺少某些 ID（返回空字符串）
+
+        Args:
+            response: LLM 响应内容
+            expected_ids: 期望的节点 ID 列表
+
+        Returns:
+            节点 ID 到摘要的映射字典
+        """
+        result = {node_id: "" for node_id in expected_ids}
+
+        # 提取 JSON 内容
+        json_str = response
+        if "```json" in response:
+            json_str = response.split("```json")[1].split("```")[0]
+        elif "```" in response:
+            json_str = response.split("```")[1].split("```")[0]
+
+        try:
+            data = json.loads(json_str.strip())
+            summaries = data.get("summaries", [])
+
+            for item in summaries:
+                node_id = item.get("id", "")
+                summary = item.get("summary", "").strip()
+                if node_id in result:
+                    result[node_id] = summary
+
+        except json.JSONDecodeError as e:
+            logger.warning(f"Failed to parse batch response as JSON: {e}")
+            # 尝试用正则提取
+            import re
+            pattern = r'"id"\s*:\s*"([^"]+)"\s*,\s*"summary"\s*:\s*"([^"]*)"'
+            matches = re.findall(pattern, response)
+            for node_id, summary in matches:
+                if node_id in result:
+                    result[node_id] = summary.strip()
+
+        return result
+
+    async def generate_summaries_batch(
+        self,
+        items: List[Dict[str, Any]],
+        node_type: str = "method",
+    ) -> List[str]:
+        """批量生成代码摘要.
+
+        使用启动时已获取的上下文窗口计算最优批次大小。
+
+        Args:
+            items: 节点列表，每个包含 id, code, docstring, name, language 等字段
+            node_type: 节点类型 (method/class/file)
+
+        Returns:
+            生成的摘要列表，与 items 一一对应
+        """
+        if not items:
+            return []
+
+        # 获取上下文窗口（已在服务启动时初始化）
+        context_window = self.get_context_window_or_default(default=100000)
+
+        # 计算批次大小
+        batch_size = self._calculate_batch_size(items, context_window)
+
+        logger.info(
+            f"Batch generating summaries for {len(items)} {node_type}s, "
+            f"batch_size={batch_size}, context_window={context_window}"
+        )
+
+        results = []
+        for i in range(0, len(items), batch_size):
+            batch = items[i:i + batch_size]
+            batch_summaries = await self._generate_batch(batch, node_type)
+            results.extend(batch_summaries)
+
+        return results
+
+    async def _generate_batch(
+        self,
+        items: List[Dict[str, Any]],
+        node_type: str,
+    ) -> List[str]:
+        """生成一批节点的摘要.
+
+        Args:
+            items: 一批节点数据
+            node_type: 节点类型
+
+        Returns:
+            摘要列表
+        """
+        if not items:
+            return []
+
+        expected_ids = [item.get("id", "") for item in items]
+
+        try:
+            prompt = self._build_batch_summary_prompt(items, node_type)
+
+            response = await self.complete(
+                prompt=prompt,
+                system_prompt=(
+                    "You are a code analysis expert. Generate concise, "
+                    "informative summaries of code in Chinese. "
+                    "Return results in valid JSON format."
+                ),
+                max_tokens=4096,
+                temperature=0.3,
+            )
+
+            # 解析响应
+            summaries_map = self._parse_batch_response(response, expected_ids)
+
+            # 按输入顺序返回摘要
+            return [summaries_map.get(node_id, "") for node_id in expected_ids]
+
+        except Exception as e:
+            logger.error(f"Failed to generate batch summaries: {e}")
+            # 降级：逐个生成
+            logger.info("Falling back to individual summary generation")
+            results = []
+            for item in items:
+                try:
+                    summary = await self.generate_summary(
+                        code=item.get("code", ""),
+                        docstring=item.get("docstring", ""),
+                        callee_summaries=item.get("callee_summaries"),
+                        node_type=node_type,
+                        language=item.get("language", "python"),
+                    )
+                    results.append(summary)
+                except Exception as inner_e:
+                    logger.warning(f"Failed to generate summary for {item.get('id', '')}: {inner_e}")
+                    results.append("")
+            return results
 
     def _build_summary_prompt(
         self,

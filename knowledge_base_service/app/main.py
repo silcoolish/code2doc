@@ -86,6 +86,16 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Failed to connect to vector database: {e}")
 
+    # 初始化 LLM 上下文窗口
+    try:
+        from app.domain.llm.client import get_llm_service
+
+        llm_service = get_llm_service()
+        await llm_service.initialize_context_window()
+    except Exception as e:
+        logger.error(f"Failed to initialize LLM context window: {e}")
+        # 服务可以继续启动，使用默认配置值
+
     yield
 
     # 关闭时
