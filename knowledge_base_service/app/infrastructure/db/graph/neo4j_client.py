@@ -779,6 +779,65 @@ class Neo4jClient(GraphDatabaseClient):
 
         return dependencies
 
+    async def get_methods_by_languages(
+        self,
+        repo_id: str,
+        languages: List[str],
+        database: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """获取指定仓库中指定语言的所有Method节点.
+
+        Args:
+            repo_id: 仓库ID
+            languages: 语言列表，如 ["c", "cpp"]
+            database: 目标数据库名称
+
+        Returns:
+            Method节点列表，包含 id, name, code, language, file_path 等字段
+        """
+        query = """
+        MATCH (m:Method)
+        WHERE m.repo = $repo_id AND m.language IN $languages
+        RETURN m.id as id, m.name as name, m.code as code,
+               m.language as language, m.filePath as file_path, m.image as image
+        """
+        return await self.execute_query(
+            query,
+            {"repo_id": repo_id, "languages": languages},
+            database,
+        )
+
+    async def update_method_image(
+        self,
+        method_id: str,
+        image_id: str,
+        database: Optional[str] = None,
+    ) -> bool:
+        """更新Method节点的image属性.
+
+        Args:
+            method_id: 方法节点ID
+            image_id: 图片ID
+            database: 目标数据库名称
+
+        Returns:
+            是否成功更新
+        """
+        query = """
+        MATCH (m:Method {id: $method_id})
+        SET m.image = $image_id
+        """
+        try:
+            await self.execute_query(
+                query,
+                {"method_id": method_id, "image_id": image_id},
+                database,
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to update image for Method {method_id}: {e}")
+            return False
+
 
 # 全局客户端实例
 _neo4j_client: Optional[Neo4jClient] = None

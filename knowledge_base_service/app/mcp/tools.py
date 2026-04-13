@@ -1,9 +1,12 @@
 """MCP 工具实现."""
 
+import base64
 import json
 import logging
+from pathlib import Path
 from typing import Dict, List, Optional, Any
 
+from app.config import get_settings
 from app.infrastructure.db import GraphDatabaseClient, VectorDatabaseClient
 from app.domain.llm.client import get_llm_service
 
@@ -41,14 +44,24 @@ class KnowledgeBaseTools:
 
         return json.dumps(structure, indent=2, ensure_ascii=False)
 
-    async def search_nodes(
+    async def search_code_nodes(
         self,
         repo_id: str,
         query: str,
-        node_types: List[str],
+        node_types: Optional[List[str]] = None,
         top_k: int = 10,
     ) -> str:
-        """根据关键字语义查询节点."""
+        """根据关键字语义查询代码节点 (FILE, METHOD, CLASS).
+
+        Args:
+            repo_id: 仓库ID
+            query: 查询关键字
+            node_types: 节点类型列表，可选值为 ["File", "Class", "Method"]，默认为全部
+            top_k: 返回结果数量
+
+        Returns:
+            JSON 字符串，包含查询结果
+        """
         # 1. 将查询向量化
         try:
             embeddings = await self.llm_service.generate_embeddings([query])
@@ -65,19 +78,21 @@ class KnowledgeBaseTools:
             "File": "file_summary_collection",
             "Class": "class_summary_collection",
             "Method": "method_summary_collection",
-            "Module": "semantic_summary_collection",
-            "Workflow": "semantic_summary_collection",
         }
 
+        # 默认搜索所有代码节点类型
+        if node_types is None:
+            node_types = ["File", "Class", "Method"]
+
         for node_type in node_types:
-            collection = collection_map.get(node_type)
-            if not collection:
+            if node_type not in collection_map:
+                logger.warning(f"Invalid code node type: {node_type}")
                 continue
+
+            collection = collection_map[node_type]
 
             try:
                 filter_expr = f'repo == "{repo_id}"'
-                if node_type in ["Module", "Workflow"]:
-                    filter_expr += f' && type == "{node_type}"'
 
                 results = await self.vector_db.search(
                     collection_name=collection,
@@ -88,12 +103,14 @@ class KnowledgeBaseTools:
 
                 for result in results:
                     result["node_type"] = node_type
+                    result["summary"] = result.get("summary", "")
                     all_results.append(result)
 
             except Exception as e:
                 logger.warning(f"Search failed in {collection}: {e}")
 
-        # 3. 获取详细信息
+        # 3. 按距离排序并获取详细信息
+        all_results.sort(key=lambda x: x["distance"], reverse=True)
         detailed_results = []
         for result in all_results[:top_k]:
             node_info = await self.graph_db.get_node_by_id(result["node_id"])
@@ -103,8 +120,85 @@ class KnowledgeBaseTools:
                     "name": result["name"],
                     "type": result["node_type"],
                     "distance": result["distance"],
+                    "summary": result.get("summary", ""),
                     "details": node_info.get("node", {}),
                 })
+
+        return json.dumps({
+            "query": query,
+            "results": detailed_results,
+        }, indent=2, ensure_ascii=False)
+
+    async def search_semantic_nodes(
+        self,
+        repo_id: str,
+        query: str,
+        node_types: Optional[List[str]] = None,
+        top_k: int = 10,
+    ) -> str:
+        """根据关键字语义查询语义节点 (MODULE, WORKFLOW).
+
+        只使用 summary 进行语义匹配，但会同时返回 detail 字段。
+
+        Args:
+            repo_id: 仓库ID
+            query: 查询关键字
+            node_types: 节点类型列表，可选值为 ["Module", "Workflow"]，默认为全部
+            top_k: 返回结果数量
+
+        Returns:
+            JSON 字符串，包含查询结果（包含 detail 字段）
+        """
+        # 1. 将查询向量化
+        try:
+            embeddings = await self.llm_service.generate_embeddings([query])
+            if not embeddings:
+                return "Failed to generate embedding for query."
+            query_vector = embeddings[0]
+        except Exception as e:
+            return f"Embedding generation failed: {e}"
+
+        # 2. 搜索 semantic_summary_collection
+        all_results = []
+
+        # 默认搜索所有语义节点类型
+        if node_types is None:
+            node_types = ["Module", "Workflow"]
+
+        for node_type in node_types:
+            if node_type not in ["Module", "Workflow"]:
+                logger.warning(f"Invalid semantic node type: {node_type}")
+                continue
+
+            try:
+                filter_expr = f'repo == "{repo_id}" && type == "{node_type}"'
+
+                results = await self.vector_db.search(
+                    collection_name="semantic_summary_collection",
+                    query_vector=query_vector,
+                    top_k=top_k,
+                    filter_expr=filter_expr,
+                )
+
+                for result in results:
+                    result["node_type"] = node_type
+                    all_results.append(result)
+
+            except Exception as e:
+                logger.warning(f"Search failed for {node_type}: {e}")
+
+        # 3. 按距离排序并构建结果（包含 detail）
+        all_results.sort(key=lambda x: x["distance"], reverse=True)
+        detailed_results = []
+        for result in all_results[:top_k]:
+            detailed_results.append({
+                "node_id": result["node_id"],
+                "name": result["name"],
+                "type": result["node_type"],
+                "distance": result["distance"],
+                "summary": result.get("summary", ""),
+                "detail": result.get("detail", ""),  # 返回 detail 字段
+            })
 
         return json.dumps({
             "query": query,
@@ -147,22 +241,6 @@ class KnowledgeBaseTools:
             "workflows": workflows,
         }, indent=2, ensure_ascii=False)
 
-    async def get_node_by_id(self, node_id: str) -> str:
-        """根据节点 ID 获取节点信息."""
-        # 获取节点基本信息
-        node_info = await self.graph_db.get_node_by_id(node_id)
-        if not node_info:
-            return f"Node not found: {node_id}"
-
-        # 获取节点关系
-        relationships = await self.graph_db.get_node_relationships(node_id)
-
-        return json.dumps({
-            "node": node_info.get("node", {}),
-            "labels": node_info.get("labels", []),
-            "relationships": relationships,
-        }, indent=2, ensure_ascii=False)
-
     async def get_node_dependencies(
         self,
         node_id: str,
@@ -177,59 +255,93 @@ class KnowledgeBaseTools:
             "dependencies": dependencies,
         }, indent=2, ensure_ascii=False)
 
-    async def search_code(
+    async def batch_download_flowcharts(
         self,
-        repo_id: str,
-        query: str,
-        top_k: int = 10,
+        method_ids: List[str],
     ) -> str:
-        """语义搜索代码."""
-        # 1. 将查询向量化
-        try:
-            embeddings = await self.llm_service.generate_embeddings([query])
-            if not embeddings:
-                return "Failed to generate embedding for query."
-            query_vector = embeddings[0]
-        except Exception as e:
-            return f"Embedding generation failed: {e}"
+        """根据 method 节点 ID 列表批量下载流程图图片.
 
-        # 2. 在代码 collection 中搜索
-        all_results = []
+        Args:
+            method_ids: Method 节点 ID 列表
 
-        collections = ["class_code_collection", "method_code_collection"]
+        Returns:
+            JSON 字符串，包含每个 method 的图片数据（base64 编码）
+        """
+        if not method_ids:
+            return json.dumps({
+                "success": False,
+                "error": "No method IDs provided",
+                "images": [],
+            }, indent=2, ensure_ascii=False)
 
-        for collection in collections:
+        settings = get_settings()
+        image_dir = Path(settings.flowchart_image_dir)
+
+        # 批量查询 method 节点的 image 属性
+        method_images = []
+        for method_id in method_ids:
             try:
-                results = await self.vector_db.search(
-                    collection_name=collection,
-                    query_vector=query_vector,
-                    top_k=top_k,
-                    filter_expr=f'repo == "{repo_id}"',
-                )
+                # 查询节点信息
+                node_info = await self.graph_db.get_node_by_id(method_id)
+                if not node_info:
+                    method_images.append({
+                        "method_id": method_id,
+                        "success": False,
+                        "error": "Node not found",
+                    })
+                    continue
 
-                for result in results:
-                    result["collection"] = collection
-                    all_results.append(result)
-
-            except Exception as e:
-                logger.warning(f"Search failed in {collection}: {e}")
-
-        # 3. 获取代码详情
-        detailed_results = []
-        for result in all_results[:top_k]:
-            node_info = await self.graph_db.get_node_by_id(result["node_id"])
-            if node_info:
                 node = node_info.get("node", {})
-                detailed_results.append({
-                    "node_id": result["node_id"],
-                    "name": result["name"],
-                    "type": "Class" if "class" in result["collection"] else "Method",
-                    "path": node.get("filePath", ""),
-                    "code": node.get("code", "")[:500],  # 限制代码长度
-                    "distance": result["distance"],
+                image_id = node.get("image", "")
+                repo_id = node.get("repo_id", "")
+
+                if not image_id:
+                    method_images.append({
+                        "method_id": method_id,
+                        "success": False,
+                        "error": "No flowchart image available",
+                    })
+                    continue
+
+                # 构建图片路径
+                image_path = image_dir / repo_id / "image" / f"{image_id}.png"
+
+                if not image_path.exists():
+                    method_images.append({
+                        "method_id": method_id,
+                        "success": False,
+                        "error": f"Image file not found: {image_path}",
+                    })
+                    continue
+
+                # 读取图片并编码为 base64
+                with open(image_path, "rb") as f:
+                    image_data = f.read()
+                    image_base64 = base64.b64encode(image_data).decode("utf-8")
+
+                method_images.append({
+                    "method_id": method_id,
+                    "method_name": node.get("name", ""),
+                    "success": True,
+                    "image_id": image_id,
+                    "image_data": image_base64,
+                    "image_format": "png",
                 })
 
+            except Exception as e:
+                logger.error(f"Failed to download flowchart for {method_id}: {e}")
+                method_images.append({
+                    "method_id": method_id,
+                    "success": False,
+                    "error": str(e),
+                })
+
+        success_count = sum(1 for img in method_images if img.get("success"))
+
         return json.dumps({
-            "query": query,
-            "results": detailed_results,
+            "success": success_count > 0,
+            "total": len(method_ids),
+            "success_count": success_count,
+            "failed_count": len(method_ids) - success_count,
+            "images": method_images,
         }, indent=2, ensure_ascii=False)

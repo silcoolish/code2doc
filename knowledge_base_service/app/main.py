@@ -18,6 +18,7 @@ from app.domain.models.pipeline import PipelineStage
 from app.core.stages.structure_graph_build import StructureGraphBuildStage
 from app.core.stages.dependency_graph_build import DependencyGraphBuildStage
 from app.core.stages.semantic_analysis import SemanticAnalysisStage
+from app.core.stages.flowchart_generation import FlowchartGenerationStage
 from app.core.stages.vector_db_store import VectorDBStoreStage
 from app.core.stages.module_detection import ModuleDetectionStage
 
@@ -45,6 +46,7 @@ def _register_pipeline_stages():
     orchestrator.register_handler(PipelineStage.STRUCTURE_GRAPH_BUILD, StructureGraphBuildStage())
     orchestrator.register_handler(PipelineStage.DEPENDENCY_GRAPH_BUILD, DependencyGraphBuildStage())
     orchestrator.register_handler(PipelineStage.SEMANTIC_ANALYSIS, SemanticAnalysisStage())
+    orchestrator.register_handler(PipelineStage.FLOWCHART_GENERATION, FlowchartGenerationStage())
     orchestrator.register_handler(PipelineStage.MODULE_DETECTION, ModuleDetectionStage())
     orchestrator.register_handler(PipelineStage.VECTOR_DB_STORE, VectorDBStoreStage())
     # EMBEDDING_GENERATION 已合并到 VECTOR_DB_STORE

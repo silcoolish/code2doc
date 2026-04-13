@@ -135,6 +135,14 @@ class CAnalyzer(BaseTreeSitterAnalyzer):
             func_name = info.get("name", "Unknown")
             func_code = self._node_text(func_node, content)
 
+            # 验证提取的 code 是否有效（应该以函数签名开头）
+            if not self._is_valid_function_code(func_code, func_name):
+                # 尝试使用正则表达式重新提取
+                func_code = self._extract_function_regex(content, func_name)
+                if not func_code:
+                    logger.warning(f"Could not extract valid code for function: {func_name}")
+                    continue
+
             method_symbol = ParsedSymbol(
                 name=func_name,
                 symbol_type="function",
@@ -276,6 +284,134 @@ class CAnalyzer(BaseTreeSitterAnalyzer):
             "if", "while", "for", "switch", "catch", "return",
             "sizeof", "typeof", "offsetof",
         }
+
+    def _is_valid_function_code(self, code: str, func_name: str) -> bool:
+        """验证提取的 code 是否是有效的函数定义.
+
+        检查 code 是否以常见的函数返回类型或函数名开头。
+        这对于过滤掉 tree-sitter 在解析压缩代码时产生的错误匹配很有用。
+
+        Args:
+            code: 提取的代码
+            func_name: 函数名
+
+        Returns:
+            是否是有效的函数代码
+        """
+        if not code or not code.strip():
+            return False
+
+        code = code.strip()
+
+        # 有效的函数定义应该以以下之一开头：
+        # 1. 返回类型 (int, void, char, bool, auto, etc.)
+        # 2. 函数名（当返回类型是宏定义时，如 typedef int I; I func(){}）
+        valid_starts = [
+            # 常见返回类型
+            "int ", "void ", "char ", "bool ", "float ", "double ", "auto ",
+            "short ", "long ", "unsigned ", "signed ", "size_t ", "ssize_t ",
+            "int8_t ", "int16_t ", "int32_t ", "int64_t ",
+            "uint8_t ", "uint16_t ", "uint32_t ", "uint64_t ",
+            "std::", "const ", "static ", "inline ", "virtual ",
+            # 模板
+            "template",
+            # 宏定义类型（单个大写字母，如 typedef int I;）
+            "A ", "B ", "C ", "D ", "E ", "F ", "G ", "H ", "I ", "J ",
+            "K ", "L ", "M ", "N ", "O ", "P ", "Q ", "R ", "S ", "T ",
+            "U ", "V ", "W ", "X ", "Y ", "Z ",
+        ]
+
+        # 检查是否以有效的开头开始
+        for start in valid_starts:
+            if code.startswith(start):
+                return True
+
+        # 检查是否以函数名开头（后面跟着左括号）
+        # 这适用于宏定义类型的情况，如：I func(){}
+        if code.startswith(f"{func_name}("):
+            return True
+
+        return False
+
+    def _extract_function_regex(self, content: str, func_name: str) -> str:
+        """使用正则表达式从内容中提取函数定义.
+
+        当 tree-sitter 解析失败时作为备用方法。
+
+        Args:
+            content: 文件内容
+            func_name: 函数名
+
+        Returns:
+            提取的函数代码，如果提取失败返回空字符串
+        """
+        escaped_name = re.escape(func_name)
+
+        # 策略1: 尝试匹配完整的函数定义（包括返回类型）
+        # 使用平衡花括号匹配来处理嵌套
+        full_pattern = rf"[a-zA-Z_][a-zA-Z0-9_]*\s+{escaped_name}\s*\([^)]*\)\s*\{{"
+        match = re.search(full_pattern, content)
+        if match:
+            start = match.start()
+            # 手动匹配花括号
+            brace_count = 0
+            end = start
+            for i, char in enumerate(content[start:]):
+                if char == "{":
+                    brace_count += 1
+                elif char == "}":
+                    brace_count -= 1
+                    if brace_count == 0:
+                        end = start + i + 1
+                        break
+            if end > start:
+                return content[start:end]
+
+        # 策略2: 尝试匹配宏定义类型（单个大写字母）+ 函数名
+        macro_pattern = rf"I\s+{escaped_name}\s*\([^)]*\)\s*\{{"
+        match = re.search(macro_pattern, content)
+        if match:
+            start = match.start()
+            # 手动匹配花括号
+            brace_count = 0
+            end = start
+            for i, char in enumerate(content[start:]):
+                if char == "{":
+                    brace_count += 1
+                elif char == "}":
+                    brace_count -= 1
+                    if brace_count == 0:
+                        end = start + i + 1
+                        break
+            if end > start:
+                return content[start:end]
+
+        # 策略3: 直接查找 函数名() { 并在前面加上返回类型
+        simple_pattern = rf"{escaped_name}\s*\([^)]*\)\s*\{{"
+        match = re.search(simple_pattern, content)
+        if match:
+            func_start = match.start()
+            # 手动匹配花括号
+            brace_count = 0
+            end = func_start
+            for i, char in enumerate(content[func_start:]):
+                if char == "{":
+                    brace_count += 1
+                elif char == "}":
+                    brace_count -= 1
+                    if brace_count == 0:
+                        end = func_start + i + 1
+                        break
+            if end > func_start:
+                # 尝试向前查找返回类型
+                search_start = max(0, func_start - 50)
+                prefix = content[search_start:func_start]
+                ret_type_match = re.search(r"([a-zA-Z_][a-zA-Z0-9_]*\s+|I\s+)$", prefix)
+                if ret_type_match:
+                    return ret_type_match.group(1) + content[func_start:end]
+                return content[func_start:end]
+
+        return ""
 
 
 class CppAnalyzer(CAnalyzer):

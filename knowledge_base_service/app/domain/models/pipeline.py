@@ -195,6 +195,7 @@ class PipelineStage(Enum):
     STRUCTURE_GRAPH_BUILD = "structure_graph_build"
     DEPENDENCY_GRAPH_BUILD = "dependency_graph_build"
     SEMANTIC_ANALYSIS = "semantic_analysis"
+    FLOWCHART_GENERATION = "flowchart_generation"
     EMBEDDING_GENERATION = "embedding_generation"
     VECTOR_DB_STORE = "vector_db_store"
     MODULE_DETECTION = "module_detection"
@@ -209,6 +210,7 @@ STAGE_ORDER: List[PipelineStage] = [
     PipelineStage.STRUCTURE_GRAPH_BUILD,  # 合并了 repo_traversal
     PipelineStage.DEPENDENCY_GRAPH_BUILD,
     PipelineStage.SEMANTIC_ANALYSIS,
+    PipelineStage.FLOWCHART_GENERATION,  # 为方法生成流程图
     PipelineStage.MODULE_DETECTION,
     PipelineStage.VECTOR_DB_STORE,  # 合并了 embedding_generation
 ]
@@ -218,6 +220,7 @@ STAGE_WEIGHTS: Dict[PipelineStage, float] = {
     PipelineStage.STRUCTURE_GRAPH_BUILD: 3.0,  # 文件遍历和解析，最耗时
     PipelineStage.DEPENDENCY_GRAPH_BUILD: 2.0,  # 依赖分析
     PipelineStage.SEMANTIC_ANALYSIS: 2.0,  # LLM 生成摘要
+    PipelineStage.FLOWCHART_GENERATION: 1.0,  # 流程图生成
     PipelineStage.MODULE_DETECTION: 1.5,  # 模块检测
     PipelineStage.VECTOR_DB_STORE: 1.5,  # 向量存储
 }

@@ -1,11 +1,14 @@
 """重置初始化 API 路由."""
 
 import logging
+import shutil
+from pathlib import Path
 from typing import Any, Dict
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from app.config import get_settings
 from app.core.pipeline import get_orchestrator
 from app.core.pipeline_logger import get_pipeline_log_manager
 from app.infrastructure.csv_storage import get_repo_status_storage
@@ -34,6 +37,7 @@ async def reset_initialization(repo_id: str) -> ResetResponse:
     2. 删除向量数据库中对应仓库所有数据
     3. 在 repo_initialization.csv 文件中删除对应仓库数据
     4. 清除仓库 log 目录下的上下文 json 文件，若有执行日志，移入 history 文件夹
+    5. 删除 data 目录下对应仓库的所有 img 文件
 
     Args:
         repo_id: 仓库ID
@@ -46,6 +50,7 @@ async def reset_initialization(repo_id: str) -> ResetResponse:
         "vector_db_deleted": False,
         "csv_record_deleted": False,
         "logs_reset": False,
+        "images_deleted": False,
     }
 
     try:
@@ -97,12 +102,30 @@ async def reset_initialization(repo_id: str) -> ResetResponse:
             logger.error(f"Failed to reset logs for repo {repo_id}: {e}")
             details["logs_error"] = str(e)
 
+        # 5. 删除 data 目录下对应仓库的所有 img 文件
+        try:
+            settings = get_settings()
+            image_dir = Path(settings.flowchart_image_dir) / repo_id
+            if image_dir.exists():
+                # 删除整个仓库的 image 目录
+                shutil.rmtree(image_dir)
+                details["images_deleted"] = True
+                logger.info(f"Deleted image directory for repo: {repo_id}")
+            else:
+                details["images_deleted"] = True
+                details["images_note"] = "Image directory does not exist"
+                logger.info(f"No image directory found for repo: {repo_id}")
+        except Exception as e:
+            logger.error(f"Failed to delete images for repo {repo_id}: {e}")
+            details["images_error"] = str(e)
+
         # 如果所有关键操作都成功，返回成功
         success = (
             details["graph_db_deleted"]
             and details["vector_db_deleted"]
             and details["csv_record_deleted"]
             and details["logs_reset"]
+            and details["images_deleted"]
         )
 
         if success:

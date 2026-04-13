@@ -18,7 +18,6 @@ from app.domain.models.vector import (
     ClassSummaryRecord,
     MethodSummaryRecord,
     SemanticSummaryRecord,
-    SemanticDetailRecord,
 )
 from app.infrastructure.db.vector.base_client import VectorDatabaseClient
 
@@ -30,7 +29,6 @@ COLLECTIONS = {
     "class_summary": "class_summary_collection",
     "method_summary": "method_summary_collection",
     "semantic_summary": "semantic_summary_collection",
-    "semantic_detail": "semantic_detail_collection",
 }
 
 
@@ -134,8 +132,7 @@ class MilvusClient(VectorDatabaseClient):
                     max_length=32,
                 )
             )
-
-        if "detail" in collection_name:
+            # semantic_summary_collection 包含 detail 字段
             fields.append(
                 FieldSchema(
                     name="detail",
@@ -301,11 +298,16 @@ class MilvusClient(VectorDatabaseClient):
         }
 
         try:
+            # 根据 collection 类型确定需要返回的字段
+            output_fields = ["id", "name", "node_id", "repo", "repo_id", "summary"]
+            if "semantic" in collection_name:
+                output_fields.extend(["type", "detail"])
+
             results = await self._client.search(
                 collection_name=collection_name,
                 data=[query_vector],
                 limit=top_k,
-                output_fields=["id", "name", "node_id", "repo", "repo_id"],
+                output_fields=output_fields,
                 filter=filter_expr,
                 search_params=search_params,
             )
@@ -315,14 +317,20 @@ class MilvusClient(VectorDatabaseClient):
             if results:
                 for hits in results:
                     for hit in hits:
-                        formatted_results.append({
+                        result = {
                             "id": hit.get("id"),
                             "name": hit.get("name"),
                             "node_id": hit.get("node_id"),
                             "repo": hit.get("repo"),
                             "repo_id": hit.get("repo_id"),
                             "distance": hit.get("distance", 0),
-                        })
+                            "summary": hit.get("summary"),
+                        }
+                        # semantic collection 包含额外字段
+                        if "semantic" in collection_name:
+                            result["type"] = hit.get("type")
+                            result["detail"] = hit.get("detail")
+                        formatted_results.append(result)
 
             return formatted_results
         except Exception as e:

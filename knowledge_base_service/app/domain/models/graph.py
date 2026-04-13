@@ -150,6 +150,7 @@ class Method(BaseNode):
     embedding_id: str = ""
     docstring: str = ""
     class_id: Optional[str] = None  # 所属类的ID
+    image: str = ""  # 流程图图片ID
 
     def __post_init__(self):
         if not self.type:
@@ -166,6 +167,7 @@ class Method(BaseNode):
             "summary": self.summary,
             "embeddingId": self.embedding_id,
             "docstring": self.docstring,
+            "image": self.image,
         })
         return result
 

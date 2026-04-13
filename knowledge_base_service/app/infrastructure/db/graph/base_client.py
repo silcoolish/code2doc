@@ -437,3 +437,41 @@ class GraphDatabaseClient(ABC):
             依赖关系列表，每项包含 source, target, relationships, distance 字段
         """
         pass
+
+    @abstractmethod
+    async def get_methods_by_languages(
+        self,
+        repo_id: str,
+        languages: List[str],
+        database: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """获取指定仓库中指定语言的所有Method节点.
+
+        Args:
+            repo_id: 仓库ID
+            languages: 语言列表，如 ["c", "cpp"]
+            database: 目标数据库名称
+
+        Returns:
+            Method节点列表，包含 id, name, code, language, file_path 等字段
+        """
+        pass
+
+    @abstractmethod
+    async def update_method_image(
+        self,
+        method_id: str,
+        image_id: str,
+        database: Optional[str] = None,
+    ) -> bool:
+        """更新Method节点的image属性.
+
+        Args:
+            method_id: 方法节点ID
+            image_id: 图片ID
+            database: 目标数据库名称
+
+        Returns:
+            是否成功更新
+        """
+        pass

@@ -20,7 +20,6 @@ from .vector import (
     ClassSummaryRecord,
     MethodSummaryRecord,
     SemanticSummaryRecord,
-    SemanticDetailRecord,
 )
 
 __all__ = [

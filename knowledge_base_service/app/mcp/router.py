@@ -28,12 +28,22 @@ class GetProjectStructureRequest(BaseModel):
     repo_id: str = Field(..., description="仓库ID")
 
 
-class SearchNodesRequest(BaseModel):
+class SearchCodeNodesRequest(BaseModel):
     repo_id: str = Field(..., description="仓库ID")
     query: str = Field(..., description="查询关键字")
     node_types: list[str] = Field(
         default=["File", "Class", "Method"],
-        description="节点类型列表: File, Class, Method, Module, Workflow",
+        description="代码节点类型列表: File, Class, Method",
+    )
+    top_k: int = Field(default=10, description="返回结果数量")
+
+
+class SearchSemanticNodesRequest(BaseModel):
+    repo_id: str = Field(..., description="仓库ID")
+    query: str = Field(..., description="查询关键字")
+    node_types: list[str] = Field(
+        default=["Module", "Workflow"],
+        description="语义节点类型列表: Module, Workflow",
     )
     top_k: int = Field(default=10, description="返回结果数量")
 
@@ -47,19 +57,13 @@ class GetModuleWorkflowsRequest(BaseModel):
     module_id: str = Field(..., description="模块ID")
 
 
-class GetNodeByIdRequest(BaseModel):
-    node_id: str = Field(..., description="节点ID")
-
-
 class GetNodeDependenciesRequest(BaseModel):
     node_id: str = Field(..., description="节点ID")
     depth: int = Field(default=1, description="依赖深度")
 
 
-class SearchCodeRequest(BaseModel):
-    repo_id: str = Field(..., description="仓库ID")
-    query: str = Field(..., description="查询关键字")
-    top_k: int = Field(default=10, description="返回结果数量")
+class BatchDownloadFlowchartsRequest(BaseModel):
+    method_ids: list[str] = Field(..., description="Method节点ID列表")
 
 
 # ========== 响应模型 ==========
@@ -86,14 +90,14 @@ async def get_project_structure(
         return ToolResponse(success=False, error=str(e))
 
 
-@router.post("/tools/search_nodes", response_model=ToolResponse)
-async def search_nodes(
-    request: SearchNodesRequest,
+@router.post("/tools/search_code_nodes", response_model=ToolResponse)
+async def search_code_nodes(
+    request: SearchCodeNodesRequest,
     tools: KnowledgeBaseTools = Depends(get_tools),
 ) -> ToolResponse:
-    """根据关键字语义查询节点信息."""
+    """根据关键字语义查询代码节点 (FILE, METHOD, CLASS)."""
     try:
-        result = await tools.search_nodes(
+        result = await tools.search_code_nodes(
             repo_id=request.repo_id,
             query=request.query,
             node_types=request.node_types,
@@ -101,7 +105,26 @@ async def search_nodes(
         )
         return ToolResponse(success=True, data=json.loads(result))
     except Exception as e:
-        logger.exception(f"search_nodes failed: {e}")
+        logger.exception(f"search_code_nodes failed: {e}")
+        return ToolResponse(success=False, error=str(e))
+
+
+@router.post("/tools/search_semantic_nodes", response_model=ToolResponse)
+async def search_semantic_nodes(
+    request: SearchSemanticNodesRequest,
+    tools: KnowledgeBaseTools = Depends(get_tools),
+) -> ToolResponse:
+    """根据关键字语义查询语义节点 (MODULE, WORKFLOW)."""
+    try:
+        result = await tools.search_semantic_nodes(
+            repo_id=request.repo_id,
+            query=request.query,
+            node_types=request.node_types,
+            top_k=request.top_k,
+        )
+        return ToolResponse(success=True, data=json.loads(result))
+    except Exception as e:
+        logger.exception(f"search_semantic_nodes failed: {e}")
         return ToolResponse(success=False, error=str(e))
 
 
@@ -136,20 +159,6 @@ async def get_module_workflows(
         return ToolResponse(success=False, error=str(e))
 
 
-@router.post("/tools/get_node_by_id", response_model=ToolResponse)
-async def get_node_by_id(
-    request: GetNodeByIdRequest,
-    tools: KnowledgeBaseTools = Depends(get_tools),
-) -> ToolResponse:
-    """根据节点 ID 获取节点信息."""
-    try:
-        result = await tools.get_node_by_id(node_id=request.node_id)
-        return ToolResponse(success=True, data=json.loads(result))
-    except Exception as e:
-        logger.exception(f"get_node_by_id failed: {e}")
-        return ToolResponse(success=False, error=str(e))
-
-
 @router.post("/tools/get_node_dependencies", response_model=ToolResponse)
 async def get_node_dependencies(
     request: GetNodeDependenciesRequest,
@@ -167,21 +176,19 @@ async def get_node_dependencies(
         return ToolResponse(success=False, error=str(e))
 
 
-@router.post("/tools/search_code", response_model=ToolResponse)
-async def search_code(
-    request: SearchCodeRequest,
+@router.post("/tools/batch_download_flowcharts", response_model=ToolResponse)
+async def batch_download_flowcharts(
+    request: BatchDownloadFlowchartsRequest,
     tools: KnowledgeBaseTools = Depends(get_tools),
 ) -> ToolResponse:
-    """语义搜索代码."""
+    """根据method节点ID列表批量下载流程图图片."""
     try:
-        result = await tools.search_code(
-            repo_id=request.repo_id,
-            query=request.query,
-            top_k=request.top_k,
+        result = await tools.batch_download_flowcharts(
+            method_ids=request.method_ids,
         )
         return ToolResponse(success=True, data=json.loads(result))
     except Exception as e:
-        logger.exception(f"search_code failed: {e}")
+        logger.exception(f"batch_download_flowcharts failed: {e}")
         return ToolResponse(success=False, error=str(e))
 
 
@@ -202,9 +209,9 @@ async def list_tools() -> dict:
                 },
             },
             {
-                "name": "search_nodes",
-                "description": "根据关键字语义查询节点信息",
-                "endpoint": "/mcp/tools/search_nodes",
+                "name": "search_code_nodes",
+                "description": "根据关键字语义查询代码节点 (FILE, METHOD, CLASS)",
+                "endpoint": "/mcp/tools/search_code_nodes",
                 "method": "POST",
                 "parameters": {
                     "repo_id": {"type": "string", "required": True},
@@ -213,6 +220,22 @@ async def list_tools() -> dict:
                         "type": "array",
                         "items": {"type": "string"},
                         "default": ["File", "Class", "Method"],
+                    },
+                    "top_k": {"type": "integer", "default": 10},
+                },
+            },
+            {
+                "name": "search_semantic_nodes",
+                "description": "根据关键字语义查询语义节点 (MODULE, WORKFLOW)，返回结果包含 detail 字段",
+                "endpoint": "/mcp/tools/search_semantic_nodes",
+                "method": "POST",
+                "parameters": {
+                    "repo_id": {"type": "string", "required": True},
+                    "query": {"type": "string", "required": True},
+                    "node_types": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "default": ["Module", "Workflow"],
                     },
                     "top_k": {"type": "integer", "default": 10},
                 },
@@ -237,15 +260,6 @@ async def list_tools() -> dict:
                 },
             },
             {
-                "name": "get_node_by_id",
-                "description": "根据节点 ID 获取节点信息",
-                "endpoint": "/mcp/tools/get_node_by_id",
-                "method": "POST",
-                "parameters": {
-                    "node_id": {"type": "string", "required": True},
-                },
-            },
-            {
                 "name": "get_node_dependencies",
                 "description": "获取节点的依赖关系图",
                 "endpoint": "/mcp/tools/get_node_dependencies",
@@ -256,14 +270,12 @@ async def list_tools() -> dict:
                 },
             },
             {
-                "name": "search_code",
-                "description": "语义搜索代码",
-                "endpoint": "/mcp/tools/search_code",
+                "name": "batch_download_flowcharts",
+                "description": "根据method节点ID列表批量下载流程图图片",
+                "endpoint": "/mcp/tools/batch_download_flowcharts",
                 "method": "POST",
                 "parameters": {
-                    "repo_id": {"type": "string", "required": True},
-                    "query": {"type": "string", "required": True},
-                    "top_k": {"type": "integer", "default": 10},
+                    "method_ids": {"type": "array", "items": {"type": "string"}, "required": True},
                 },
             },
         ]

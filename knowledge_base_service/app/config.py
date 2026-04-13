@@ -31,11 +31,6 @@ class Settings(BaseSettings):
     # Graph Database Settings
     graph_db_type: str = Field(default="neo4j")  # "neo4j" | "nebula" | "janusgraph"
 
-    # Neo4j Settings
-    neo4j_uri: str = Field(default="bolt://localhost:7687")
-    neo4j_user: str = Field(default="neo4j")
-    neo4j_password: str = Field(default="password")
-
     # Vector Database Settings
     vector_db_type: str = Field(default="milvus")  # "milvus" | "pinecone" | "weaviate" | "qdrant"
 
@@ -107,6 +102,12 @@ class Settings(BaseSettings):
             "vendor/**",
         ]
     )
+
+    # Flowchart Generation Service Settings
+    flowchart_service_url: str = Field(default="http://localhost:18765")
+    flowchart_service_timeout: int = Field(default=30)
+    flowchart_supported_languages: List[str] = Field(default=["c", "cpp"])
+    flowchart_image_dir: str = Field(default="./data")
 
 
 @lru_cache()

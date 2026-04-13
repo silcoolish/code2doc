@@ -37,6 +37,7 @@ python-multipart==0.0.17
 aiofiles==24.1.0
 gitignore-parser==0.1.11
 networkx==3.4.0
+aiohttp==3.11.0
 
 # Testing
 pytest==8.3.0
