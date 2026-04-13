@@ -85,7 +85,7 @@ class DocumentGenerator:
         """
         if state.get("error"):
             return "error"
-        if state["current_block_index"] < state["total_blocks"]:
+        if state["current_paragraph_index"] < state["total_paragraphs"]:
             return "continue"
         return "done"
 
@@ -110,7 +110,7 @@ class DocumentGenerator:
             logger.info(
                 "workflow_complete",
                 status=result["status"],
-                total_blocks=result["total_blocks"],
+                total_paragraphs=result["total_paragraphs"],
             )
 
             return result

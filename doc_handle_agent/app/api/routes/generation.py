@@ -11,7 +11,7 @@ from app.api.models.schemas import (
     GenerateDocumentResponse,
     PreviewTemplateRequest,
     PreviewTemplateResponse,
-    ContentBlockInfo,
+    TemplateParagraphInfo,
     ActiveGenerationInfo,
     SystemStatusResponse,
 )
@@ -114,30 +114,33 @@ async def preview_template(
             template_path=request.template_path,
             valid=False,
             message=message,
-            blocks=[],
+            paragraphs=[],
         )
 
     try:
-        # 解析内容块
-        blocks = parser.preview_blocks(request.template_path)
+        # 解析模板段落
+        paragraphs = parser.preview_blocks(request.template_path)
 
-        block_infos = [
-            ContentBlockInfo(
-                id=block["id"],
-                type=block["type"],
-                prompt=block["prompt"],
-                is_list=block.get("is_list", False),
-                min_length=block.get("min_length"),
-                max_length=block.get("max_length"),
+        paragraph_infos = [
+            TemplateParagraphInfo(
+                id=para["id"],
+                is_template=para["is_template"],
+                text=para["text"],
+                is_heading=para["is_heading"],
+                prompt=para.get("prompt"),
+                is_list=para.get("is_list", False),
+                min_length=para.get("min_length"),
+                max_length=para.get("max_length"),
+                example=para.get("example"),
             )
-            for block in blocks
+            for para in paragraphs
         ]
 
         return PreviewTemplateResponse(
             template_path=request.template_path,
             valid=True,
             message=message,
-            blocks=block_infos,
+            paragraphs=paragraph_infos,
         )
 
     except Exception as e:

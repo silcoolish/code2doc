@@ -1,6 +1,7 @@
 """文档生成引擎."""
 
 import asyncio
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional
@@ -14,6 +15,38 @@ from app.infrastructure.mcp_client import MCPClient
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def cleanup_temp_files(repo_id: str) -> None:
+    """清理临时目录下对应仓库的文件.
+
+    Args:
+        repo_id: 仓库ID
+    """
+    settings = get_settings()
+    temp_repo_dir = settings.temp_path / "flowcharts" / repo_id
+
+    if temp_repo_dir.exists():
+        try:
+            shutil.rmtree(temp_repo_dir)
+            logger.info(
+                "temp_files_cleaned",
+                repo_id=repo_id,
+                temp_dir=str(temp_repo_dir),
+            )
+        except Exception as e:
+            logger.warning(
+                "temp_files_cleanup_failed",
+                repo_id=repo_id,
+                temp_dir=str(temp_repo_dir),
+                error=str(e),
+            )
+    else:
+        logger.debug(
+            "temp_dir_not_exists",
+            repo_id=repo_id,
+            temp_dir=str(temp_repo_dir),
+        )
 
 
 class DocumentEngine:
@@ -168,6 +201,9 @@ class DocumentEngine:
             if flow_id in self._running_tasks:
                 del self._running_tasks[flow_id]
 
+            # 清理临时文件
+            cleanup_temp_files(initial_state["repo_id"])
+
     def get_progress(self, flow_id: str) -> Dict:
         """获取生成进度.
 
@@ -186,8 +222,8 @@ class DocumentEngine:
                 "error": "流程不存在",
             }
 
-        total = state["total_blocks"]
-        current = state["current_block_index"]
+        total = state["total_paragraphs"]
+        current = state["current_paragraph_index"]
         progress = (current / total * 100) if total > 0 else 0
 
         return {

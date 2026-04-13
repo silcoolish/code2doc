@@ -1,7 +1,7 @@
 """构建文档节点."""
 
 from app.core.nodes.base import WorkflowNode
-from app.core.state import AgentState, GenerationStatus, ListBlockResult
+from app.core.state import AgentState, GenerationStatus
 from app.infrastructure.docx_handler import DocxHandler
 from app.utils.logger import get_logger
 
@@ -33,26 +33,24 @@ class BuildDocumentNode(WorkflowNode):
             output_path = self.docx_handler.replace_blocks(
                 template_path=state["template_path"],
                 output_path=state["output_path"],
-                block_contents=state["generated_contents"],
+                generated_contents=state["generated_contents"],
+                generated_images=state.get("generated_images"),
             )
 
             state["status"] = GenerationStatus.COMPLETED.value
             state["message"] = f"文档生成完成: {output_path}"
 
             # 统计生成内容
-            total_blocks = len(state["generated_contents"])
-            list_blocks = sum(
-                1 for content in state["generated_contents"].values()
-                if isinstance(content, ListBlockResult)
+            total_paragraphs = len(state["generated_contents"])
+            total_results = sum(
+                len(results) for results in state["generated_contents"].values()
             )
-            text_blocks = total_blocks - list_blocks
 
             logger.info(
                 "build_document_success",
                 output_path=output_path,
-                total_blocks=total_blocks,
-                text_blocks=text_blocks,
-                list_blocks=list_blocks,
+                total_paragraphs=total_paragraphs,
+                total_results=total_results,
             )
 
         except Exception as e:

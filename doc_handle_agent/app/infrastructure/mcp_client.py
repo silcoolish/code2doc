@@ -1,9 +1,9 @@
-"""MCP客户端封装 - 使用langchain-mcp-adapters的MultiServerMCPClient."""
+"""MCP客户端封装 - 使用HTTP REST API (aiohttp)."""
 
-from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator, List, Optional
+import asyncio
+from typing import Any, Dict, List, Optional
 
-from langchain_mcp_adapters.client import MultiServerMCPClient
+import aiohttp
 
 from app.config import get_settings
 from app.utils.logger import get_logger
@@ -12,25 +12,33 @@ logger = get_logger(__name__)
 
 
 class MCPClient:
-    """MCP客户端封装 - 基于MultiServerMCPClient."""
+    """MCP客户端封装 - 基于HTTP REST API."""
 
     def __init__(self, server_url: Optional[str] = None):
         """初始化MCP客户端.
 
         Args:
-            server_url: MCP服务器HTTP地址 (如 http://localhost:8000/sse)
+            server_url: MCP服务器HTTP地址 (如 http://localhost:8000/mcp)
                        默认从配置读取
         """
         settings = get_settings()
         self.server_url = server_url or settings.mcp_server_url
-        self._client: Optional[MultiServerMCPClient] = None
-        self._session: Optional[Any] = None
+        self._session: Optional[aiohttp.ClientSession] = None
+        self._tools: List[Dict[str, Any]] = []
 
-    @asynccontextmanager
-    async def connect(self) -> AsyncGenerator["MCPClient", None]:
+    async def __aenter__(self) -> "MCPClient":
+        """异步上下文管理器入口."""
+        await self.connect()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        """异步上下文管理器退出."""
+        await self.disconnect()
+
+    async def connect(self) -> "MCPClient":
         """建立MCP连接.
 
-        Yields:
+        Returns:
             MCPClient: 连接后的客户端实例
         """
         logger.info(
@@ -39,33 +47,34 @@ class MCPClient:
         )
 
         try:
-            # 创建MultiServerMCPClient连接配置
-            connections = {
-                "knowledge_base": {
-                    "url": self.server_url,
-                    "transport": "http",
-                }
-            }
+            # 创建aiohttp会话（禁用代理）
+            connector = aiohttp.TCPConnector(
+                limit=100,
+                limit_per_host=10,
+                ttl_dns_cache=300,
+                use_dns_cache=True,
+            )
+            timeout = aiohttp.ClientTimeout(total=30)
+            self._session = aiohttp.ClientSession(
+                connector=connector,
+                timeout=timeout,
+                trust_env=False,  # 禁用环境变量（包括代理）
+            )
 
-            # 初始化客户端并建立连接
-            self._client = MultiServerMCPClient(connections)
+            # 获取工具列表
+            tools_url = f"{self.server_url}/tools"
+            async with self._session.get(tools_url) as response:
+                response.raise_for_status()
+                data = await response.json()
+                self._tools = data.get("tools", [])
 
-            # 获取session（用于load_mcp_tools）
-            async with self._client.session("knowledge_base") as session:
-                self._session = session
+            logger.info(
+                "mcp_connect_success",
+                tool_count=len(self._tools),
+                tools=[t["name"] for t in self._tools],
+            )
 
-                # 获取工具列表用于日志
-                tools = await self._client.get_tools()
-                logger.info(
-                    "mcp_connect_success",
-                    tool_count=len(tools),
-                    tools=[t.name for t in tools],
-                )
-
-                yield self
-
-                self._session = None
-                self._client = None
+            return self
 
         except Exception as e:
             logger.error(
@@ -73,6 +82,13 @@ class MCPClient:
                 error=str(e),
             )
             raise
+
+    async def disconnect(self) -> None:
+        """断开连接."""
+        if self._session:
+            await self._session.close()
+            self._session = None
+            logger.info("mcp_disconnected")
 
     async def call_tool(
         self,
@@ -91,7 +107,7 @@ class MCPClient:
         Raises:
             RuntimeError: 如果客户端未连接
         """
-        if not self._client:
+        if not self._session:
             raise RuntimeError("MCP client not connected")
 
         logger.info(
@@ -101,26 +117,21 @@ class MCPClient:
         )
 
         try:
-            # 获取工具并执行
-            tools = await self._client.get_tools()
-            target_tool = None
+            # 调用工具端点
+            tool_url = f"{self.server_url}/tools/{tool_name}"
+            async with self._session.post(
+                tool_url,
+                json=arguments,
+            ) as response:
+                response.raise_for_status()
+                result = await response.json()
 
-            for tool in tools:
-                if tool.name == tool_name:
-                    target_tool = tool
-                    break
-
-            if not target_tool:
-                raise ValueError(f"Tool not found: {tool_name}")
-
-            # 执行工具调用
-            result = await target_tool.ainvoke(arguments)
-
-            # 处理结果
-            if isinstance(result, str):
-                text_content = result
+            # 处理响应
+            if result.get("success"):
+                text_content = str(result.get("data", ""))
             else:
-                text_content = str(result)
+                error_msg = result.get("error", "Unknown error")
+                raise RuntimeError(f"Tool execution failed: {error_msg}")
 
             logger.info(
                 "tool_call_success",
@@ -147,31 +158,25 @@ class MCPClient:
         Returns:
             工具列表，格式符合OpenAI函数调用规范
         """
-        if not self._session:
+        if not self._tools:
             logger.warning("get_available_tools called before connect")
             return []
 
-        # 从session获取工具信息
+        # 转换为OpenAI函数调用格式
         tools = []
-        if hasattr(self._session, '_tools'):
-            for tool in self._session._tools:
-                tools.append({
-                    "type": "function",
-                    "function": {
-                        "name": tool.name,
-                        "description": tool.description,
-                        "parameters": tool.inputSchema,
-                    },
-                })
+        for tool in self._tools:
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": tool["name"],
+                    "description": tool["description"],
+                    "parameters": tool.get("parameters", {}),
+                },
+            })
 
         return tools
 
     @property
-    def session(self) -> Optional[Any]:
-        """获取当前MCP session (用于langchain-mcp-adapters)."""
+    def client(self) -> Optional[aiohttp.ClientSession]:
+        """获取HTTP会话实例."""
         return self._session
-
-    @property
-    def client(self) -> Optional[MultiServerMCPClient]:
-        """获取MultiServerMCPClient实例."""
-        return self._client

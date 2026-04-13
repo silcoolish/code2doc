@@ -48,15 +48,18 @@ class GenerationProgressResponse(BaseModel):
 
 # ========== 模板相关 ==========
 
-class ContentBlockInfo(BaseModel):
-    """内容块信息."""
+class TemplateParagraphInfo(BaseModel):
+    """模板段落信息."""
 
-    id: str = Field(..., description="内容块ID")
-    type: str = Field(..., description="类型: text/headline")
-    prompt: str = Field(..., description="生成提示词")
-    is_list: bool = Field(False, description="是否列表")
+    id: str = Field(..., description="段落ID")
+    is_template: bool = Field(..., description="是否为模板段落")
+    text: str = Field(..., description="原始文本")
+    is_heading: bool = Field(..., description="是否为标题")
+    prompt: Optional[str] = Field(None, description="生成提示词（模板段落）")
+    is_list: bool = Field(False, description="是否生成列表")
     min_length: Optional[int] = Field(None, description="最小长度")
     max_length: Optional[int] = Field(None, description="最大长度")
+    example: Optional[str] = Field(None, description="内容生成参考示例")
 
 
 class PreviewTemplateRequest(BaseModel):
@@ -71,7 +74,7 @@ class PreviewTemplateResponse(BaseModel):
     template_path: str = Field(..., description="模板路径")
     valid: bool = Field(..., description="是否有效")
     message: Optional[str] = Field(None, description="验证消息")
-    blocks: List[ContentBlockInfo] = Field(default=[], description="内容块列表")
+    paragraphs: List[TemplateParagraphInfo] = Field(default=[], description="模板段落列表")
 
 
 # ========== 系统状态 ==========
@@ -89,3 +92,7 @@ class ActiveGenerationInfo(BaseModel):
 
     flow_id: str = Field(..., description="流程ID")
     status: Optional[str] = Field(None, description="当前状态")
+
+
+# 兼容性导出（保留旧名称以兼容现有代码）
+ContentBlockInfo = TemplateParagraphInfo

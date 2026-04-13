@@ -2,13 +2,16 @@
 
 import re
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 from docx import Document
-from docx.shared import Pt
+from docx.shared import Inches, Pt
 from docx.text.paragraph import Paragraph
 
 from app.utils.logger import get_logger
+
+if TYPE_CHECKING:
+    from app.core.state import GeneratedContentResult, ImageInfo
 
 logger = get_logger(__name__)
 
@@ -67,7 +70,7 @@ class DocxHandler:
         """提取内容块及其位置信息和段落样式类型.
 
         Args:
-            doc_path: 文档路径
+            doc_path: 文档文件路径
 
         Returns:
             [(段落索引, 原始文本, 块内容, 是否为标题), ...]
@@ -117,7 +120,7 @@ class DocxHandler:
 
             matches = self.block_pattern.findall(text)
             has_template = len(matches) > 0
-            template_content = matches[0].strip() if matches else None
+            template_content = "{" + self.replace_dot(matches[0]).strip() + "}" if matches else None
 
             paragraphs_info.append(ParagraphInfo(
                 index=idx,
@@ -134,29 +137,25 @@ class DocxHandler:
         self,
         template_path: str,
         output_path: str,
-        block_contents: Dict[str, Union[str, "ListBlockResult"]],
+        generated_contents: Dict[str, List["GeneratedContentResult"]],
+        generated_images: Optional[Dict[str, List["ImageInfo"]]] = None,
     ) -> str:
         """替换模板中的内容块.
-
-        支持的内容类型：
-        - str: 普通内容，直接替换
-        - ListBlockResult: 列表块结果，包含列表项及其子段落
 
         Args:
             template_path: 模板文件路径
             output_path: 输出文件路径
-            block_contents: {段落索引: 生成内容}
+            generated_contents: {段落索引: GeneratedContentResult列表}
+            generated_images: {段落索引: 图片信息列表}，可选（已包含在result中，此处为兼容保留）
 
         Returns:
             输出文件路径
         """
-        from app.core.state import ListBlockResult
-
         logger.info(
             "replace_blocks_start",
             template_path=template_path,
             output_path=output_path,
-            block_count=len(block_contents),
+            content_count=len(generated_contents),
         )
 
         try:
@@ -165,12 +164,12 @@ class DocxHandler:
 
             # 按段落索引降序排序，避免插入新段落后索引错乱
             sorted_items = sorted(
-                block_contents.items(),
+                generated_contents.items(),
                 key=lambda x: int(x[0]),
                 reverse=True,
             )
 
-            for para_idx_str, content in sorted_items:
+            for para_idx_str, results in sorted_items:
                 para_idx = int(para_idx_str)
 
                 if para_idx >= len(doc.paragraphs):
@@ -181,16 +180,31 @@ class DocxHandler:
                     )
                     continue
 
-                # 判断内容类型
-                if isinstance(content, ListBlockResult):
-                    # 列表块：需要处理子段落结构
-                    self._replace_with_list_block_result(
-                        doc, para_idx, paragraphs_info, content
+                if not results:
+                    logger.warning(
+                        "empty_results",
+                        paragraph_index=para_idx,
+                    )
+                    continue
+
+                # 判断是列表还是单一段落
+                if len(results) > 1 or results[0].children:
+                    # 列表段落：多个结果或有子段落
+                    current_para = self._replace_with_list_results(
+                        doc, para_idx, paragraphs_info, results
                     )
                 else:
-                    # 字符串内容：直接替换
+                    # 单一段落：直接替换
+                    result = results[0]
                     paragraph = doc.paragraphs[para_idx]
-                    self._replace_with_text(paragraph, str(content))
+                    self._replace_with_text(paragraph, result.content)
+                    current_para = paragraph
+
+                    # 插入关联的图片
+                    if result.images:
+                        current_para = self._insert_images_after_paragraph(
+                            doc, current_para, result.images
+                        )
 
             # 确保输出目录存在
             output_path_obj = Path(output_path)
@@ -234,37 +248,33 @@ class DocxHandler:
         if run.font.size is None:
             run.font.size = Pt(12)
 
-    def _replace_with_list_block_result(
+    def _replace_with_list_results(
         self,
         doc: Document,
         para_idx: int,
         paragraphs_info: List[ParagraphInfo],
-        list_result: "ListBlockResult",
-    ) -> None:
+        results: List["GeneratedContentResult"],
+    ) -> Paragraph:
         """将列表模板段落替换为生成的列表内容.
-
-        为每个生成的列表项复制子段落结构，并填充生成的内容。
 
         Args:
             doc: 文档对象
             para_idx: 列表模板段落索引
             paragraphs_info: 所有段落信息
-            list_result: 列表块生成结果
-        """
-        from app.core.state import ListTemplateChild
+            results: 列表项生成结果列表
 
-        if not list_result.items:
+        Returns:
+            最后插入的段落对象
+        """
+        if not results:
             # 空列表，清空原段落
             paragraph = doc.paragraphs[para_idx]
             paragraph.clear()
-            return
+            return paragraph
 
         # 获取原段落样式
         original_paragraph = doc.paragraphs[para_idx]
         original_style = original_paragraph.style
-
-        # 获取列表模板的子段落定义
-        list_children = list_result.list_children_template
 
         # 找到列表模板段落后的原始子段落数量（用于删除）
         original_child_count = self._count_list_children(
@@ -280,36 +290,30 @@ class DocxHandler:
                 break
 
         # 处理第一个列表项：使用原段落
-        first_item = list_result.items[0]
+        first_item = results[0]
         original_paragraph.clear()
-        run = original_paragraph.add_run(f"1. {first_item.headline}")
+        run = original_paragraph.add_run(first_item.content)
         if run.font.size is None:
             run.font.size = Pt(12)
 
         # 为第一个列表项添加子段落
         current_paragraph = original_paragraph
-        for child_template in list_children:
-            child_content = first_item.child_contents.get(child_template.id, "")
-            if child_content:
-                # 子段落：静态前缀 + 生成内容
-                text = f"    {child_template.static_prefix} {child_content}"
-            else:
-                # 纯静态段落
-                text = f"    {child_template.static_prefix}"
-
-            current_paragraph = self._insert_paragraph_after(
-                doc, current_paragraph, text
+        if first_item.children:
+            current_paragraph = self._add_child_results(
+                doc, current_paragraph, first_item.children, original_style
             )
-            try:
-                current_paragraph.style = original_style
-            except Exception:
-                pass
+
+        # 插入第一个列表项关联的图片
+        if first_item.images:
+            current_paragraph = self._insert_images_after_paragraph(
+                doc, current_paragraph, first_item.images
+            )
 
         # 处理剩余的列表项
-        for i, item in enumerate(list_result.items[1:], start=2):
+        for item in results[1:]:
             # 添加列表项标题
             current_paragraph = self._insert_paragraph_after(
-                doc, current_paragraph, f"{i}. {item.headline}"
+                doc, current_paragraph, item.content
             )
             try:
                 current_paragraph.style = original_style
@@ -317,20 +321,116 @@ class DocxHandler:
                 pass
 
             # 为列表项添加子段落
-            for child_template in list_children:
-                child_content = item.child_contents.get(child_template.id, "")
-                if child_content:
-                    text = f"    {child_template.static_prefix} {child_content}"
-                else:
-                    text = f"    {child_template.static_prefix}"
-
-                current_paragraph = self._insert_paragraph_after(
-                    doc, current_paragraph, text
+            if item.children:
+                current_paragraph = self._add_child_results(
+                    doc, current_paragraph, item.children, original_style
                 )
+
+            # 插入列表项关联的图片
+            if item.images:
+                current_paragraph = self._insert_images_after_paragraph(
+                    doc, current_paragraph, item.images
+                )
+
+        return current_paragraph
+
+    def _add_child_results(
+        self,
+        doc: Document,
+        after_paragraph: Paragraph,
+        children: List["GeneratedContentResult"],
+        parent_style,
+    ) -> Paragraph:
+        """添加子段落结果.
+
+        Args:
+            doc: 文档对象
+            after_paragraph: 参考段落（在此段落后插入）
+            children: 子段落结果列表
+            parent_style: 父段落样式
+
+        Returns:
+            最后插入的段落
+        """
+        current_paragraph = after_paragraph
+
+        for child in children:
+            if child.children:
+                # 嵌套列表：递归处理
+                current_paragraph = self._add_nested_list_results(
+                    doc, current_paragraph, [child], parent_style
+                )
+            else:
+                # 普通段落
+                current_paragraph = self._insert_paragraph_after(
+                    doc, current_paragraph, child.content
+                )
+                # 根据 style_name 设置段落样式
                 try:
-                    current_paragraph.style = original_style
+                    if child.style_name:
+                        current_paragraph.style = doc.styles[child.style_name]
                 except Exception:
+                    # 样式设置失败时忽略（使用默认样式）
                     pass
+
+                # 插入子段落关联的图片
+                if child.images:
+                    current_paragraph = self._insert_images_after_paragraph(
+                        doc, current_paragraph, child.images
+                    )
+
+        return current_paragraph
+
+    def _add_nested_list_results(
+        self,
+        doc: Document,
+        after_paragraph: Paragraph,
+        results: List["GeneratedContentResult"],
+        parent_style,
+    ) -> Paragraph:
+        """添加嵌套列表内容.
+
+        Args:
+            doc: 文档对象
+            after_paragraph: 参考段落（在此段落后插入）
+            results: 嵌套列表结果
+            parent_style: 父段落样式
+
+        Returns:
+            最后插入的段落
+        """
+        current_paragraph = after_paragraph
+
+        if not results:
+            return current_paragraph
+
+        for item in results:
+            # 创建列表项标题段落
+            current_paragraph = self._insert_paragraph_after(
+                doc, current_paragraph, item.content
+            )
+            # 使用 item.style_name 或 parent_style
+            try:
+                if hasattr(item, 'style_name') and item.style_name:
+                    current_paragraph.style = doc.styles[item.style_name]
+                else:
+                    current_paragraph.style = parent_style
+            except Exception:
+                pass
+
+            # 递归处理子段落
+            if item.children:
+                current_paragraph = self._add_child_results(
+                    doc, current_paragraph, item.children, parent_style
+                )
+
+            # 插入列表项关联的图片
+            if item.images:
+                current_paragraph = self._insert_images_after_paragraph(
+                    doc, current_paragraph, item.images
+                )
+
+        return current_paragraph
 
     def _count_list_children(
         self,
@@ -339,7 +439,7 @@ class DocxHandler:
     ) -> int:
         """计算列表模板段落后的子段落数量.
 
-        子段落是指位于列表模板之后、下一个同层级或更高层级模板之前的段落。
+        子段落是指位于列表模板之后、下一个同层级或更高层级标题之前的段落.
 
         Args:
             paragraphs_info: 所有段落信息
@@ -367,16 +467,11 @@ class DocxHandler:
 
             # 如果遇到同层级或更高层级的标题，停止计数
             if info.is_heading:
-                # 判断层级（通过标题级别数字）
                 list_level = self._get_heading_level(list_para_info.style_name)
                 current_level = self._get_heading_level(info.style_name)
 
                 if current_level <= list_level:
                     break
-
-            # 遇到下一个列表模板（Heading + 有模板），停止
-            if info.is_heading and info.has_template:
-                break
 
             count += 1
 
@@ -395,7 +490,6 @@ class DocxHandler:
             return 99
 
         try:
-            # 提取数字，如 "Heading 1" -> 1
             level = int(style_name.replace("Heading", "").strip())
             return level
         except ValueError:
@@ -433,6 +527,84 @@ class DocxHandler:
 
         return new_paragraph
 
+    def _insert_images_after_paragraph(
+        self,
+        doc: Document,
+        paragraph: Paragraph,
+        images: List["ImageInfo"],
+        max_width: float = 6.0,
+    ) -> Paragraph:
+        """在指定段落后插入图片.
+
+        Args:
+            doc: 文档对象
+            paragraph: 参考段落（在此段落后插入）
+            images: 图片信息列表（包含文件路径）
+            max_width: 图片最大宽度（英寸）
+
+        Returns:
+            最后插入的段落对象
+        """
+        from docx.oxml import OxmlElement
+
+        current_paragraph = paragraph
+
+        for image_info in images:
+            try:
+                if not image_info.image_path:
+                    logger.warning("image_path_empty", image_id=image_info.image_id)
+                    continue
+
+                image_path = Path(image_info.image_path)
+                if not image_path.exists():
+                    logger.warning(
+                        "image_file_not_found",
+                        image_id=image_info.image_id,
+                        image_path=str(image_path),
+                    )
+                    continue
+
+                # 创建新段落用于放置图片
+                new_p = OxmlElement('w:p')
+                current_paragraph._element.addnext(new_p)
+                current_paragraph = Paragraph(new_p, paragraph._parent)
+
+                # 添加图片
+                run = current_paragraph.add_run()
+
+                # 计算图片尺寸，保持宽高比
+                from PIL import Image as PILImage
+                with PILImage.open(image_path) as img:
+                    img_width, img_height = img.size
+                    aspect_ratio = img_height / img_width
+
+                    # 如果图片宽度超过最大宽度，按比例缩小
+                    if img_width > max_width * 96:  # 96 DPI
+                        display_width = Inches(max_width)
+                        display_height = Inches(max_width * aspect_ratio)
+                    else:
+                        display_width = Inches(img_width / 96)
+                        display_height = Inches(img_height / 96)
+
+                # 从文件路径添加图片
+                run.add_picture(str(image_path), width=display_width, height=display_height)
+
+                logger.info(
+                    "image_inserted",
+                    image_id=image_info.image_id,
+                    img_method_name=image_info.method_name,
+                    image_path=str(image_path),
+                )
+
+            except Exception as e:
+                logger.warning(
+                    "image_insert_failed",
+                    image_id=image_info.image_id,
+                    error=str(e),
+                )
+
+        return current_paragraph
+
     def get_document_info(self, doc_path: str) -> Dict[str, any]:
         """获取文档基本信息.
 
@@ -444,7 +616,6 @@ class DocxHandler:
         """
         doc = Document(doc_path)
 
-        # 统计段落数和内容块数
         paragraph_count = len(doc.paragraphs)
         block_count = 0
 
@@ -476,10 +647,8 @@ class DocxHandler:
             if not path.suffix.lower() in ['.docx', '.doc']:
                 return False, f"Invalid file format: {path.suffix}"
 
-            # 尝试打开文档
             doc = Document(doc_path)
 
-            # 检查是否包含内容块
             has_blocks = False
             for paragraph in doc.paragraphs:
                 if self.block_pattern.search(paragraph.text):
@@ -496,3 +665,13 @@ class DocxHandler:
 
         except Exception as e:
             return False, f"Failed to validate template: {str(e)}"
+
+    def replace_dot(self, text: str) -> str:
+        extra_map = {
+            '"': '"', '"': '"',
+            ''': "'", ''': "'",
+            '，': ','
+        }
+        for k, v in extra_map.items():
+            text = text.replace(k, v)
+        return text

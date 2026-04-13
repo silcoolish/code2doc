@@ -7,12 +7,15 @@ from typing import Optional
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# 获取项目根目录（app/config.py 的上级目录）
+PROJECT_ROOT = Path(__file__).parent.parent
+
 
 class Settings(BaseSettings):
     """应用配置."""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=str(PROJECT_ROOT / ".env"),
         env_file_encoding="utf-8",
         extra="ignore",
     )
@@ -42,6 +45,7 @@ class Settings(BaseSettings):
     template_dir: str = Field(default="./templates", alias="TEMPLATE_DIR")
     output_dir: str = Field(default="./output", alias="OUTPUT_DIR")
     log_dir: str = Field(default="./log", alias="LOG_DIR")
+    temp_dir: str = Field(default="./temp", alias="TEMP_DIR")
 
     # 日志配置
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
@@ -62,6 +66,13 @@ class Settings(BaseSettings):
     def log_path(self) -> Path:
         """获取日志目录路径."""
         path = Path(self.log_dir)
+        path.mkdir(parents=True, exist_ok=True)
+        return path.resolve()
+
+    @property
+    def temp_path(self) -> Path:
+        """获取临时目录路径."""
+        path = Path(self.temp_dir)
         path.mkdir(parents=True, exist_ok=True)
         return path.resolve()
 

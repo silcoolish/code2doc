@@ -25,17 +25,17 @@ class ParseTemplateNode(WorkflowNode):
 
         try:
             parser = TemplateParser()
-            blocks = parser.parse(state["template_path"])
+            paragraphs = parser.parse(state["template_path"])
 
-            state["content_blocks"] = blocks
-            state["total_blocks"] = len(blocks)
-            state["current_block_index"] = 0
+            state["paragraphs"] = paragraphs
+            state["total_paragraphs"] = len(paragraphs)
+            state["current_paragraph_index"] = 0
             state["status"] = GenerationStatus.GENERATING.value
-            state["message"] = f"解析完成，共{len(blocks)}个内容块待生成"
+            state["message"] = f"解析完成，共{len(paragraphs)}个模板段落待生成"
 
             logger.info(
                 "parse_template_success",
-                block_count=len(blocks),
+                paragraph_count=len(paragraphs),
             )
 
         except Exception as e:

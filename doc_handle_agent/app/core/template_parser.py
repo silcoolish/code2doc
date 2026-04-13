@@ -2,10 +2,10 @@
 
 import json
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Union
 
-from app.core.state import ContentBlock, ContentBlockType, ListTemplateChild
-from app.infrastructure.docx_handler import DocxHandler
+from app.core.state import StaticParagraph, TemplateParagraph
+from app.infrastructure.docx_handler import DocxHandler, ParagraphInfo
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -19,21 +19,20 @@ class TemplateParser:
         self.block_pattern = re.compile(r'\{\{(.*?)\}\}')
         self.docx_handler = DocxHandler()
 
-    def parse(self, template_path: str) -> List[ContentBlock]:
-        """解析模板文件，提取所有内容块.
+    def parse(self, template_path: str) -> List[TemplateParagraph]:
+        """解析模板文件，提取所有模板段落.
 
-        支持两种模板格式：
-        1. 简单模板: {{"prompt":"..."}}
-        2. 列表模板: {{"prompt":"...", "list":"true"}} + 子段落
-
-        type 从段落样式自动判断（Heading开头为headline，其他为text）。
-        子段落通过段落层级关系识别。
+        解析逻辑：
+        1. 提取所有段落信息
+        2. 识别模板段落（包含 {{...}} 的段落）
+        3. 顺序向下寻找低层级标题模板，找到的段落放到其上一级段落的 children 中
+        4. 子段落可以是静态的或模板的
 
         Args:
             template_path: 模板文件路径
 
         Returns:
-            内容块列表
+            模板段落列表
         """
         logger.info(
             "parse_template_start",
@@ -44,54 +43,18 @@ class TemplateParser:
             # 提取所有段落信息
             paragraphs_info = self.docx_handler.extract_paragraphs_info(template_path)
 
-            # 提取带位置信息的内容块
-            blocks_with_info = self._extract_blocks_with_hierarchy(paragraphs_info)
-
-            content_blocks = []
-            for block_info in blocks_with_info:
-                para_idx = block_info["index"]
-                original_text = block_info["text"]
-                block_content = block_info["template_content"]
-                is_heading = block_info["is_heading"]
-                child_paragraphs = block_info.get("child_paragraphs", [])
-
-                # 验证是否为有效的模板格式
-                validation_result = self._validate_template_block(
-                    block_content, is_heading
-                )
-                if not validation_result["valid"]:
-                    logger.info(
-                        "skip_static_paragraph",
-                        paragraph_index=para_idx,
-                        reason=validation_result["reason"],
-                    )
-                    continue
-
-                try:
-                    block = self._parse_block_content(
-                        block_id=str(para_idx),
-                        block_content=block_content,
-                        original_text=original_text,
-                        is_heading=is_heading,
-                        child_paragraphs=child_paragraphs,
-                    )
-                    content_blocks.append(block)
-                except Exception as e:
-                    logger.warning(
-                        "parse_block_failed",
-                        paragraph_index=para_idx,
-                        block_content=block_content,
-                        error=str(e),
-                    )
-                    continue
+            # 解析模板段落
+            paragraphs, _ = self._parse_paragraphs(
+                paragraphs_info, start_index=0, parent_level=0
+            )
 
             logger.info(
                 "parse_template_success",
                 template_path=template_path,
-                block_count=len(content_blocks),
+                paragraph_count=len(paragraphs),
             )
 
-            return content_blocks
+            return paragraphs
 
         except Exception as e:
             logger.error(
@@ -101,107 +64,246 @@ class TemplateParser:
             )
             raise
 
-    def _extract_blocks_with_hierarchy(
+    def _parse_paragraphs(
         self,
-        paragraphs_info: List,
-    ) -> List[Dict]:
-        """提取内容块及其层级关系.
+        paragraphs_info: List[ParagraphInfo],
+        start_index: int,
+        parent_level: int,
+    ) -> tuple[List[TemplateParagraph], int]:
+        """解析模板段落.
 
-        识别每个模板段落及其子段落（属于该列表模板的段落）。
+        算法步骤：
+        1. 判断当前段落是否为模板段落，不是则跳过
+        2. 若是模板段落且为正文则直接解析
+        3. 若是模板段落且为标题，则向下遍历直到找到标题等级小于或等于当前段落的段落，
+           将遍历出来的段落按照标题等级构建层级结构
 
         Args:
-            paragraphs_info: 段落信息列表
+            paragraphs_info: 所有段落信息
+            start_index: 开始解析的索引
+            parent_level: 父段落级别（用于判断子段落边界）
 
         Returns:
-            内容块信息列表，包含子段落信息
+            (解析出的模板段落列表, 下一个待解析的索引)
         """
-        blocks = []
+        paragraphs: List[TemplateParagraph] = []
+        i = start_index
 
-        i = 0
         while i < len(paragraphs_info):
             para_info = paragraphs_info[i]
 
+            # 如果遇到同层级或更高层级的标题，停止（仅限于非顶级调用）
+            if para_info.is_heading and parent_level > 0:
+                current_level = self._get_heading_level(para_info.style_name)
+                if current_level <= parent_level:
+                    break
+
+            # 步骤1: 判断当前段落是否为模板段落，不是则跳过
             if not para_info.has_template:
                 i += 1
                 continue
 
-            # 这是一个模板段落
-            block_info = {
-                "index": para_info.index,
-                "text": para_info.text,
-                "template_content": para_info.template_content,
-                "is_heading": para_info.is_heading,
-                "child_paragraphs": [],
-            }
+            # 解析模板段落
+            paragraph = self._parse_template_paragraph(para_info)
+            current_level = self._get_heading_level(para_info.style_name)
 
-            # 检查是否是列表模板（Heading + 可能有子段落）
-            if para_info.is_heading:
-                # 尝试解析模板内容，检查 list 属性
-                try:
-                    data = json.loads(para_info.template_content)
-                    is_list = str(data.get("list", "false")).lower() == "true"
+            # 步骤2: 若是模板段落且为正文则直接解析（作为顶层段落）
+            if not para_info.is_heading:
+                paragraphs.append(paragraph)
+                i += 1
+                continue
 
-                    if is_list:
-                        # 收集子段落
-                        child_paragraphs = self._collect_child_paragraphs(
-                            paragraphs_info, i
-                        )
-                        block_info["child_paragraphs"] = child_paragraphs
-                except json.JSONDecodeError:
-                    pass
+            # 步骤3: 若是模板段落且为标题，收集其子段落
+            # 向下遍历直到找到标题等级小于或等于当前段落的段落
+            children, next_index = self._collect_children_for_heading(
+                paragraphs_info, i + 1, current_level
+            )
+            paragraph.children = children
+            paragraphs.append(paragraph)
+            i = next_index
 
-            blocks.append(block_info)
-            i += 1
+        return paragraphs, i
 
-        return blocks
-
-    def _collect_child_paragraphs(
+    def _collect_children_for_heading(
         self,
-        paragraphs_info: List,
-        list_template_index: int,
-    ) -> List[Dict]:
-        """收集列表模板下的子段落.
+        paragraphs_info: List[ParagraphInfo],
+        start_index: int,
+        parent_level: int,
+    ) -> tuple[List[Union[TemplateParagraph, StaticParagraph]], int]:
+        """为标题段落收集子段落.
 
-        子段落是指位于列表模板之后、下一个同层级或更高层级模板之前的段落。
+        使用栈实现层级结构构建：
+        1. 先把开始段落压栈
+        2. 向下遍历
+        3. 当段落标题等级高于栈顶段落时（数值更小，级别更高）：
+           - 将该段落添加到栈顶段落的子段落中
+           - 将当前段落压栈
+        4. 当段落标题低于或等于栈顶段落时（数值更大或相等，级别更低或相同）：
+           - 把栈顶段落弹出栈
+           - 再次比较栈顶段落与当前段落
+           - 直到遇到标题等级高于其的栈顶段落作为其的子段落
+           - 把当前段落压栈
+        5. 若段落为正文段落：
+           - 直接作为栈顶段落的子段落
+           - 不把当前段落压栈
 
         Args:
-            paragraphs_info: 段落信息列表
-            list_template_index: 列表模板在列表中的索引
+            paragraphs_info: 所有段落信息
+            start_index: 开始收集的索引
+            parent_level: 父段落标题级别
 
         Returns:
-            子段落信息列表
+            (子段落列表, 下一个待解析的索引)
         """
-        child_paragraphs = []
-        list_para_info = paragraphs_info[list_template_index]
+        children: List[Union[TemplateParagraph, StaticParagraph]] = []
+        i = start_index
 
-        # 获取列表模板的标题级别
-        list_level = self._get_heading_level(list_para_info.style_name)
+        # 使用栈来跟踪当前路径上的段落
+        # 每个元素: (level, paragraph)
+        # 注意：level 越小表示标题等级越高（Heading 1 < Heading 2 < Heading 3...）
+        level_stack: List[tuple[int, Union[TemplateParagraph, StaticParagraph]]] = []
 
-        # 检查后续段落
-        for j in range(list_template_index + 1, len(paragraphs_info)):
-            para_info = paragraphs_info[j]
+        while i < len(paragraphs_info):
+            para_info = paragraphs_info[i]
+            current_level = self._get_heading_level(para_info.style_name)
 
-            # 如果遇到同层级或更高层级的标题，停止
-            if para_info.is_heading:
-                current_level = self._get_heading_level(para_info.style_name)
-                if current_level <= list_level:
-                    break
-
-            # 如果遇到另一个列表模板（Heading + 有模板），停止
-            if para_info.is_heading and para_info.has_template:
+            # 如果遇到标题等级 <= 父段落等级的标题，停止
+            # parent_level 是父段落的等级，current_level <= parent_level 表示当前是同级或更高层级的标题
+            if para_info.is_heading and current_level <= parent_level:
                 break
 
-            # 这是子段落
-            child_info = {
-                "index": para_info.index,
-                "text": para_info.text,
-                "has_template": para_info.has_template,
-                "template_content": para_info.template_content,
-                "is_heading": para_info.is_heading,
-            }
-            child_paragraphs.append(child_info)
+            # 处理非模板段落（静态段落）
+            if not para_info.has_template:
+                static_para = StaticParagraph(
+                    id=str(para_info.index),
+                    content=para_info.text,
+                    style_name=para_info.style_name,
+                    is_heading=para_info.is_heading,
+                )
 
-        return child_paragraphs
+                # 如果是正文段落（非标题），直接作为栈顶段落的子段落，不压栈
+                if not para_info.is_heading:
+                    if level_stack:
+                        # 找到栈顶段落作为父段落
+                        _, parent = level_stack[-1]
+                        parent.children.append(static_para)
+                    else:
+                        # 栈为空，直接添加到 children
+                        children.append(static_para)
+                    i += 1
+                    continue
+
+                # 是标题静态段落，需要按层级处理
+                # 步骤4: 当段落标题等级低于或等于栈顶时（数值更小或相等，即级别更高或相同），弹出栈顶
+                while level_stack and current_level <= level_stack[-1][0]:
+                    level_stack.pop()
+
+                # 步骤3: 将段落添加到栈顶段落的子段落中（如果栈不为空）
+                if level_stack:
+                    _, parent = level_stack[-1]
+                    parent.children.append(static_para)
+                else:
+                    children.append(static_para)
+
+                # 将当前段落压栈
+                level_stack.append((current_level, static_para))
+                i += 1
+                continue
+
+            # 解析模板段落
+            paragraph = self._parse_template_paragraph(para_info)
+
+            # 如果是正文模板段落，直接作为栈顶段落的子段落，不压栈
+            if not para_info.is_heading:
+                if level_stack:
+                    # 找到栈顶段落作为父段落
+                    _, parent = level_stack[-1]
+                    parent.children.append(paragraph)
+                else:
+                    children.append(paragraph)
+                i += 1
+                continue
+
+            # 是标题模板段落
+            # 步骤4: 当段落标题等级低于或等于栈顶时（数值更小或相等，即级别更高或相同），弹出栈顶
+            while level_stack and current_level <= level_stack[-1][0]:
+                level_stack.pop()
+
+            # 步骤3: 将段落添加到栈顶段落的子段落中（如果栈不为空）
+            if level_stack:
+                _, parent = level_stack[-1]
+                parent.children.append(paragraph)
+            else:
+                children.append(paragraph)
+
+            # 递归收集该标题的子段落
+            grandchildren, next_index = self._collect_children_for_heading(
+                paragraphs_info, i + 1, current_level
+            )
+            paragraph.children = grandchildren
+
+            # 将当前段落压栈
+            level_stack.append((current_level, paragraph))
+            i = next_index
+
+        return children, i
+
+    def _parse_template_paragraph(self, para_info: ParagraphInfo) -> TemplateParagraph:
+        """解析单个模板段落.
+
+        Args:
+            para_info: 段落信息
+
+        Returns:
+            解析后的模板段落
+        """
+        # 解析模板内容
+        template_content = para_info.template_content or ""
+        content = template_content.strip()
+
+        # 去掉可能存在的双花括号包裹
+        # DocxHandler 已经将 {{...}} 转换为 {...}，所以 content 应该是 {...} 格式
+        if content.startswith("{{") and content.endswith("}}"):
+            content = content[2:-2].strip()
+            # 重新添加单花括号以形成合法 JSON
+            content = "{" + content + "}"
+
+        # 规范化引号：将中文引号替换为 ASCII 引号
+        content = self._normalize_quotes(content)
+
+        # 解析JSON
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid template JSON at paragraph {para_info.index}: {content}") from e
+
+        if not isinstance(data, dict):
+            raise ValueError(f"Template content must be a JSON object at paragraph {para_info.index}")
+
+        if "prompt" not in data:
+            raise ValueError(f"Template must have 'prompt' field at paragraph {para_info.index}")
+
+        # 解析属性
+        is_list = str(data.get("list", "false")).lower() == "true"
+        min_length = self._parse_int_field(data.get("min_length"))
+        max_length = self._parse_int_field(data.get("max_length"))
+        img = data.get("img")  # 图片获取提示词
+        example = data.get("example")  # 内容生成参考示例
+
+        return TemplateParagraph(
+            id=str(para_info.index),
+            is_template=True,
+            text=para_info.text,
+            style_name=para_info.style_name,
+            is_heading=para_info.is_heading,
+            prompt=data["prompt"],
+            is_list=is_list,
+            min_length=min_length,
+            max_length=max_length,
+            img=img,
+            example=example,
+            children=[],  # 子段落将在后续步骤中填充
+        )
 
     def _get_heading_level(self, style_name: str) -> int:
         """获取标题级别."""
@@ -214,203 +316,6 @@ class TemplateParser:
         except ValueError:
             return 99
 
-    def _parse_block_content(
-        self,
-        block_id: str,
-        block_content: str,
-        original_text: str,
-        is_heading: bool,
-        child_paragraphs: List[Dict],
-    ) -> ContentBlock:
-        """解析单个内容块.
-
-        Args:
-            block_id: 块ID
-            block_content: 块内容（去掉外层大括号）
-            original_text: 原始完整文本
-            is_heading: 是否为标题段落
-            child_paragraphs: 子段落列表
-
-        Returns:
-            解析后的内容块
-        """
-        data = json.loads(block_content)
-
-        # 从段落样式判断类型
-        block_type = ContentBlockType.HEADLINE if is_heading else ContentBlockType.TEXT
-
-        # 解析列表选项
-        is_list = str(data.get("list", "false")).lower() == "true"
-
-        # 解析长度限制
-        min_length = self._parse_int_field(data.get("min_length"))
-        max_length = self._parse_int_field(data.get("max_length"))
-
-        # 解析子模板（当 is_list=true 时）
-        list_children = None
-        if is_list and child_paragraphs:
-            list_children = self._parse_list_children(
-                child_paragraphs, block_id
-            )
-
-        return ContentBlock(
-            id=block_id,
-            type=block_type,
-            prompt=data["prompt"],
-            is_list=is_list,
-            min_length=min_length,
-            max_length=max_length,
-            original_text=original_text,
-            list_children=list_children,
-        )
-
-    def _parse_list_children(
-        self,
-        child_paragraphs: List[Dict],
-        parent_id: str,
-    ) -> Optional[List[ListTemplateChild]]:
-        """解析列表模板的子段落.
-
-        每个子段落可以是：
-        - 纯静态：没有模板标记
-        - 动态：有模板标记，需要生成内容
-
-        Args:
-            child_paragraphs: 子段落信息列表
-            parent_id: 父列表ID
-
-        Returns:
-            子模板列表
-        """
-        list_children = []
-
-        for i, child_info in enumerate(child_paragraphs):
-            child_id = f"{parent_id}_child_{i}"
-
-            # 提取静态前缀（模板前的文本）
-            text = child_info["text"]
-            static_prefix = self._extract_static_prefix(text)
-
-            # 检查是否有模板
-            template_block = None
-            if child_info["has_template"] and child_info["template_content"]:
-                template_block = self._parse_child_template_block(
-                    child_info["template_content"],
-                    child_id,
-                    child_info["is_heading"],
-                    parent_id,
-                    i,
-                )
-
-            list_children.append(ListTemplateChild(
-                id=child_id,
-                static_prefix=static_prefix,
-                template_block=template_block,
-            ))
-
-        return list_children if list_children else None
-
-    def _extract_static_prefix(self, text: str) -> str:
-        """提取静态前缀.
-
-        从段落文本中提取模板前的静态文本（如 "1.1 标识"）。
-
-        Args:
-            text: 段落文本
-
-        Returns:
-            静态前缀
-        """
-        # 查找模板标记的位置
-        match = self.block_pattern.search(text)
-        if match:
-            # 提取模板前的文本
-            prefix = text[:match.start()].strip()
-            return prefix
-        return text.strip()
-
-    def _parse_child_template_block(
-        self,
-        template_content: str,
-        block_id: str,
-        is_heading: bool,
-        parent_list_id: str,
-        list_index: int,
-    ) -> Optional[ContentBlock]:
-        """解析子段落中的模板.
-
-        Args:
-            template_content: 模板内容
-            block_id: 块ID
-            is_heading: 是否为标题
-            parent_list_id: 所属列表ID
-            list_index: 在列表中的索引
-
-        Returns:
-            内容块或None
-        """
-        try:
-            data = json.loads(template_content)
-        except json.JSONDecodeError:
-            return None
-
-        if "prompt" not in data:
-            return None
-
-        # 从段落样式判断类型
-        block_type = ContentBlockType.HEADLINE if is_heading else ContentBlockType.TEXT
-
-        # 子段落不支持 list 属性
-        is_list = False
-
-        # 解析长度限制
-        min_length = self._parse_int_field(data.get("min_length"))
-        max_length = self._parse_int_field(data.get("max_length"))
-
-        return ContentBlock(
-            id=block_id,
-            type=block_type,
-            prompt=data["prompt"],
-            is_list=is_list,
-            min_length=min_length,
-            max_length=max_length,
-            original_text=template_content,
-            parent_list_id=parent_list_id,
-            list_index=list_index,
-        )
-
-    def _validate_template_block(
-        self,
-        block_content: str,
-        is_heading: bool,
-    ) -> Dict[str, any]:
-        """验证内容块是否为有效的模板格式."""
-        try:
-            data = json.loads(block_content)
-        except json.JSONDecodeError:
-            return {"valid": False, "reason": "not_valid_json"}
-
-        if not isinstance(data, dict):
-            return {"valid": False, "reason": "not_a_dict"}
-
-        if "prompt" not in data:
-            return {"valid": False, "reason": "missing_prompt_field"}
-
-        prompt = data.get("prompt", "")
-        if not isinstance(prompt, str) or not prompt.strip():
-            return {"valid": False, "reason": "empty_prompt"}
-
-        # 验证 list 约束
-        is_list = str(data.get("list", "false")).lower() == "true"
-        if is_list and not is_heading:
-            logger.warning(
-                "list_only_allowed_for_heading_paragraph",
-                is_heading=is_heading,
-            )
-            return {"valid": False, "reason": "list_only_allowed_for_heading_paragraph"}
-
-        return {"valid": True, "reason": ""}
-
     def _parse_int_field(self, value: Optional[str]) -> Optional[int]:
         """解析整数字段."""
         if value is None:
@@ -420,29 +325,45 @@ class TemplateParser:
         except (ValueError, TypeError):
             return None
 
+    def _normalize_quotes(self, content: str) -> str:
+        """规范化引号：将中文引号替换为 ASCII 引号.
+
+        Args:
+            content: 原始内容
+
+        Returns:
+            规范化后的内容
+        """
+        # 中文双引号替换为 ASCII 双引号
+        content = content.replace('“', '"').replace('”', '"')
+        # 中文单引号替换为 ASCII 单引号
+        content = content.replace("‘", "'").replace("’", "'")
+        # 中文逗号替换为 ASCII 逗号
+        content = content.replace('，', ',')
+        # 中文冒号替换为 ASCII 冒号
+        content = content.replace('：', ':')
+        return content
+
     def preview_blocks(self, template_path: str) -> List[Dict]:
         """预览模板中的内容块."""
-        blocks = self.parse(template_path)
-        return [block.to_dict() for block in blocks]
+        paragraphs = self.parse(template_path)
+        return [p.to_dict() for p in paragraphs]
 
-    def validate_template(self, template_path: str) -> Tuple[bool, Optional[str]]:
+    def validate_template(self, template_path: str) -> tuple[bool, Optional[str]]:
         """验证模板文件."""
         is_valid, error = self.docx_handler.validate_template(template_path)
         if not is_valid:
             return False, error
 
         try:
-            blocks = self.parse(template_path)
+            paragraphs = self.parse(template_path)
 
-            if not blocks:
-                return True, "Warning: No content blocks found in template"
+            if not paragraphs:
+                return True, "Warning: No template paragraphs found in template"
 
-            for block in blocks:
-                if not block.prompt.strip():
-                    return False, f"Empty prompt in block {block.id}"
-
-                if block.is_list and block.type != ContentBlockType.HEADLINE:
-                    return False, f"Block {block.id}: list=true is only allowed for headline type"
+            for para in paragraphs:
+                if not para.prompt.strip():
+                    return False, f"Empty prompt in paragraph {para.id}"
 
             return True, None
 
@@ -467,14 +388,23 @@ def create_example_template(output_path: str) -> str:
     # 2. 功能模块 - 列表模板 + 子段落
     doc.add_heading("2. 功能模块", level=2)
     doc.add_paragraph('{{"prompt":"系统的主要功能模块", "list":"true"}}')
-    # 子段落：1.1 标识（静态）+ 模板（动态）
+    # 子段落：2.1 标识（静态）+ 模板（动态）
     doc.add_paragraph('    2.1 标识 {{"prompt":"随机10位英文字母序列"}}', style='List Paragraph')
-    # 子段落：1.2 概要（静态）+ 模板（动态）
+    # 子段落：2.2 概要（静态）+ 模板（动态）
     doc.add_paragraph('    2.2 概要 {{"prompt":"功能模块的功能概要"}}', style='List Paragraph')
 
     # 3. 核心流程 - 普通正文模板
     doc.add_heading("3. 核心流程", level=2)
     doc.add_paragraph('{{"prompt":"系统的核心业务处理流程说明"}}')
+
+    # 4. 架构设计 - 带参考示例的模板
+    doc.add_heading("4. 架构设计", level=2)
+    doc.add_paragraph(
+        '{{'
+        '"prompt":"系统的技术架构设计，包括分层架构和组件关系", '
+        '"example":"本系统采用经典的三层架构设计。表现层负责用户交互，使用Vue.js框架实现响应式界面；业务逻辑层处理核心业务规则，采用Spring Boot构建RESTful API；数据访问层负责持久化操作，使用MyBatis进行ORM映射。各层之间通过定义良好的接口进行通信，降低了耦合度，提高了系统的可维护性。"'
+        '}}'
+    )
 
     # 保存
     import os
