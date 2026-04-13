@@ -720,6 +720,87 @@ class LLMService:
 
         return max(5, min(batch_size, 50))  # 限制在 5-50 之间
 
+    def _build_enhanced_summary_prompt(
+        self,
+        items: List[Any],
+    ) -> str:
+        """构建增强型摘要Prompt - 区分已处理summary和批次内源码.
+
+        Args:
+            items: MethodAnalysisItem 列表
+
+        Returns:
+            构建的提示词
+        """
+        parts = [
+            "你是一个代码分析专家。请为以下方法生成中文摘要。",
+            "",
+            "每个方法的输入包含：",
+            "- 方法自身的代码和文档",
+            "- 【已处理方法】的摘要（语义提炼，高价值）",
+            "- 【批次内待处理方法】的源码（详细实现）",
+            "",
+            "请综合这些信息，生成准确、简洁的1-2句中文摘要，描述：",
+            "- 这段代码的功能",
+            "- 主要用途或目的",
+            "",
+            "返回格式：",
+            "```json",
+            '{"summaries": [{"id": "method_id", "summary": "摘要内容"}, ...]}',
+            "```",
+            "",
+            f"共 {len(items)} 个方法：",
+            "=" * 50,
+            "",
+        ]
+
+        for i, item in enumerate(items, 1):
+            parts.append(f"[{i}] 方法: {item.name}")
+            parts.append(f"ID: {item.id}")
+            parts.append(f"语言: {item.language}")
+            parts.append("")
+
+            # 1. 已处理依赖 - 使用summary（最精炼）
+            if item.external_callees:
+                parts.append("  【已处理依赖 - 摘要参考】:")
+                for callee in item.external_callees[:3]:  # 限制数量
+                    summary = callee.get("summary", "")[:100]
+                    parts.append(f"    - {callee.get('name', 'unknown')}: {summary}...")
+                parts.append("")
+
+            # 2. 批次内依赖 - 使用源码（详细）
+            if item.internal_callees:
+                parts.append("  【批次内依赖 - 源码参考】:")
+                for callee in item.internal_callees:
+                    parts.append(f"    - {callee.get('name', 'unknown')}:")
+                    code = callee.get("code", "")[:800]
+                    parts.append(f"      ```{item.language}")
+                    for line in code.split("\n"):
+                        parts.append(f"      {line}")
+                    parts.append("      ```")
+                parts.append("")
+
+            # 3. 提示有未包含的依赖
+            if item.pending_callees:
+                parts.append(f"  （注：还有 {len(item.pending_callees)} 个依赖方法未处理）")
+                parts.append("")
+
+            # 4. 自身代码
+            if item.docstring:
+                parts.append(f"  文档注释: {item.docstring}")
+            parts.append("  代码:")
+            parts.append(f"  ```{item.language}")
+            code_lines = item.code.split("\n")
+            for line in code_lines:
+                parts.append(f"  {line}")
+            parts.append("  ```")
+            parts.append("")
+            parts.append("-" * 40)
+            parts.append("")
+
+        parts.append("请生成JSON格式的摘要结果：")
+        return "\n".join(parts)
+
     def _build_batch_summary_prompt(
         self,
         items: List[Dict[str, Any]],
@@ -919,6 +1000,66 @@ class LLMService:
                     logger.warning(f"Failed to generate summary for {item.get('id', '')}: {inner_e}")
                     results.append("")
             return results
+
+    async def generate_method_summaries_enhanced(
+        self,
+        items: List[Any],
+    ) -> List[str]:
+        """使用增强依赖上下文生成方法摘要.
+
+        支持批次内依赖消解：已处理方法使用summary，批次内待处理方法使用源码。
+
+        Args:
+            items: MethodAnalysisItem 列表
+
+        Returns:
+            生成的摘要列表，与 items 一一对应
+        """
+        if not items:
+            return []
+
+        expected_ids = [item.id for item in items]
+
+        try:
+            prompt = self._build_enhanced_summary_prompt(items)
+
+            response = await self.complete(
+                prompt=prompt,
+                system_prompt=(
+                    "You are a code analysis expert. Generate concise, "
+                    "informative summaries of code in Chinese. "
+                    "Consider both external dependencies (summaries) and "
+                    "internal dependencies (source code) for accurate context. "
+                    "Return results in valid JSON format."
+                ),
+                max_tokens=4096,
+                temperature=0.3,
+            )
+
+            # 解析响应
+            summaries_map = self._parse_batch_response(response, expected_ids)
+
+            # 按输入顺序返回摘要
+            return [summaries_map.get(node_id, "") for node_id in expected_ids]
+
+        except Exception as e:
+            logger.error(f"Failed to generate enhanced summaries: {e}")
+            # 降级：使用普通批次生成
+            logger.info("Falling back to standard batch generation")
+            fallback_items = [
+                {
+                    "id": item.id,
+                    "code": item.code,
+                    "docstring": item.docstring,
+                    "name": item.name,
+                    "language": item.language,
+                    "callee_summaries": [
+                        c["summary"] for c in item.external_callees
+                    ] if item.external_callees else None,
+                }
+                for item in items
+            ]
+            return await self._generate_batch(fallback_items, "method")
 
     def _build_summary_prompt(
         self,

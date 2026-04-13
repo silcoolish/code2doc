@@ -9,7 +9,8 @@
 """
 
 import logging
-from typing import Dict, List, Optional, Set, Tuple
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Set, Tuple
 from collections import defaultdict, deque
 
 from app.core.pipeline import PipelineContext, PipelineStageHandler
@@ -18,6 +19,20 @@ from app.domain.llm.client import get_llm_service
 from app.infrastructure.db import GraphDatabaseClient, get_graph_db_client
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class MethodAnalysisItem:
+    """方法分析项 - 包含多层次依赖信息."""
+    id: str
+    name: str
+    code: str
+    docstring: str
+    language: str
+    # 依赖信息分层
+    external_callees: List[Dict] = field(default_factory=list)  # 已有summary
+    internal_callees: List[Dict] = field(default_factory=list)  # 批次内待处理
+    pending_callees: List[str] = field(default_factory=list)    # 未处理方法ID
 
 
 class SemanticAnalysisStage(PipelineStageHandler):
@@ -104,8 +119,11 @@ class SemanticAnalysisStage(PipelineStageHandler):
     async def _generate_method_summaries(self, repo_id: str, context: PipelineContext) -> int:
         """生成所有 Method 节点的 summary.
 
-        使用拓扑排序处理 CALL 依赖关系，确保先生成被调用方法的 summary。
-        使用批量生成优化，减少 LLM 调用次数。
+        使用智能批次构建策略，聚合有依赖关系的方法，减少 LLM 调用次数。
+        策略：
+        1. 已处理方法使用 summary 作为上下文
+        2. 批次内待处理方法使用源码作为上下文
+        3. 未处理方法暂不包含
 
         Args:
             repo_id: 仓库ID
@@ -124,83 +142,223 @@ class SemanticAnalysisStage(PipelineStageHandler):
         # 构建依赖图
         method_graph = self._build_call_graph(methods)
 
-        # 拓扑排序，确保依赖先处理
-        sorted_methods = self._topological_sort(method_graph)
-
-        # 已生成的 summary 缓存
+        # 分离已处理和待处理方法
         summary_cache: Dict[str, str] = {}
+        pending: Dict[str, Dict] = {}
 
-        # 按层分批处理：入度为0的节点（无依赖）可以一批处理
-        # 每处理完一批，更新 summary_cache，然后处理下一批
+        for method_id, data in method_graph.items():
+            if data["data"].get("summary"):
+                summary_cache[method_id] = data["data"]["summary"]
+            else:
+                pending[method_id] = data
+
+        # 获取上下文限制
+        max_tokens = self._llm_service.get_context_window_or_default(default=100000)
+
         processed_count = 0
-        batch_size = 20  # 每批处理数量
+        iteration = 0
 
-        i = 0
-        while i < len(sorted_methods):
-            batch_ids = []
-            batch_methods = []
+        # 循环处理直到所有待处理方法完成
+        while pending:
+            iteration += 1
 
-            # 收集一批可以处理的方法（已满足依赖或已有 summary）
-            while i < len(sorted_methods) and len(batch_ids) < batch_size:
-                method_id = sorted_methods[i]
-                method = method_graph[method_id]["data"]
+            # 构建智能批次
+            batch = self._build_smart_batch(
+                pending, method_graph, summary_cache, max_tokens
+            )
 
-                # 跳过已有 summary 的方法
-                if method.get("summary"):
-                    summary_cache[method_id] = method["summary"]
-                    i += 1
-                    continue
+            if not batch:
+                logger.warning(f"Iteration {iteration}: 无法构建批次，可能存在超大方法")
+                # 降级处理：尝试单个方法，使用截断代码
+                for mid in list(pending.keys())[:1]:
+                    method_data = pending[mid]["data"]
+                    code = method_data.get("code", "")
+                    # 如果代码太长，大幅截断
+                    if len(code) > 8000:
+                        method_data["code"] = code[:6000] + "\n# ... (代码已截断)"
+                batch = list(pending.keys())[:1]
 
-                # 检查依赖是否已满足
-                callee_ids = method_graph[method_id]["callees"]
-                callee_summaries = []
-                all_deps_ready = True
+            # 准备批次数据
+            items = self._prepare_batch_items(
+                batch, pending, method_graph, summary_cache
+            )
 
-                for callee_id in callee_ids:
-                    if callee_id in summary_cache:
-                        callee_summaries.append(summary_cache[callee_id])
-                    elif callee_id in method_graph and not method_graph[callee_id]["data"].get("summary"):
-                        # 依赖还未处理且没有缓存的 summary
-                        all_deps_ready = False
-                        break
+            # 生成摘要
+            context.stage_msg = f"正在生成 Method 摘要: {processed_count + len(batch)}/{total_methods}"
 
-                if all_deps_ready:
-                    batch_ids.append(method_id)
-                    batch_methods.append({
-                        "id": method_id,
-                        "code": method.get("code", ""),
-                        "docstring": method.get("docstring", ""),
-                        "name": method.get("name", ""),
-                        "language": method.get("language", "python"),
-                        "callee_summaries": callee_summaries,
-                    })
-                    i += 1
-                else:
-                    # 依赖未满足，跳过这个方法（将在下一轮处理）
-                    break
+            summaries = await self._llm_service.generate_method_summaries_enhanced(
+                items=items,
+            )
 
-            if batch_methods:
-                # 批量生成摘要
-                context.stage_msg = f"正在生成 Method 摘要: {i}/{total_methods}"
+            # 更新缓存和数据库
+            updates = []
+            for method_id, summary in zip(batch, summaries):
+                if summary:
+                    summary_cache[method_id] = summary
+                    pending.pop(method_id, None)
+                    updates.append((method_id, summary))
+                    processed_count += 1
 
-                summaries = await self._llm_service.generate_summaries_batch(
-                    items=batch_methods,
-                    node_type="method",
-                )
+            if updates:
+                await self._update_node_summaries_batch("Method", updates)
 
-                # 批量更新
-                updates = []
-                for method_id, summary in zip(batch_ids, summaries):
-                    if summary:
-                        updates.append((method_id, summary))
-                        summary_cache[method_id] = summary
-                        processed_count += 1
-
-                if updates:
-                    await self._update_node_summaries_batch("Method", updates)
+            logger.info(
+                f"Iteration {iteration}: processed {len(batch)} methods, "
+                f"remaining {len(pending)}"
+            )
 
         context.stage_msg = f"已完成 {processed_count} 个 Method 摘要"
         return processed_count
+
+    def _build_smart_batch(
+        self,
+        pending: Dict[str, Dict],
+        graph: Dict[str, Dict],
+        summary_cache: Dict[str, str],
+        max_tokens: int,
+    ) -> List[str]:
+        """构建智能批次 - 聚合跨依赖边界的方法.
+
+        策略：优先选择能覆盖更多批次内依赖的方法，实现依赖消解。
+
+        Args:
+            pending: 待处理方法 {method_id: data}
+            graph: 完整调用图
+            summary_cache: 已生成的 summary 缓存
+            max_tokens: 最大上下文 token 数
+
+        Returns:
+            批次中的方法 ID 列表
+        """
+        batch: List[str] = []
+        batch_content: List[str] = []  # 用于估算token的内容
+
+        # 计算每个候选方法的聚合价值分数
+        candidate_scores: List[Tuple[str, float, List[str]]] = []
+
+        for mid, data in pending.items():
+            callees = graph[mid]["callees"]
+
+            # 统计各类依赖
+            internal_deps = [
+                c for c in callees
+                if c in pending and c != mid  # 排除自调用
+            ]
+
+            # 聚合价值 = 内部依赖数量 + 潜在覆盖率
+            score = len(internal_deps)
+            if score > 0:
+                # 额外加分：依赖方法也在待处理列表中
+                score += 0.5
+
+            candidate_scores.append((mid, score, internal_deps))
+
+        # 按分数降序排序（高价值优先）
+        candidate_scores.sort(key=lambda x: x[1], reverse=True)
+
+        # 贪心选择 - 优先聚合高价值且能容纳的方法
+        for mid, score, internal_deps in candidate_scores:
+            if mid in batch:
+                continue
+
+            # 计算需要额外添加的内容
+            additions_tokens = 0
+            additions: List[str] = []
+
+            # 必须先加入批次内的被调用方法（依赖关系）
+            for dep_id in internal_deps:
+                if dep_id not in batch and dep_id in pending:
+                    dep_code = pending[dep_id]["data"].get("code", "")[:1500]
+                    additions.append(dep_code)
+                    additions_tokens += len(dep_code) // 4  # 粗略估算
+
+            # 当前方法自身的token
+            current_code = pending[mid]["data"].get("code", "")[:3000]
+            current_tokens = len(current_code) // 4
+
+            # 计算加入后的总token
+            current_total = sum(len(c) // 4 for c in batch_content)
+            total_needed = current_total + additions_tokens + current_tokens
+
+            # 检查是否超出限制（留10%余量）
+            if total_needed <= max_tokens * 0.9:
+                # 将依赖方法加入批次
+                for dep_id in internal_deps:
+                    if dep_id not in batch and dep_id in pending:
+                        batch.append(dep_id)
+                        dep_code = pending[dep_id]["data"].get("code", "")[:1500]
+                        batch_content.append(dep_code)
+
+                if mid not in batch:
+                    batch.append(mid)
+                    batch_content.append(current_code)
+
+        return batch
+
+    def _prepare_batch_items(
+        self,
+        batch: List[str],
+        pending: Dict[str, Dict],
+        graph: Dict[str, Dict],
+        summary_cache: Dict[str, str],
+    ) -> List[MethodAnalysisItem]:
+        """准备批次分析数据 - 区分已处理和待处理依赖.
+
+        Args:
+            batch: 批次中的方法 ID 列表
+            pending: 待处理方法
+            graph: 完整调用图
+            summary_cache: 已生成的 summary 缓存
+
+        Returns:
+            方法分析项列表
+        """
+        items: List[MethodAnalysisItem] = []
+
+        for mid in batch:
+            method_data = pending[mid]["data"]
+            all_callees = graph[mid]["callees"]
+
+            external_callees = []
+            internal_callees = []
+            pending_callees = []
+
+            for cid in all_callees:
+                if cid == mid:  # 跳过自调用
+                    continue
+
+                if cid in summary_cache:
+                    # 已有summary - 使用精炼后的语义
+                    callee_name = graph.get(cid, {}).get("data", {}).get("name", "unknown")
+                    external_callees.append({
+                        "id": cid,
+                        "name": callee_name,
+                        "summary": summary_cache[cid],
+                    })
+                elif cid in batch:
+                    # 批次内待处理 - 使用源码
+                    callee_data = pending.get(cid, {}).get("data", {})
+                    internal_callees.append({
+                        "id": cid,
+                        "name": callee_data.get("name", "unknown"),
+                        "code": callee_data.get("code", "")[:1500],
+                    })
+                else:
+                    # 未处理也不在批次中 - 记录ID提示
+                    pending_callees.append(cid)
+
+            items.append(MethodAnalysisItem(
+                id=mid,
+                name=method_data.get("name", ""),
+                code=method_data.get("code", "")[:3000],
+                docstring=method_data.get("docstring", ""),
+                language=method_data.get("language", "python"),
+                external_callees=external_callees,
+                internal_callees=internal_callees,
+                pending_callees=pending_callees,
+            ))
+
+        return items
 
     async def _get_methods_with_calls(self, repo_id: str) -> List[Dict]:
         """获取所有 Method 节点及其 CALL 关系.
