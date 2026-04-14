@@ -10,6 +10,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import get_settings
 from app.infrastructure.db import get_graph_db_client, get_vector_db_client
 from app.api.routes import initialization, progress, reset
+from app.api.test import (
+    module_detection as test_module_detection,
+    structure_graph_build as test_structure_graph_build,
+    semantic_analysis as test_semantic_analysis,
+)
 from app.core.pipeline import get_orchestrator
 from app.mcp import router as mcp_router
 from app.domain.models.pipeline import PipelineStage
@@ -155,6 +160,23 @@ def create_app() -> FastAPI:
 
     # MCP 路由 (HTTP 方式)
     app.include_router(mcp_router)
+
+    # 测试路由
+    app.include_router(
+        test_structure_graph_build.router,
+        prefix="/api/v1/test",
+        tags=["test"],
+    )
+    app.include_router(
+        test_semantic_analysis.router,
+        prefix="/api/v1/test",
+        tags=["test"],
+    )
+    app.include_router(
+        test_module_detection.router,
+        prefix="/api/v1/test",
+        tags=["test"],
+    )
 
     @app.get("/health")
     async def health_check():

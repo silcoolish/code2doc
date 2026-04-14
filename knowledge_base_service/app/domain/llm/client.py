@@ -707,8 +707,8 @@ class LLMService:
         total_chars = sum(len(item.get("code", "")) for item in items)
         estimated_input_tokens = total_chars / 4
 
-        # 预留输出空间（每个 summary 约 100 tokens）
-        estimated_output_per_item = 100
+        # 预留输出空间（每个 summary 约 150 tokens，与 _generate_batch 保持一致）
+        estimated_output_per_item = 150
 
         if estimated_input_tokens <= context_window * 0.7:  # 如果总量不大，一次处理
             return len(items)
@@ -961,6 +961,10 @@ class LLMService:
 
         expected_ids = [item.get("id", "") for item in items]
 
+        # 动态计算 max_tokens：每个摘要约150 tokens + 缓冲区
+        estimated_output_tokens = len(items) * 150 + 500
+        max_tokens = max(estimated_output_tokens, 2048)  # 至少2048
+
         try:
             prompt = self._build_batch_summary_prompt(items, node_type)
 
@@ -971,7 +975,7 @@ class LLMService:
                     "informative summaries of code in Chinese. "
                     "Return results in valid JSON format."
                 ),
-                max_tokens=4096,
+                max_tokens=max_tokens,
                 temperature=0.3,
             )
 
@@ -1020,6 +1024,10 @@ class LLMService:
 
         expected_ids = [item.id for item in items]
 
+        # 动态计算 max_tokens：每个摘要约150 tokens + 缓冲区
+        estimated_output_tokens = len(items) * 150 + 500
+        max_tokens = max(estimated_output_tokens, 2048)  # 至少2048
+
         try:
             prompt = self._build_enhanced_summary_prompt(items)
 
@@ -1032,7 +1040,7 @@ class LLMService:
                     "internal dependencies (source code) for accurate context. "
                     "Return results in valid JSON format."
                 ),
-                max_tokens=4096,
+                max_tokens=max_tokens,
                 temperature=0.3,
             )
 

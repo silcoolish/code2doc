@@ -225,7 +225,7 @@ class SemanticAnalysisStage(PipelineStageHandler):
             pending: 待处理方法 {method_id: data}
             graph: 完整调用图
             summary_cache: 已生成的 summary 缓存
-            max_tokens: 最大上下文 token 数
+            max_tokens: 最大上下文 token 数（已预留输出空间）
 
         Returns:
             批次中的方法 ID 列表
@@ -278,7 +278,10 @@ class SemanticAnalysisStage(PipelineStageHandler):
 
             # 计算加入后的总token
             current_total = sum(len(c) // 4 for c in batch_content)
-            total_needed = current_total + additions_tokens + current_tokens
+            # 为输出预留空间：每个方法约150 tokens（与client.py保持一致）
+            estimated_batch_size = len(batch) + len(internal_deps) + 1
+            output_tokens = estimated_batch_size * 150 + 500  # 基础缓冲
+            total_needed = current_total + additions_tokens + current_tokens + output_tokens
 
             # 检查是否超出限制（留10%余量）
             if total_needed <= max_tokens * 0.9:

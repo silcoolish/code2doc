@@ -482,7 +482,6 @@ class StructureGraphBuildStage(PipelineStageHandler):
     async def _create_repository(self, repository: Repository) -> None:
         """创建 Repository 节点."""
         properties = repository.to_dict()
-        properties["repo"] = repository.repo_id
         properties = self._filter_properties(properties)
 
         await self.graph_db.merge_node(
@@ -495,7 +494,6 @@ class StructureGraphBuildStage(PipelineStageHandler):
     async def _create_directory(self, directory: Directory, repo_id: str) -> None:
         """创建 Directory 节点和关系."""
         properties = directory.to_dict()
-        properties["repo"] = directory.repo_id
         properties = self._filter_properties(properties)
 
         await self.graph_db.merge_node(
@@ -536,7 +534,6 @@ class StructureGraphBuildStage(PipelineStageHandler):
             file_node.code = ""
 
         properties = file_node.to_dict()
-        properties["repo"] = file_node.repo_id
         properties = self._filter_properties(properties)
 
         await self.graph_db.merge_node(
@@ -597,7 +594,6 @@ class StructureGraphBuildStage(PipelineStageHandler):
         )
 
         properties = class_node.to_dict()
-        properties["repo"] = pipeline_repo_id
         properties = self._filter_properties(properties)
 
         await self.graph_db.merge_node(
@@ -658,7 +654,6 @@ class StructureGraphBuildStage(PipelineStageHandler):
         )
 
         properties = method_node.to_dict()
-        properties["repo"] = pipeline_repo_id
         properties = self._filter_properties(properties)
 
         await self.graph_db.merge_node(

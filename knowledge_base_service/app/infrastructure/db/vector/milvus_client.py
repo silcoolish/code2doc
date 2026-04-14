@@ -95,7 +95,7 @@ class MilvusClient(VectorDatabaseClient):
             FieldSchema(
                 name="node_id",
                 dtype=DataType.VARCHAR,
-                max_length=64,
+                max_length=256,
             ),
             FieldSchema(
                 name="repo",

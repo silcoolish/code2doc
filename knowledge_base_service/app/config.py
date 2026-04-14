@@ -112,6 +112,18 @@ class Settings(BaseSettings):
     flowchart_supported_languages: List[str] = Field(default=["c", "cpp"])
     flowchart_image_dir: str = Field(default="./data")
 
+    # Module Detection Strategy Settings
+    # Strategy: "simple" | "clustering"
+    module_detection_strategy: str = Field(default="simple")
+
+    # Simple Truncation Strategy Settings
+    simple_strategy_max_files: int = Field(default=100)
+
+    # Clustering Strategy Settings
+    clustering_strategy_max_cluster_size: int = Field(default=80)
+    clustering_strategy_max_concurrency: int = Field(default=5)
+    clustering_strategy_merge_threshold: float = Field(default=0.7)
+
 
 @lru_cache()
 def get_settings() -> Settings:

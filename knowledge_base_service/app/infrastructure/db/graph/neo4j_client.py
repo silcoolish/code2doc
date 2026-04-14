@@ -196,7 +196,7 @@ class Neo4jClient(GraphDatabaseClient):
         """
         query = """
         MATCH (n)
-        WHERE n.repo = $repo_id OR n.repo_id = $repo_id
+        WHERE n.repoId = $repo_id
         OPTIONAL MATCH (n)-[r]-()
         DELETE r, n
         RETURN count(DISTINCT n) as deleted
@@ -285,7 +285,7 @@ class Neo4jClient(GraphDatabaseClient):
         """
         query = """
         MATCH (f:File)
-        WHERE f.repo = $repo_id AND f.fileType = 'code'
+        WHERE f.repoId = $repo_id AND f.fileType = 'code'
         RETURN f.id as id, f.path as path, f.code as code, f.suffix as suffix
         """
         result = await self.execute_query(query, {"repo_id": repo_id}, database)
@@ -324,7 +324,7 @@ class Neo4jClient(GraphDatabaseClient):
         """
         query = """
         MATCH (m:Method)
-        WHERE m.repo = $repo_id
+        WHERE m.repoId = $repo_id
         RETURN m.id as id, m.name as name, m.code as code,
                m.language as language, m.filePath as file_path
         """
@@ -342,7 +342,7 @@ class Neo4jClient(GraphDatabaseClient):
         """
         query = """
         MATCH (m:Method)
-        WHERE m.repo = $repo_id
+        WHERE m.repoId = $repo_id
         OPTIONAL MATCH (m)-[:CALL]->(callee:Method)
         RETURN m.id as id, m.code as code, m.docstring as docstring,
                m.language as language, m.name as name, m.summary as summary,
@@ -362,7 +362,7 @@ class Neo4jClient(GraphDatabaseClient):
         """
         query = """
         MATCH (c:Class)
-        WHERE c.repo = $repo_id
+        WHERE c.repoId = $repo_id
         OPTIONAL MATCH (c)-[:CONTAIN]->(m:Method)
         RETURN c.id as id, c.code as code, c.docstring as docstring,
                c.language as language, c.name as name, c.summary as summary,
@@ -382,7 +382,7 @@ class Neo4jClient(GraphDatabaseClient):
         """
         query = """
         MATCH (f:File)
-        WHERE f.repo = $repo_id
+        WHERE f.repoId = $repo_id
         OPTIONAL MATCH (f)-[:CONTAIN]->(c:Class)
         OPTIONAL MATCH (f)-[:CONTAIN]->(m:Method)
         RETURN f.id as id, f.code as code, f.fileType as file_type,
@@ -506,31 +506,31 @@ class Neo4jClient(GraphDatabaseClient):
         if node_type == "File":
             query = """
             MATCH (f:File)
-            WHERE f.repo = $repo_id AND f.summary IS NOT NULL
+            WHERE f.repoId = $repo_id AND f.summary IS NOT NULL
             RETURN f.id as id, f.name as name, f.summary as summary, f.path as path
             """
         elif node_type == "Class":
             query = """
             MATCH (c:Class)
-            WHERE c.repo = $repo_id AND c.summary IS NOT NULL
+            WHERE c.repoId = $repo_id AND c.summary IS NOT NULL
             RETURN c.id as id, c.name as name, c.summary as summary
             """
         elif node_type == "Method":
             query = """
             MATCH (m:Method)
-            WHERE m.repo = $repo_id AND m.summary IS NOT NULL
+            WHERE m.repoId = $repo_id AND m.summary IS NOT NULL
             RETURN m.id as id, m.name as name, m.summary as summary
             """
         elif node_type == "Module":
             query = """
             MATCH (mod:Module)
-            WHERE mod.repo = $repo_id AND mod.summary IS NOT NULL
+            WHERE mod.repoId = $repo_id AND mod.summary IS NOT NULL
             RETURN mod.id as id, mod.name as name, mod.summary as summary
             """
         elif node_type == "Workflow":
             query = """
             MATCH (w:Workflow)
-            WHERE w.repo = $repo_id AND w.summary IS NOT NULL
+            WHERE w.repoId = $repo_id AND w.summary IS NOT NULL
             RETURN w.id as id, w.name as name, w.summary as summary
             """
         else:
@@ -559,7 +559,7 @@ class Neo4jClient(GraphDatabaseClient):
 
         query = f"""
         MATCH (n:{node_type})
-        WHERE n.repo = $repo_id AND n.summary IS NOT NULL
+        WHERE n.repoId = $repo_id AND n.summary IS NOT NULL
         RETURN count(n) as total
         """
 
@@ -593,7 +593,7 @@ class Neo4jClient(GraphDatabaseClient):
         if node_type == "File":
             query = """
             MATCH (f:File)
-            WHERE f.repo = $repo_id AND f.summary IS NOT NULL
+            WHERE f.repoId = $repo_id AND f.summary IS NOT NULL
             RETURN f.id as id, f.name as name, f.summary as summary, f.path as path
             ORDER BY f.id
             SKIP $skip LIMIT $limit
@@ -601,7 +601,7 @@ class Neo4jClient(GraphDatabaseClient):
         elif node_type == "Class":
             query = """
             MATCH (c:Class)
-            WHERE c.repo = $repo_id AND c.summary IS NOT NULL
+            WHERE c.repoId = $repo_id AND c.summary IS NOT NULL
             RETURN c.id as id, c.name as name, c.summary as summary
             ORDER BY c.id
             SKIP $skip LIMIT $limit
@@ -609,7 +609,7 @@ class Neo4jClient(GraphDatabaseClient):
         elif node_type == "Method":
             query = """
             MATCH (m:Method)
-            WHERE m.repo = $repo_id AND m.summary IS NOT NULL
+            WHERE m.repoId = $repo_id AND m.summary IS NOT NULL
             RETURN m.id as id, m.name as name, m.summary as summary
             ORDER BY m.id
             SKIP $skip LIMIT $limit
@@ -617,7 +617,7 @@ class Neo4jClient(GraphDatabaseClient):
         elif node_type == "Module":
             query = """
             MATCH (mod:Module)
-            WHERE mod.repo = $repo_id AND mod.summary IS NOT NULL
+            WHERE mod.repoId = $repo_id AND mod.summary IS NOT NULL
             RETURN mod.id as id, mod.name as name, mod.summary as summary, mod.detail as detail
             ORDER BY mod.id
             SKIP $skip LIMIT $limit
@@ -625,7 +625,7 @@ class Neo4jClient(GraphDatabaseClient):
         elif node_type == "Workflow":
             query = """
             MATCH (w:Workflow)
-            WHERE w.repo = $repo_id AND w.summary IS NOT NULL
+            WHERE w.repoId = $repo_id AND w.summary IS NOT NULL
             RETURN w.id as id, w.name as name, w.summary as summary, w.detail as detail
             ORDER BY w.id
             SKIP $skip LIMIT $limit
@@ -723,7 +723,7 @@ class Neo4jClient(GraphDatabaseClient):
             目录和文件列表，每项包含 id, path, type, labels, summary 字段
         """
         query = """
-        MATCH (r:Repository {repo_id: $repo_id})-[:CONTAIN*]->(n)
+        MATCH (r:Repository {repoId: $repo_id})-[:CONTAIN*]->(n)
         WHERE n:Directory OR n:File
         RETURN n.id as id, n.path as path, n.type as type, labels(n) as labels, n.summary as summary
         ORDER BY path
@@ -746,7 +746,7 @@ class Neo4jClient(GraphDatabaseClient):
         """
         query = """
         MATCH (m:Module)
-        WHERE m.repo = $repo_id
+        WHERE m.repoId = $repo_id
         RETURN m.id as id, m.name as name, m.description as description, m.summary as summary
         """
         return await self.execute_query(
@@ -841,7 +841,7 @@ class Neo4jClient(GraphDatabaseClient):
         """
         query = """
         MATCH (m:Method)
-        WHERE m.repo = $repo_id AND m.language IN $languages
+        WHERE m.repoId = $repo_id AND m.language IN $languages
         RETURN m.id as id, m.name as name, m.code as code,
                m.language as language, m.filePath as file_path, m.image as image
         """
