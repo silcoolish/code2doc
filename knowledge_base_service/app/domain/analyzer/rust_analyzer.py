@@ -424,3 +424,48 @@ class RustAnalyzer(BaseTreeSitterAnalyzer):
             "Some", "None", "Ok", "Err", "Box", "Vec",
             "println", "print", "format", "panic", "todo", "unimplemented",
         }
+
+    def resolve_import(
+        self,
+        import_info: ImportInfo,
+        current_file: str,
+        file_path_index: dict[str, str],
+    ) -> Optional[str]:
+        """解析 Rust use 语句，找到对应的文件ID.
+
+        Args:
+            import_info: import 信息
+            current_file: 当前文件路径
+            file_path_index: 文件路径索引（路径到ID的映射）
+
+        Returns:
+            目标文件ID或 None
+        """
+
+        module = import_info.module
+
+        # 尝试直接匹配
+        if module in file_path_index:
+            return file_path_index[module]
+
+        # Rust: crate::module::Type -> 尝试匹配 module.rs 或 module/mod.rs
+        parts = module.replace("::", "/").split("/")
+        module_name = parts[-1] if parts else module
+
+        # 尝试匹配 Rust 文件
+        for ext in [".rs"]:
+            filename = module_name + ext
+            if filename in file_path_index:
+                return file_path_index[filename]
+
+        # 尝试匹配 mod.rs
+        mod_file = module_name + "/mod.rs"
+        if mod_file in file_path_index:
+            return file_path_index[mod_file]
+
+        # 尝试匹配路径中包含模块名
+        for path, file_id in file_path_index.items():
+            if module_name in path or module.replace("::", "/") in path:
+                return file_id
+
+        return None

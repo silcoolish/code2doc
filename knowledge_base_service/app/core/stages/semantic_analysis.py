@@ -14,9 +14,10 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from collections import defaultdict, deque
 
 from app.core.pipeline import PipelineContext, PipelineStageHandler
+from app.domain.graph import GraphHelper
 from app.domain.models.pipeline import PipelineStage, PipelineStatus, StageResult
 from app.domain.llm.client import get_llm_service
-from app.infrastructure.db import GraphDatabaseClient, get_graph_db_client
+from app.infrastructure.db import get_graph_db_client
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +56,7 @@ class SemanticAnalysisStage(PipelineStageHandler):
     weight = 2.0  # LLM 生成摘要
 
     def __init__(self):
-        self.graph_db: Optional[GraphDatabaseClient] = None
+        self.graph_helper: Optional[GraphHelper] = None
         self._llm_service = get_llm_service()
 
     async def execute(self, context: PipelineContext) -> StageResult:
@@ -68,7 +69,8 @@ class SemanticAnalysisStage(PipelineStageHandler):
             阶段执行结果
         """
         try:
-            self.graph_db = get_graph_db_client()
+            graph_db = get_graph_db_client()
+            self.graph_helper = GraphHelper(graph_db)
             repo_id = getattr(context, 'repo_id', context.repo_name)
 
             # 1. 生成 Method 节点的 summary
@@ -200,7 +202,7 @@ class SemanticAnalysisStage(PipelineStageHandler):
                     processed_count += 1
 
             if updates:
-                await self._update_node_summaries_batch("Method", updates)
+                await self.graph_helper.update_node_summaries_batch("Method", updates)
 
             logger.info(
                 f"Iteration {iteration}: processed {len(batch)} methods, "
@@ -372,7 +374,7 @@ class SemanticAnalysisStage(PipelineStageHandler):
         Returns:
             Method 节点列表，包含 code, docstring, language 和 calls 关系
         """
-        return await self.graph_db.get_methods_with_calls(repo_id)
+        return await self.graph_helper.graph_db.get_methods_with_calls(repo_id)
 
     def _build_call_graph(
         self, methods: List[Dict]
@@ -495,7 +497,7 @@ class SemanticAnalysisStage(PipelineStageHandler):
         Returns:
             生成的摘要数量
         """
-        classes = await self._get_classes_with_methods(repo_id)
+        classes = await self.graph_helper.graph_db.get_classes_with_methods(repo_id)
         if not classes:
             return 0
 
@@ -541,20 +543,9 @@ class SemanticAnalysisStage(PipelineStageHandler):
                 updates.append((class_node.get("id", ""), summary))
 
         if updates:
-            await self._update_node_summaries_batch("Class", updates)
+            await self.graph_helper.update_node_summaries_batch("Class", updates)
 
         return len(updates)
-
-    async def _get_classes_with_methods(self, repo_id: str) -> List[Dict]:
-        """获取所有 Class 节点及其包含的 Method summaries.
-
-        Args:
-            repo_id: 仓库ID
-
-        Returns:
-            Class 节点列表
-        """
-        return await self.graph_db.get_classes_with_methods(repo_id)
 
     async def _generate_class_summary(self, class_node: Dict) -> str:
         """为单个类生成 summary.
@@ -602,7 +593,7 @@ class SemanticAnalysisStage(PipelineStageHandler):
         Returns:
             生成的摘要数量
         """
-        files = await self._get_files_for_summary(repo_id)
+        files = await self.graph_helper.graph_db.get_files_for_summary(repo_id)
         if not files:
             return 0
 
@@ -668,20 +659,9 @@ class SemanticAnalysisStage(PipelineStageHandler):
                 updates.append((file_node.get("id", ""), summary))
 
         if updates:
-            await self._update_node_summaries_batch("File", updates)
+            await self.graph_helper.update_node_summaries_batch("File", updates)
 
         return len(updates)
-
-    async def _get_files_for_summary(self, repo_id: str) -> List[Dict]:
-        """获取所有 File 节点及其包含的 Class/Method summaries.
-
-        Args:
-            repo_id: 仓库ID
-
-        Returns:
-            File 节点列表
-        """
-        return await self.graph_db.get_files_for_summary(repo_id)
 
     async def _generate_file_summary(self, file_node: Dict) -> str:
         """为单个文件生成 summary.
@@ -734,52 +714,3 @@ class SemanticAnalysisStage(PipelineStageHandler):
         except Exception as e:
             logger.warning(f"Failed to generate summary for file {name}: {e}")
             return ""
-
-    async def _update_node_summary(
-        self, label: str, node_id: str, summary: str
-    ) -> None:
-        """更新节点的 summary 属性.
-
-        Args:
-            label: 节点标签
-            node_id: 节点ID
-            summary: 摘要内容
-        """
-        await self.graph_db.update_node_summary(label, node_id, summary)
-
-    async def _update_node_summaries_batch(
-        self, label: str, updates: List[Tuple[str, str]]
-    ) -> int:
-        """批量更新节点的 summary 属性.
-
-        Args:
-            label: 节点标签
-            updates: 更新列表，每项为 (node_id, summary) 元组
-
-        Returns:
-            更新的节点数量
-        """
-        if not updates:
-            return 0
-
-        # 过滤掉 summary 为空的更新
-        valid_updates = [(node_id, summary) for node_id, summary in updates if summary]
-
-        if not valid_updates:
-            return 0
-
-        try:
-            # 批量更新
-            count = await self.graph_db.update_node_summaries_batch(label, valid_updates)
-            return count
-        except Exception as e:
-            logger.warning(f"Failed to batch update {label} summaries: {e}")
-            # 降级：逐个更新
-            count = 0
-            for node_id, summary in valid_updates:
-                try:
-                    await self.graph_db.update_node_summary(label, node_id, summary)
-                    count += 1
-                except Exception as inner_e:
-                    logger.warning(f"Failed to update summary for {label} {node_id}: {inner_e}")
-            return count

@@ -1,14 +1,13 @@
 """模块检测阶段处理器 - 策略模式实现."""
 
 import logging
-from typing import Any, Dict
-
 from typing import Any, Dict, Optional
 
 from app.config import get_settings
 from app.core.pipeline import PipelineContext, PipelineStageHandler
 from app.domain.llm.client import get_llm_service
 from app.domain.models.pipeline import PipelineStage, PipelineStatus, StageResult
+from app.infrastructure.db.graph.base_client import GraphDatabaseClient
 from app.infrastructure.db import get_graph_db_client
 
 from .strategies import ModuleDetectionStrategyFactory
@@ -28,7 +27,7 @@ class ModuleDetectionStage(PipelineStageHandler):
         - workflow_ids: List[str] - 检测到的业务流程ID列表
 
     Side Effects:
-        - 在 Neo4j 中创建 Module 和 Workflow 节点
+        - 在图数据库中创建 Module 和 Workflow 节点
         - 创建 File -> Module, File -> Workflow, Workflow -> Module 的 BELONG_TO 关系
         - 创建 Workflow -> Class/Method 的 CONTAIN 关系（语义图构建）
 
@@ -122,15 +121,15 @@ class ModuleDetectionStage(PipelineStageHandler):
             context.stage_msg = f"使用 {strategy.name} 策略进行模块检测..."
             logger.info(f"Starting module detection with {strategy.name} strategy")
 
-            # 获取 Neo4j 客户端
-            neo4j_client = get_graph_db_client()
+            # 获取图数据库客户端
+            graph_db: GraphDatabaseClient = get_graph_db_client()
 
             # 执行策略检测
             result = await strategy.detect_modules(
                 context=context,
                 repo_id=repo_id,
                 file_summaries=file_summaries,
-                neo4j_client=neo4j_client,
+                graph_db=graph_db,
                 llm_service=self.llm_service,
             )
 

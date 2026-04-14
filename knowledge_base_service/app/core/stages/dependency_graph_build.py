@@ -6,13 +6,15 @@
 """
 
 import logging
-import re
 from typing import Dict, List, Optional, Set, Tuple
 from pathlib import Path
 
 from app.core.pipeline import PipelineContext, PipelineStageHandler
+from app.domain.analyzer.analyzer_factory import get_analyzer_by_language
+from app.domain.analyzer.code_analyzer import ImportInfo, MethodCallInfo
+from app.domain.graph import GraphHelper
 from app.domain.models.pipeline import PipelineStage, PipelineStatus, StageResult
-from app.infrastructure.db import GraphDatabaseClient, get_graph_db_client
+from app.infrastructure.db import get_graph_db_client
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +40,7 @@ class DependencyGraphBuildStage(PipelineStageHandler):
     weight = 2.0  # 依赖分析
 
     def __init__(self):
-        self.graph_db: Optional[GraphDatabaseClient] = None
+        self.graph_helper: Optional[GraphHelper] = None
 
     async def execute(self, context: PipelineContext) -> StageResult:
         """执行依赖图构建.
@@ -50,7 +52,8 @@ class DependencyGraphBuildStage(PipelineStageHandler):
             阶段执行结果
         """
         try:
-            self.graph_db = get_graph_db_client()
+            graph_db = get_graph_db_client()
+            self.graph_helper = GraphHelper(graph_db)
             repo_id = getattr(context, 'repo_id', context.repo_name)
 
             # 1. 构建文件依赖（USE 关系）
@@ -102,7 +105,7 @@ class DependencyGraphBuildStage(PipelineStageHandler):
             创建的 USE 关系数量
         """
         # 获取所有代码文件
-        files = await self._get_code_files(repo_id)
+        files = await self.graph_helper.graph_db.get_code_files(repo_id)
         if not files:
             return 0
 
@@ -121,17 +124,22 @@ class DependencyGraphBuildStage(PipelineStageHandler):
             if not file_id or not code:
                 continue
 
-            # 提取 import 引用
-            imports = self._extract_imports(code, language)
+            # 获取对应语言的分析器
+            analyzer = get_analyzer_by_language(language)
+            if not analyzer:
+                continue
 
-            for import_stmt in imports:
+            # 提取 import 引用
+            import_infos = analyzer.extract_imports(code, file_path)
+
+            for import_info in import_infos:
                 # 查找引用的目标文件
-                target_id = self._resolve_import(import_stmt, file_path, file_path_index)
+                target_id = analyzer.resolve_import(import_info, file_path, file_path_index)
                 if target_id and target_id != file_id:
                     rel_key = (file_id, target_id)
                     if rel_key not in seen_relations:
                         seen_relations.add(rel_key)
-                        success = await self._create_use_relation(file_id, target_id)
+                        success = await self.graph_helper.create_use_relationship(file_id, target_id)
                         if success:
                             created_count += 1
 
@@ -149,7 +157,7 @@ class DependencyGraphBuildStage(PipelineStageHandler):
             创建的 CALL 关系数量
         """
         # 获取所有方法
-        methods = await self._get_all_methods(repo_id)
+        methods = await self.graph_helper.graph_db.get_all_methods(repo_id)
         if not methods:
             return 0
 
@@ -164,14 +172,22 @@ class DependencyGraphBuildStage(PipelineStageHandler):
             code = method.get("code", "")
             language = method.get("language", "")
             file_path = method.get("file_path", "")
+            method_name = method.get("name", "")
 
             if not source_id or not code:
                 continue
 
-            # 提取方法调用
-            call_names = self._extract_method_calls(code, language)
+            # 获取对应语言的分析器
+            analyzer = get_analyzer_by_language(language)
+            if not analyzer:
+                continue
 
-            for call_name in call_names:
+            # 提取方法调用
+            call_infos = analyzer.extract_method_calls(code, method_name, file_path)
+
+            for call_info in call_infos:
+                call_name = call_info.method_name
+
                 # 查找目标方法
                 target_ids = method_name_index.get(call_name, [])
 
@@ -189,33 +205,11 @@ class DependencyGraphBuildStage(PipelineStageHandler):
                         rel_key = (source_id, target_id)
                         if rel_key not in seen_relations:
                             seen_relations.add(rel_key)
-                            success = await self._create_call_relation(source_id, target_id)
+                            success = await self.graph_helper.create_call_relationship(source_id, target_id)
                             if success:
                                 created_count += 1
 
         return created_count
-
-    async def _get_code_files(self, repo_id: str) -> List[Dict]:
-        """获取所有代码文件节点.
-
-        Args:
-            repo_id: 仓库ID
-
-        Returns:
-            File 节点列表
-        """
-        return await self.graph_db.get_code_files(repo_id)
-
-    async def _get_all_methods(self, repo_id: str) -> List[Dict]:
-        """获取所有 Method 节点.
-
-        Args:
-            repo_id: 仓库ID
-
-        Returns:
-            Method 节点列表
-        """
-        return await self.graph_db.get_all_methods(repo_id)
 
     def _build_file_path_index(self, files: List[Dict]) -> Dict[str, str]:
         """构建文件路径索引.
@@ -270,186 +264,3 @@ class DependencyGraphBuildStage(PipelineStageHandler):
         # 方法ID格式: method_{repo}_{file_path}_{method_name}
         # 或 method_{repo}_{file_path}_{class_name}_{method_name}
         return file_path in method_id
-
-    def _extract_imports(self, code: str, language: str) -> List[str]:
-        """从代码中提取 import 语句.
-
-        Args:
-            code: 代码内容
-            language: 语言类型
-
-        Returns:
-            import 模块名列表
-        """
-        imports = []
-
-        if language == "python":
-            # Python: import x, from x import y
-            patterns = [
-                r"^\s*import\s+([\w.]+)",
-                r"^\s*from\s+([\w.]+)\s+import",
-            ]
-        elif language in ("java", "kotlin"):
-            # Java: import x.y.z
-            patterns = [r"^\s*import\s+([\w.]+)"]
-        elif language in ("javascript", "typescript"):
-            # JS/TS: import x from 'y', require('y')
-            patterns = [
-                r"^\s*import\s+.*?\s+from\s+['\"]([^'\"]+)['\"]",
-                r"require\(['\"]([^'\"]+)['\"]\)",
-            ]
-        elif language == "go":
-            # Go: import "x", import ( "x" )
-            patterns = [r'import\s*\(?\s*["\']([^"\']+)["\']']
-        elif language == "rust":
-            # Rust: use x::y, extern crate x
-            patterns = [
-                r"^\s*use\s+([\w:]+)",
-                r"^\s*extern\s+crate\s+(\w+)",
-            ]
-        elif language in ("c", "cpp"):
-            # C/C++: #include "x" or #include <x>
-            patterns = [r'#\s*include\s+["<]([^">]+)[">]']
-        else:
-            return imports
-
-        for pattern in patterns:
-            for match in re.finditer(pattern, code, re.MULTILINE):
-                module = match.group(1).strip()
-                if module:
-                    imports.append(module)
-
-        return imports
-
-    def _resolve_import(
-        self,
-        import_stmt: str,
-        current_file: str,
-        file_path_index: Dict[str, str],
-    ) -> Optional[str]:
-        """解析 import 语句，找到对应的文件ID.
-
-        Args:
-            import_stmt: import 语句内容
-            current_file: 当前文件路径
-            file_path_index: 文件路径索引
-
-        Returns:
-            目标文件ID或 None
-        """
-        # 尝试直接匹配
-        if import_stmt in file_path_index:
-            return file_path_index[import_stmt]
-
-        # 提取模块名并尝试匹配文件名
-        parts = import_stmt.replace(".", "/").split("/")
-        module_name = parts[-1] if parts else import_stmt
-
-        # 尝试匹配文件名（带扩展名）
-        for ext in [".py", ".java", ".js", ".ts", ".go", ".rs", ".c", ".h", ".cpp", ".hpp"]:
-            filename = module_name + ext
-            if filename in file_path_index:
-                return file_path_index[filename]
-
-        # 尝试匹配路径中包含模块名
-        for path, file_id in file_path_index.items():
-            if module_name in path:
-                return file_id
-
-        return None
-
-    def _extract_method_calls(self, code: str, language: str) -> List[str]:
-        """从方法代码中提取方法调用.
-
-        Args:
-            code: 方法代码
-            language: 语言类型
-
-        Returns:
-            被调用的方法名列表
-        """
-        calls = []
-
-        if not code:
-            return calls
-
-        # 简单正则匹配方法调用
-        # 匹配 pattern: identifier(arg) 或 obj.method(arg) 或 self.method(arg)
-        if language in ("python", "ruby"):
-            # Python: func(), self.func(), obj.func()
-            pattern = r"(?<!\w)([a-zA-Z_]\w*)\s*\("
-        elif language in ("java", "javascript", "typescript", "c", "cpp", "go"):
-            # Java/JS/TS/C/Go: func(), this.func(), obj.func()
-            pattern = r"(?<!\w)([a-zA-Z_]\w*)\s*\("
-        elif language == "rust":
-            # Rust: func(), self.func()
-            pattern = r"(?<!\w)([a-zA-Z_]\w*)\s*\("
-        else:
-            pattern = r"(?<!\w)([a-zA-Z_]\w*)\s*\("
-
-        # 查找所有匹配
-        matches = re.finditer(pattern, code)
-
-        # 排除关键字和常见内置函数
-        exclude = {
-            "if", "while", "for", "switch", "catch", "return",
-            "print", "println", "printf", "len", "range", "enumerate",
-            "map", "filter", "reduce", "sorted", "reversed",
-            "int", "str", "float", "bool", "list", "dict", "set", "tuple",
-            "new", "sizeof", "typeof", "instanceof",
-        }
-
-        for match in matches:
-            name = match.group(1)
-            if name and name not in exclude and not name.startswith("_"):
-                calls.append(name)
-
-        return calls
-
-    async def _create_use_relation(self, from_id: str, to_id: str) -> bool:
-        """创建 USE 关系.
-
-        Args:
-            from_id: 源文件ID
-            to_id: 目标文件ID
-
-        Returns:
-            是否成功创建
-        """
-        try:
-            return await self.graph_db.create_relationship(
-                from_label="File",
-                from_key="id",
-                from_value=from_id,
-                to_label="File",
-                to_key="id",
-                to_value=to_id,
-                rel_type="USE",
-            )
-        except Exception as e:
-            logger.warning(f"Failed to create USE relation {from_id} -> {to_id}: {e}")
-            return False
-
-    async def _create_call_relation(self, from_id: str, to_id: str) -> bool:
-        """创建 CALL 关系.
-
-        Args:
-            from_id: 源方法ID
-            to_id: 目标方法ID
-
-        Returns:
-            是否成功创建
-        """
-        try:
-            return await self.graph_db.create_relationship(
-                from_label="Method",
-                from_key="id",
-                from_value=from_id,
-                to_label="Method",
-                to_key="id",
-                to_value=to_id,
-                rel_type="CALL",
-            )
-        except Exception as e:
-            logger.warning(f"Failed to create CALL relation {from_id} -> {to_id}: {e}")
-            return False

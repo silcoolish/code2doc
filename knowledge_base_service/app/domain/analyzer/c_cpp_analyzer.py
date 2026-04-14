@@ -285,6 +285,53 @@ class CAnalyzer(BaseTreeSitterAnalyzer):
             "sizeof", "typeof", "offsetof",
         }
 
+    def resolve_import(
+        self,
+        import_info: ImportInfo,
+        current_file: str,
+        file_path_index: dict[str, str],
+    ) -> Optional[str]:
+        """解析 C #include 语句，找到对应的文件ID.
+
+        Args:
+            import_info: import 信息
+            current_file: 当前文件路径
+            file_path_index: 文件路径索引（路径到ID的映射）
+
+        Returns:
+            目标文件ID或 None
+        """
+
+        module = import_info.module
+
+        # 尝试直接匹配
+        if module in file_path_index:
+            return file_path_index[module]
+
+        # C/C++: header.h -> 尝试匹配各种扩展名
+        # 去除路径前缀，只取文件名
+        parts = module.replace("\\", "/").split("/")
+        header_name = parts[-1] if parts else module
+
+        # 尝试匹配 C/C++ 头文件和源文件
+        for ext in [".h", ".hpp", ".c", ".cpp", ".cc", ".cxx"]:
+            # 尝试直接使用 header 名（带扩展名）
+            if header_name.endswith(ext):
+                if header_name in file_path_index:
+                    return file_path_index[header_name]
+            else:
+                # 尝试添加扩展名
+                filename = header_name + ext
+                if filename in file_path_index:
+                    return file_path_index[filename]
+
+        # 尝试匹配路径中包含 header 名
+        for path, file_id in file_path_index.items():
+            if header_name in path:
+                return file_id
+
+        return None
+
     def _is_valid_function_code(self, code: str, func_name: str) -> bool:
         """验证提取的 code 是否是有效的函数定义.
 

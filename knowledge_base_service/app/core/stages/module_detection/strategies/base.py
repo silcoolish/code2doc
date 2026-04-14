@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
 from app.domain.models.pipeline import PipelineContext
+from app.infrastructure.db.graph.base_client import GraphDatabaseClient
 
 
 @dataclass
@@ -32,7 +33,7 @@ class ModuleDetectionStrategy(ABC):
             context=context,
             repo_id="repo_123",
             file_summaries={"file_1": "summary..."},
-            neo4j_client=neo4j,
+            graph_db=graph_db,
             llm_service=llm,
         )
         ```
@@ -64,7 +65,7 @@ class ModuleDetectionStrategy(ABC):
         context: PipelineContext,
         repo_id: str,
         file_summaries: Dict[str, str],
-        neo4j_client: Any,
+        graph_db: GraphDatabaseClient,
         llm_service: Any,
     ) -> ModuleDetectionResult:
         """执行模块检测.
@@ -73,7 +74,7 @@ class ModuleDetectionStrategy(ABC):
             context: Pipeline上下文，包含 traversal_result 等数据
             repo_id: 仓库ID
             file_summaries: 文件ID到摘要的映射
-            neo4j_client: Neo4j图数据库客户端
+            graph_db: 图数据库客户端
             llm_service: LLM服务客户端
 
         Returns:

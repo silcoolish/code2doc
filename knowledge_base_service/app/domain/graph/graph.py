@@ -12,7 +12,7 @@ class BaseNode(ABC):
 
     id: str
     name: str
-    type: str
+    type: str = ""
     repo_id: str = ""
     description: str = ""
     extra: Dict[str, Any] = field(default_factory=dict)

@@ -189,6 +189,27 @@ class CodeAnalyzer(ABC):
         """
         raise NotImplementedError
 
+    @abstractmethod
+    def resolve_import(
+        self,
+        import_info: ImportInfo,
+        current_file: str,
+        file_path_index: Dict[str, str],
+    ) -> Optional[str]:
+        """解析 import 语句，找到对应的文件ID.
+
+        这是依赖图构建阶段使用的方法，用于创建 File 之间的 USE 关系。
+
+        Args:
+            import_info: import 信息
+            current_file: 当前文件路径
+            file_path_index: 文件路径索引（路径到ID的映射）
+
+        Returns:
+            目标文件ID或 None
+        """
+        raise NotImplementedError
+
     # ==================== 辅助方法 ====================
 
     def can_analyze(self, file_path: str) -> bool:

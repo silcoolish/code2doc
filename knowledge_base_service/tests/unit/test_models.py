@@ -3,7 +3,7 @@
 import pytest
 from datetime import datetime
 
-from app.domain.models.graph import (
+from app.domain.graph import (
     Repository,
     Directory,
     File,

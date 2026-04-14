@@ -22,10 +22,10 @@ from gitignore_parser import parse_gitignore
 
 from app.config import get_settings
 from app.core.pipeline import PipelineContext, PipelineStageHandler
-from app.domain.models.graph import Class, Directory, File, Method, Repository
+from app.domain.graph import Class, Directory, File, GraphHelper, Method, Repository
 from app.domain.models.pipeline import PipelineStage, PipelineStatus, StageResult
 from app.domain.analyzer import get_analyzer_for_file, ParsedSymbol, is_supported_file
-from app.infrastructure.db import GraphDatabaseClient, get_graph_db_client
+from app.infrastructure.db import get_graph_db_client
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +56,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
 
     def __init__(self):
         self.settings = get_settings()
-        self.graph_db: Optional[GraphDatabaseClient] = None
+        self.graph_helper: Optional[GraphHelper] = None
 
     async def execute(self, context: PipelineContext) -> StageResult:
         """执行结构图构建.
@@ -68,7 +68,8 @@ class StructureGraphBuildStage(PipelineStageHandler):
             阶段执行结果
         """
         try:
-            self.graph_db = get_graph_db_client()
+            graph_db = get_graph_db_client()
+            self.graph_helper = GraphHelper(graph_db)
 
             # 从 context 获取 repo_id（初始化请求传入的）
             pipeline_repo_id = getattr(context, 'repo_id', context.repo_name)
@@ -160,7 +161,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow(),
         )
-        await self._create_repository(repository)
+        await self.graph_helper.create_repository(repository)
 
         # 加载 .gitignore
         gitignore_path = repo_root / ".gitignore"
@@ -193,7 +194,11 @@ class StructureGraphBuildStage(PipelineStageHandler):
                         repo_id=pipeline_repo_id,
                         path=str_path,
                     )
-                    await self._create_directory(directory, repository.id)
+                    # 创建 CONTAIN 关系所需的父节点ID
+                    parent_id = self._get_parent_id(directory.path, repository.id)
+                    # 如果 parent_id 为 None，使用 repo_id 作为父节点
+                    effective_parent_id = parent_id if parent_id else repository.id
+                    await self.graph_helper.create_directory(directory, effective_parent_id)
                     directories.append(directory)
 
                 elif path.is_file():
@@ -418,7 +423,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
         parent_id = self._get_parent_directory_id(file_node.path, directories, repo_id)
 
         # 创建 File 节点
-        await self._create_file(file_node, parent_id, repo_path)
+        await self.graph_helper.create_file(file_node, parent_id, repo_path)
         file_ids.append(file_node.id)
 
         # 解析文件
@@ -479,82 +484,6 @@ class StructureGraphBuildStage(PipelineStageHandler):
 
         return file_ids, class_ids, method_ids
 
-    async def _create_repository(self, repository: Repository) -> None:
-        """创建 Repository 节点."""
-        properties = repository.to_dict()
-        properties = self._filter_properties(properties)
-
-        await self.graph_db.merge_node(
-            label="Repository",
-            key_property="id",
-            key_value=repository.id,
-            properties=properties,
-        )
-
-    async def _create_directory(self, directory: Directory, repo_id: str) -> None:
-        """创建 Directory 节点和关系."""
-        properties = directory.to_dict()
-        properties = self._filter_properties(properties)
-
-        await self.graph_db.merge_node(
-            label="Directory",
-            key_property="id",
-            key_value=directory.id,
-            properties=properties,
-        )
-
-        # 创建 CONTAIN 关系
-        parent_id = self._get_parent_id(directory.path, repo_id)
-        if parent_id:
-            await self.graph_db.create_relationship(
-                from_label="Directory" if "/" in directory.path else "Repository",
-                from_key="id",
-                from_value=parent_id,
-                to_label="Directory",
-                to_key="id",
-                to_value=directory.id,
-                rel_type="CONTAIN",
-            )
-
-    async def _create_file(self, file_node: File, parent_id: str, repo_path: str) -> None:
-        """创建 File 节点和关系.
-
-        Args:
-            file_node: 文件节点
-            parent_id: 父目录/仓库ID
-            repo_path: 仓库根路径
-        """
-        # 读取文件内容
-        file_path = Path(repo_path) / file_node.path
-        try:
-            content = file_path.read_text(encoding="utf-8", errors="ignore")
-            file_node.code = content
-        except Exception as e:
-            logger.warning(f"Failed to read file content {file_node.path}: {e}")
-            file_node.code = ""
-
-        properties = file_node.to_dict()
-        properties = self._filter_properties(properties)
-
-        await self.graph_db.merge_node(
-            label="File",
-            key_property="id",
-            key_value=file_node.id,
-            properties=properties,
-        )
-
-        # 创建 CONTAIN 关系
-        label = "Directory" if "dir_" in parent_id else "Repository"
-        await self.graph_db.create_relationship(
-            from_label=label,
-            from_key="id",
-            from_value=parent_id,
-            to_label="File",
-            to_key="id",
-            to_value=file_node.id,
-            rel_type="CONTAIN",
-        )
-
     async def _create_class_from_symbol(
         self,
         class_symbol: ParsedSymbol,
@@ -593,26 +522,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
             real_type=real_type,
         )
 
-        properties = class_node.to_dict()
-        properties = self._filter_properties(properties)
-
-        await self.graph_db.merge_node(
-            label="Class",
-            key_property="id",
-            key_value=class_node_id,
-            properties=properties,
-        )
-
-        # 创建 CONTAIN 关系
-        await self.graph_db.create_relationship(
-            from_label="File",
-            from_key="id",
-            from_value=file_id,
-            to_label="Class",
-            to_key="id",
-            to_value=class_node_id,
-            rel_type="CONTAIN",
-        )
+        await self.graph_helper.create_class(class_node, file_id)
 
         return class_node_id
 
@@ -653,29 +563,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
             class_id=parent_id if "class_" in parent_id else None,
         )
 
-        properties = method_node.to_dict()
-        properties = self._filter_properties(properties)
-
-        await self.graph_db.merge_node(
-            label="Method",
-            key_property="id",
-            key_value=method_node_id,
-            properties=properties,
-        )
-
-        # 确定父节点标签
-        parent_label = "Class" if "class_" in parent_id else "File"
-
-        # 创建 CONTAIN 关系
-        await self.graph_db.create_relationship(
-            from_label=parent_label,
-            from_key="id",
-            from_value=parent_id,
-            to_label="Method",
-            to_key="id",
-            to_value=method_node_id,
-            rel_type="CONTAIN",
-        )
+        await self.graph_helper.create_method(method_node, parent_id)
 
         return method_node_id
 
@@ -712,25 +600,3 @@ class StructureGraphBuildStage(PipelineStageHandler):
 
         return f"dir_{repo_id.replace('repo_', '')}_{parent_path}"
 
-    def _filter_properties(self, properties: Dict) -> Dict:
-        """过滤属性，只保留基本类型.
-
-        Neo4j 只支持基本类型（字符串、数字、布尔值、日期）和这些类型的数组。
-        过滤掉字典、None 值和嵌套对象。
-        """
-        filtered = {}
-        for key, value in properties.items():
-            if value is None:
-                continue
-            # 跳过所有字典类型（Neo4j不支持）
-            if isinstance(value, dict):
-                continue
-            # 跳过所有列表类型（除非是纯基本类型列表）
-            if isinstance(value, list):
-                # 只保留非空且元素都是基本类型的列表
-                if value and all(not isinstance(item, (dict, list)) for item in value):
-                    filtered[key] = value
-                continue
-            # 基本类型
-            filtered[key] = value
-        return filtered

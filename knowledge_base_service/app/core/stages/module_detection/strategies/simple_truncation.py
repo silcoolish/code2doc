@@ -4,7 +4,7 @@ import logging
 from typing import Any, Dict, List
 from uuid import uuid4
 
-from app.domain.models.graph import Module, Workflow
+from app.domain.graph import GraphHelper, Module, Workflow
 from app.domain.models.pipeline import PipelineContext
 from app.infrastructure.db import GraphDatabaseClient
 
@@ -29,7 +29,7 @@ class SimpleTruncationStrategy(ModuleDetectionStrategy):
             context=context,
             repo_id="repo_123",
             file_summaries=file_summaries,
-            neo4j_client=neo4j,
+            graph_db=graph_db,
             llm_service=llm,
         )
         ```
@@ -66,7 +66,7 @@ class SimpleTruncationStrategy(ModuleDetectionStrategy):
         context: PipelineContext,
         repo_id: str,
         file_summaries: Dict[str, str],
-        neo4j_client: GraphDatabaseClient,
+        graph_db: GraphDatabaseClient,
         llm_service: Any,
     ) -> ModuleDetectionResult:
         """执行模块检测.
@@ -75,12 +75,15 @@ class SimpleTruncationStrategy(ModuleDetectionStrategy):
             context: Pipeline上下文
             repo_id: 仓库ID
             file_summaries: 文件ID到摘要的映射
-            neo4j_client: Neo4j客户端
+            graph_db: 图数据库客户端
             llm_service: LLM服务
 
         Returns:
             ModuleDetectionResult: 检测结果
         """
+        # 创建 GraphHelper 实例
+        helper = GraphHelper(graph_db)
+
         # 获取遍历结果
         traversal_result = context.data.get("traversal_result")
         files = traversal_result.files if traversal_result else []
@@ -121,27 +124,16 @@ class SimpleTruncationStrategy(ModuleDetectionStrategy):
             )
 
             # 创建Module节点
-            module_props = module.to_dict()
-            module_props["repo"] = repo_id
-            await neo4j_client.merge_node(
-                label="Module",
-                key_property="id",
-                key_value=module_id,
-                properties=module_props,
-            )
+            await helper.create_module(module)
             created_modules.append(module)
 
             # 关联文件到Module
             for file_path in module_data.get("files", []):
                 file_id = f"file_{repo_id}_{file_path}"
-                await neo4j_client.create_relationship(
+                await helper.create_belong_to_relationship(
+                    from_id=file_id,
+                    to_id=module_id,
                     from_label="File",
-                    from_key="id",
-                    from_value=file_id,
-                    to_label="Module",
-                    to_key="id",
-                    to_value=module_id,
-                    rel_type="BELONG_TO",
                 )
 
             # 创建Workflow节点
@@ -164,43 +156,28 @@ class SimpleTruncationStrategy(ModuleDetectionStrategy):
                 )
 
                 # 创建Workflow节点
-                workflow_props = workflow.to_dict()
-                workflow_props["repo"] = repo_id
-                await neo4j_client.merge_node(
-                    label="Workflow",
-                    key_property="id",
-                    key_value=workflow_id,
-                    properties=workflow_props,
-                )
+                await helper.create_workflow(workflow)
                 created_workflows.append(workflow)
 
                 # 关联Workflow到Module
-                await neo4j_client.create_relationship(
+                await helper.create_belong_to_relationship(
+                    from_id=workflow_id,
+                    to_id=module_id,
                     from_label="Workflow",
-                    from_key="id",
-                    from_value=workflow_id,
-                    to_label="Module",
-                    to_key="id",
-                    to_value=module_id,
-                    rel_type="BELONG_TO",
                 )
 
                 # 关联文件到Workflow
                 for file_path in workflow_data.get("files", []):
                     file_id = f"file_{repo_id}_{file_path}"
-                    await neo4j_client.create_relationship(
+                    await helper.create_belong_to_relationship(
+                        from_id=file_id,
+                        to_id=workflow_id,
                         from_label="File",
-                        from_key="id",
-                        from_value=file_id,
-                        to_label="Workflow",
-                        to_key="id",
-                        to_value=workflow_id,
-                        rel_type="BELONG_TO",
                     )
 
         # 构建语义图关系
         created_relations = await self._build_semantic_graph(
-            neo4j_client, created_workflows
+            helper, created_workflows
         )
 
         stats = {
@@ -273,13 +250,13 @@ class SimpleTruncationStrategy(ModuleDetectionStrategy):
 
     async def _build_semantic_graph(
         self,
-        neo4j: GraphDatabaseClient,
+        helper: GraphHelper,
         workflows: List[Workflow],
     ) -> Dict[str, int]:
         """构建语义图关系.
 
         Args:
-            neo4j: 图数据库客户端
+            helper: GraphHelper 实例
             workflows: 工作流列表
 
         Returns:
@@ -290,10 +267,10 @@ class SimpleTruncationStrategy(ModuleDetectionStrategy):
         for workflow in workflows:
             # 根据workflow.keywords中的文件路径查找相关的Class和Method
             for keyword in workflow.keywords:
-                results = await neo4j.find_nodes_by_file_path(keyword)
+                results = await helper.graph_db.find_nodes_by_file_path(keyword)
 
                 for result in results:
-                    success = await neo4j.create_relationship(
+                    success = await helper.graph_db.create_relationship(
                         from_label="Workflow",
                         from_key="id",
                         from_value=workflow.id,

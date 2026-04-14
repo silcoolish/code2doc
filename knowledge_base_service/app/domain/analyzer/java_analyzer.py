@@ -300,3 +300,42 @@ class JavaAnalyzer(BaseTreeSitterAnalyzer):
             "new", "sizeof", "typeof", "instanceof",
             "synchronized", "assert",
         }
+
+    def resolve_import(
+        self,
+        import_info: ImportInfo,
+        current_file: str,
+        file_path_index: dict[str, str],
+    ) -> Optional[str]:
+        """解析 Java import 语句，找到对应的文件ID.
+
+        Args:
+            import_info: import 信息
+            current_file: 当前文件路径
+            file_path_index: 文件路径索引（路径到ID的映射）
+
+        Returns:
+            目标文件ID或 None
+        """
+
+        module = import_info.module
+
+        # 尝试直接匹配
+        if module in file_path_index:
+            return file_path_index[module]
+
+        # Java: com.example.Class -> com/example/Class.java
+        parts = module.replace(".", "/").split("/")
+        module_name = parts[-1] if parts else module
+
+        # 尝试匹配 Java 文件
+        filename = module_name + ".java"
+        if filename in file_path_index:
+            return file_path_index[filename]
+
+        # 尝试匹配路径
+        for path, file_id in file_path_index.items():
+            if module_name in path or module.replace(".", "/") in path:
+                return file_id
+
+        return None

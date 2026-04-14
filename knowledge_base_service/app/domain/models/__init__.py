@@ -1,6 +1,7 @@
 """领域模型模块."""
 
-from .graph import (
+# 图模型从 domain.graph 重新导出（已迁移）
+from app.domain.graph import (
     Repository,
     Directory,
     File,

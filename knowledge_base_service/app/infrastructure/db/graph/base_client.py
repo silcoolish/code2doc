@@ -494,3 +494,109 @@ class GraphDatabaseClient(ABC):
             是否成功更新
         """
         pass
+
+    @abstractmethod
+    async def get_code_files_with_summary(
+        self,
+        repo_id: str,
+        database: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """获取指定仓库的所有代码文件节点及其摘要.
+
+        Args:
+            repo_id: 仓库ID
+            database: 目标数据库名称
+
+        Returns:
+            File 节点列表，包含 id, path, name, suffix, summary 等字段
+        """
+        pass
+
+    @abstractmethod
+    async def get_file_use_dependencies(
+        self,
+        repo_id: str,
+        database: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """获取文件之间的USE依赖关系.
+
+        Args:
+            repo_id: 仓库ID
+            database: 目标数据库名称
+
+        Returns:
+            依赖关系列表，每项包含 source, target, weight 字段
+        """
+        pass
+
+    @abstractmethod
+    async def get_file_call_dependencies(
+        self,
+        repo_id: str,
+        database: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """获取文件之间的CALL依赖关系（通过方法调用）.
+
+        Args:
+            repo_id: 仓库ID
+            database: 目标数据库名称
+
+        Returns:
+            依赖关系列表，每项包含 source, target, weight 字段
+        """
+        pass
+
+    @abstractmethod
+    async def get_classes_by_file_path(
+        self,
+        file_path: str,
+        database: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """根据文件路径获取该文件中的所有类.
+
+        Args:
+            file_path: 文件路径
+            database: 目标数据库名称
+
+        Returns:
+            Class 节点列表，每项包含 name, summary 字段
+        """
+        pass
+
+    @abstractmethod
+    async def get_methods_by_file_path(
+        self,
+        file_path: str,
+        limit: int = 5,
+        database: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """根据文件路径获取该文件中的关键方法（按被调用次数排序）.
+
+        Args:
+            file_path: 文件路径
+            limit: 返回的最大方法数量
+            database: 目标数据库名称
+
+        Returns:
+            Method 节点列表，每项包含 name, summary, callee_count 字段
+        """
+        pass
+
+    @abstractmethod
+    async def get_method_call_chains_by_file_paths(
+        self,
+        file_paths: List[str],
+        limit: int = 50,
+        database: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """获取指定文件路径列表中的方法调用链.
+
+        Args:
+            file_paths: 文件路径列表
+            limit: 返回的最大记录数
+            database: 目标数据库名称
+
+        Returns:
+            调用链列表，每项包含 method_name, file_path, callees 字段
+        """
+        pass

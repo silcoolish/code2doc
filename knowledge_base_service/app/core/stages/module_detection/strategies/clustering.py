@@ -12,7 +12,7 @@ Example:
         context=context,
         repo_id="repo_123",
         file_summaries=file_summaries,
-        neo4j_client=neo4j,
+        graph_db=graph_db,
         llm_service=llm,
     )
     ```
@@ -24,7 +24,7 @@ from collections import defaultdict
 from typing import Any, Dict, List, Set, Tuple
 from uuid import uuid4
 
-from app.domain.models.graph import Module, Workflow
+from app.domain.graph import GraphHelper, Module, Workflow
 from app.domain.models.pipeline import PipelineContext
 from app.infrastructure.db import GraphDatabaseClient
 
@@ -55,7 +55,7 @@ class ClusteringStrategy(ModuleDetectionStrategy):
     2. Phase 2: 簇内模块识别 - 并行调用LLM识别模块
     3. Phase 3: 跨簇合并 - 合并相似模块
     4. Phase 4: 工作流识别 - 基于方法调用链识别业务流程
-    5. Phase 5: 语义图构建 - 持久化结果到Neo4j
+    5. Phase 5: 语义图构建 - 持久化结果到图数据库
     """
 
     def __init__(
@@ -105,7 +105,7 @@ class ClusteringStrategy(ModuleDetectionStrategy):
         context: PipelineContext,
         repo_id: str,
         file_summaries: Dict[str, str],
-        neo4j_client: GraphDatabaseClient,
+        graph_db: GraphDatabaseClient,
         llm_service: Any,
     ) -> ModuleDetectionResult:
         """执行分层聚类模块检测.
@@ -114,17 +114,20 @@ class ClusteringStrategy(ModuleDetectionStrategy):
             context: Pipeline上下文
             repo_id: 仓库ID
             file_summaries: 文件ID到摘要的映射
-            neo4j_client: Neo4j客户端
+            graph_db: 图数据库客户端
             llm_service: LLM服务
 
         Returns:
             ModuleDetectionResult: 检测结果
         """
+        # 创建 GraphHelper 实例
+        helper = GraphHelper(graph_db)
+
         logger.info(f"Starting clustering strategy for repo: {repo_id}")
 
         # Phase 1: 预聚类
         context.stage_msg = "Phase 1/5: 正在分析代码结构并进行预聚类..."
-        clusters = await self._phase1_clustering(repo_id, neo4j_client)
+        clusters = await self._phase1_clustering(repo_id, graph_db)
         logger.info(f"Phase 1 completed: {len(clusters)} clusters created")
 
         # 小仓库优化：如果只有一个簇且文件数不多，直接全量分析
@@ -134,7 +137,7 @@ class ClusteringStrategy(ModuleDetectionStrategy):
         # Phase 2: 簇内模块识别（并行）
         context.stage_msg = f"Phase 2/5: 正在并行分析 {len(clusters)} 个代码簇..."
         cluster_results = await self._phase2_intra_cluster_detection(
-            clusters, file_summaries, repo_id, neo4j_client, llm_service
+            clusters, file_summaries, repo_id, graph_db, llm_service
         )
         total_modules = sum(r.module_count for r in cluster_results)
         logger.info(f"Phase 2 completed: {total_modules} modules detected")
@@ -149,7 +152,7 @@ class ClusteringStrategy(ModuleDetectionStrategy):
         # Phase 4: 工作流识别
         context.stage_msg = "Phase 4/5: 正在识别业务流程..."
         await self._phase4_workflow_detection(
-            merged_modules, file_summaries, repo_id, neo4j_client, llm_service
+            merged_modules, file_summaries, repo_id, graph_db, llm_service
         )
         total_workflows = sum(len(m.workflows) for m in merged_modules)
         logger.info(f"Phase 4 completed: {total_workflows} workflows detected")
@@ -157,7 +160,7 @@ class ClusteringStrategy(ModuleDetectionStrategy):
         # Phase 5: 语义图构建
         context.stage_msg = "Phase 5/5: 正在构建语义图..."
         module_ids, workflow_ids = await self._phase5_build_semantic_graph(
-            merged_modules, repo_id, neo4j_client
+            merged_modules, repo_id, helper
         )
         logger.info(
             f"Phase 5 completed: {len(module_ids)} modules, "
@@ -181,7 +184,7 @@ class ClusteringStrategy(ModuleDetectionStrategy):
     async def _phase1_clustering(
         self,
         repo_id: str,
-        neo4j_client: GraphDatabaseClient,
+        graph_db: GraphDatabaseClient,
     ) -> List[FileCluster]:
         """Phase 1: 预聚类.
 
@@ -189,19 +192,19 @@ class ClusteringStrategy(ModuleDetectionStrategy):
 
         Args:
             repo_id: 仓库ID
-            neo4j_client: Neo4j客户端
+            graph_db: 图数据库客户端
 
         Returns:
             文件簇列表
         """
         # 1. 获取代码文件元数据
-        files = await self._get_code_files(repo_id, neo4j_client)
+        files = await self._get_code_files(repo_id, graph_db)
         if not files:
             logger.warning(f"No code files found in repo: {repo_id}")
             return []
 
         # 2. 获取文件依赖图
-        dependencies = await self._get_file_dependencies(repo_id, neo4j_client)
+        dependencies = await self._get_file_dependencies(repo_id, graph_db)
 
         # 3. 基于目录和依赖关系进行智能聚类
         clusters = self._cluster_files_with_dependencies(
@@ -213,29 +216,23 @@ class ClusteringStrategy(ModuleDetectionStrategy):
     async def _get_code_files(
         self,
         repo_id: str,
-        neo4j_client: GraphDatabaseClient,
+        graph_db: GraphDatabaseClient,
     ) -> List[Dict]:
-        """从Neo4j获取代码文件.
+        """从图数据库获取代码文件.
 
         Args:
             repo_id: 仓库ID
-            neo4j_client: Neo4j客户端
+            graph_db: 图数据库客户端
 
         Returns:
             代码文件列表
         """
-        query = """
-        MATCH (f:File {repoId: $repo_id})
-        WHERE f.fileType = 'code'
-        RETURN f.id as id, f.path as path, f.name as name,
-               f.suffix as suffix, f.summary as summary
-        """
-        return await neo4j_client.execute_query(query, {"repo_id": repo_id})
+        return await graph_db.get_code_files_with_summary(repo_id)
 
     async def _get_file_dependencies(
         self,
         repo_id: str,
-        neo4j_client: GraphDatabaseClient,
+        graph_db: GraphDatabaseClient,
     ) -> List[FileDependency]:
         """获取文件依赖关系.
 
@@ -243,7 +240,7 @@ class ClusteringStrategy(ModuleDetectionStrategy):
 
         Args:
             repo_id: 仓库ID
-            neo4j_client: Neo4j客户端
+            graph_db: 图数据库客户端
 
         Returns:
             文件依赖列表
@@ -251,13 +248,7 @@ class ClusteringStrategy(ModuleDetectionStrategy):
         all_deps: Dict[Tuple[str, str], FileDependency] = {}
 
         # 查询USE关系（import依赖）
-        use_query = """
-        MATCH (f1:File {repo_id: $repo_id})-[r:USE]->(f2:File {repo_id: $repo_id})
-        RETURN f1.id as source, f2.id as target, count(*) as weight
-        """
-        use_edges = await neo4j_client.execute_query(
-            use_query, {"repo_id": repo_id}
-        )
+        use_edges = await graph_db.get_file_use_dependencies(repo_id)
 
         for edge in use_edges:
             key = (edge["source"], edge["target"])
@@ -273,15 +264,7 @@ class ClusteringStrategy(ModuleDetectionStrategy):
                 )
 
         # 查询CALL关系（通过方法调用隐式依赖）
-        call_query = """
-        MATCH (m1:Method {repo_id: $repo_id})-[:CALL]->(m2:Method {repo_id: $repo_id})
-        MATCH (f1:File {id: m1.file_id}), (f2:File {id: m2.file_id})
-        WHERE f1 <> f2
-        RETURN f1.id as source, f2.id as target, count(*) as weight
-        """
-        call_edges = await neo4j_client.execute_query(
-            call_query, {"repo_id": repo_id}
-        )
+        call_edges = await graph_db.get_file_call_dependencies(repo_id)
 
         for edge in call_edges:
             key = (edge["source"], edge["target"])
@@ -682,7 +665,7 @@ class ClusteringStrategy(ModuleDetectionStrategy):
         clusters: List[FileCluster],
         file_summaries: Dict[str, str],
         repo_id: str,
-        neo4j_client: GraphDatabaseClient,
+        graph_db: GraphDatabaseClient,
         llm_service: Any,
     ) -> List[ClusterModuleResult]:
         """Phase 2: 簇内模块识别（并行）.
@@ -691,7 +674,7 @@ class ClusteringStrategy(ModuleDetectionStrategy):
             clusters: 文件簇列表
             file_summaries: 文件摘要
             repo_id: 仓库ID
-            neo4j_client: Neo4j客户端
+            graph_db: 图数据库客户端
             llm_service: LLM服务
 
         Returns:
@@ -702,7 +685,7 @@ class ClusteringStrategy(ModuleDetectionStrategy):
         async def process_cluster(cluster: FileCluster) -> ClusterModuleResult:
             async with semaphore:
                 return await self._detect_modules_in_cluster(
-                    cluster, file_summaries, repo_id, neo4j_client, llm_service
+                    cluster, file_summaries, repo_id, graph_db, llm_service
                 )
 
         # 并行处理所有簇
@@ -714,7 +697,7 @@ class ClusteringStrategy(ModuleDetectionStrategy):
         cluster: FileCluster,
         file_summaries: Dict[str, str],
         repo_id: str,
-        neo4j_client: GraphDatabaseClient,
+        graph_db: GraphDatabaseClient,
         llm_service: Any,
     ) -> ClusterModuleResult:
         """检测单个簇内的模块.
@@ -723,7 +706,7 @@ class ClusteringStrategy(ModuleDetectionStrategy):
             cluster: 文件簇
             file_summaries: 文件摘要
             repo_id: 仓库ID
-            neo4j_client: Neo4j客户端
+            graph_db: 图数据库客户端
             llm_service: LLM服务
 
         Returns:
@@ -732,7 +715,7 @@ class ClusteringStrategy(ModuleDetectionStrategy):
         try:
             # 构建簇的结构JSON
             structure_json = await self._build_cluster_structure_json(
-                cluster, file_summaries, repo_id, neo4j_client
+                cluster, file_summaries, repo_id, graph_db
             )
 
             # 构建Prompt
@@ -764,7 +747,7 @@ class ClusteringStrategy(ModuleDetectionStrategy):
         cluster: FileCluster,
         file_summaries: Dict[str, str],
         repo_id: str,
-        neo4j_client: GraphDatabaseClient,
+        graph_db: GraphDatabaseClient,
     ) -> Dict:
         """构建簇的结构JSON.
 
@@ -772,7 +755,7 @@ class ClusteringStrategy(ModuleDetectionStrategy):
             cluster: 文件簇
             file_summaries: 文件摘要
             repo_id: 仓库ID
-            neo4j_client: Neo4j客户端
+            graph_db: 图数据库客户端
 
         Returns:
             结构JSON字典
@@ -784,7 +767,7 @@ class ClusteringStrategy(ModuleDetectionStrategy):
 
             # 查询文件相关的类和关键方法
             classes, key_methods = await self._get_file_classes_and_methods(
-                file_id, neo4j_client
+                file_id, graph_db
             )
 
             file_data = {
@@ -822,41 +805,48 @@ class ClusteringStrategy(ModuleDetectionStrategy):
     async def _get_file_classes_and_methods(
         self,
         file_id: str,
-        neo4j_client: GraphDatabaseClient,
+        graph_db: GraphDatabaseClient,
     ) -> Tuple[List[Dict], List[Dict]]:
         """获取文件的类和方法信息.
 
         Args:
-            file_id: 文件ID
-            neo4j_client: Neo4j客户端
+            file_id: 文件ID，格式为 "file_{repo_name}_{file_path}"
+            graph_db: 图数据库客户端
 
         Returns:
             (类列表, 关键方法列表)
         """
-        # 查询类
-        class_query = """
-        MATCH (c:Class {file_id: $file_id})
-        RETURN c.name as name, c.summary as summary
-        ORDER BY c.name
-        """
-        classes = await neo4j_client.execute_query(
-            class_query, {"file_id": file_id}
-        )
+        # 从 file_id 提取 file_path
+        # file_id 格式: file_{repo_name}_{file_path}
+        file_path = self._extract_file_path_from_id(file_id)
 
-        # 查询关键方法（按被调用次数排序）
-        method_query = """
-        MATCH (m:Method {file_id: $file_id})
-        OPTIONAL MATCH (m)-[:CALL]->(callee:Method)
-        RETURN m.name as name, m.summary as summary,
-               count(callee) as callee_count
-        ORDER BY callee_count DESC
-        LIMIT 5
-        """
-        methods = await neo4j_client.execute_query(
-            method_query, {"file_id": file_id}
-        )
+        # 使用抽象基类方法查询类和方法
+        classes = await graph_db.get_classes_by_file_path(file_path)
+        methods = await graph_db.get_methods_by_file_path(file_path, limit=5)
 
         return classes, methods
+
+    def _extract_file_path_from_id(self, file_id: str) -> str:
+        """从文件ID中提取文件路径.
+
+        file_id 格式: file_{repo_name}_{file_path}
+        例如: file_my-repo_src/main.py -> src/main.py
+
+        Args:
+            file_id: 文件ID
+
+        Returns:
+            文件路径
+        """
+        # 移除前缀 "file_"
+        if file_id.startswith("file_"):
+            remaining = file_id[5:]  # 跳过 "file_"
+            # 找到第一个下划线后的内容（repo_name 和 file_path 的分隔）
+            parts = remaining.split("_", 1)
+            if len(parts) >= 2:
+                return parts[1]  # 返回 file_path 部分
+            return remaining
+        return file_id
 
     def _summarize_external_edges(
         self, external_edges: List[Tuple[str, str, int]]
@@ -1237,7 +1227,7 @@ class ClusteringStrategy(ModuleDetectionStrategy):
         modules: List[MergedModule],
         file_summaries: Dict[str, str],
         repo_id: str,
-        neo4j_client: GraphDatabaseClient,
+        graph_db: GraphDatabaseClient,
         llm_service: Any,
     ) -> None:
         """Phase 4: 工作流识别.
@@ -1248,7 +1238,7 @@ class ClusteringStrategy(ModuleDetectionStrategy):
             modules: 模块列表
             file_summaries: 文件摘要
             repo_id: 仓库ID
-            neo4j_client: Neo4j客户端
+            graph_db: 图数据库客户端
             llm_service: LLM服务
         """
         for module in modules:
@@ -1257,7 +1247,7 @@ class ClusteringStrategy(ModuleDetectionStrategy):
 
             # 基于方法调用链识别工作流
             workflows = await self._detect_module_workflows(
-                module, file_summaries, repo_id, neo4j_client, llm_service
+                module, file_summaries, repo_id, graph_db, llm_service
             )
             module.workflows = workflows
 
@@ -1266,7 +1256,7 @@ class ClusteringStrategy(ModuleDetectionStrategy):
         module: MergedModule,
         file_summaries: Dict[str, str],
         repo_id: str,
-        neo4j_client: GraphDatabaseClient,
+        graph_db: GraphDatabaseClient,
         llm_service: Any,
     ) -> List[WorkflowInfo]:
         """检测模块的工作流.
@@ -1275,7 +1265,7 @@ class ClusteringStrategy(ModuleDetectionStrategy):
             module: 模块
             file_summaries: 文件摘要
             repo_id: 仓库ID
-            neo4j_client: Neo4j客户端
+            graph_db: 图数据库客户端
             llm_service: LLM服务
 
         Returns:
@@ -1283,7 +1273,7 @@ class ClusteringStrategy(ModuleDetectionStrategy):
         """
         # 获取模块内方法调用链
         call_chains = await self._get_module_call_chains(
-            module.file_ids, neo4j_client
+            module.file_ids, graph_db
         )
 
         if not call_chains:
@@ -1322,27 +1312,23 @@ class ClusteringStrategy(ModuleDetectionStrategy):
     async def _get_module_call_chains(
         self,
         file_ids: List[str],
-        neo4j_client: GraphDatabaseClient,
+        graph_db: GraphDatabaseClient,
     ) -> List[Dict]:
         """获取模块内方法调用链.
 
         Args:
             file_ids: 文件ID列表
-            neo4j_client: Neo4j客户端
+            graph_db: 图数据库客户端
 
         Returns:
             调用链列表
         """
-        query = """
-        MATCH (m:Method)
-        WHERE m.file_id IN $file_ids
-        OPTIONAL MATCH (m)-[:CALL]->(callee:Method)
-        WHERE callee.file_id IN $file_ids
-        RETURN m.name as method_name, m.file_id as file_id,
-               collect(DISTINCT callee.name) as callees
-        LIMIT 50
-        """
-        return await neo4j_client.execute_query(query, {"file_ids": file_ids})
+        # 将 file_ids 转换为 file_paths
+        file_paths = [self._extract_file_path_from_id(fid) for fid in file_ids]
+
+        return await graph_db.get_method_call_chains_by_file_paths(
+            file_paths, limit=50
+        )
 
     def _build_workflow_detection_prompt(
         self, module: MergedModule, call_chains: List[Dict]
@@ -1428,16 +1414,16 @@ class ClusteringStrategy(ModuleDetectionStrategy):
         self,
         modules: List[MergedModule],
         repo_id: str,
-        neo4j_client: GraphDatabaseClient,
+        helper: GraphHelper,
     ) -> Tuple[List[str], List[str]]:
         """Phase 5: 语义图构建.
 
-        将识别结果持久化到Neo4j。
+        将识别结果持久化到图数据库。
 
         Args:
             modules: 模块列表
             repo_id: 仓库ID
-            neo4j_client: Neo4j客户端
+            helper: GraphHelper 实例
 
         Returns:
             (module_ids, workflow_ids)
@@ -1447,7 +1433,7 @@ class ClusteringStrategy(ModuleDetectionStrategy):
 
         for module in modules:
             # 创建Module节点
-            neo4j_module = Module(
+            module_node = Module(
                 id=module.id,
                 name=module.name,
                 type="Module",
@@ -1459,33 +1445,23 @@ class ClusteringStrategy(ModuleDetectionStrategy):
                 confidence=module.confidence,
             )
 
-            module_props = neo4j_module.to_dict()
-            module_props["repo"] = repo_id
-            await neo4j_client.merge_node(
-                label="Module",
-                key_property="id",
-                key_value=module.id,
-                properties=module_props,
-            )
+            # 创建 Module 节点
+            await helper.create_module(module_node)
             module_ids.append(module.id)
 
             # 关联文件到Module
             for file_id in module.file_ids:
-                await neo4j_client.create_relationship(
+                await helper.create_belong_to_relationship(
+                    from_id=file_id,
+                    to_id=module.id,
                     from_label="File",
-                    from_key="id",
-                    from_value=file_id,
-                    to_label="Module",
-                    to_key="id",
-                    to_value=module.id,
-                    rel_type="BELONG_TO",
                 )
 
             # 创建Workflow节点
             for workflow in module.workflows:
                 workflow_id = f"workflow_{uuid4().hex[:8]}"
 
-                neo4j_workflow = Workflow(
+                workflow_node = Workflow(
                     id=workflow_id,
                     name=workflow.name,
                     type="Workflow",
@@ -1498,37 +1474,23 @@ class ClusteringStrategy(ModuleDetectionStrategy):
                     module_id=module.id,
                 )
 
-                workflow_props = neo4j_workflow.to_dict()
-                workflow_props["repo"] = repo_id
-                await neo4j_client.merge_node(
-                    label="Workflow",
-                    key_property="id",
-                    key_value=workflow_id,
-                    properties=workflow_props,
-                )
+                # 创建 Workflow 节点
+                await helper.create_workflow(workflow_node)
                 workflow_ids.append(workflow_id)
 
                 # 关联Workflow到Module
-                await neo4j_client.create_relationship(
+                await helper.create_belong_to_relationship(
+                    from_id=workflow_id,
+                    to_id=module.id,
                     from_label="Workflow",
-                    from_key="id",
-                    from_value=workflow_id,
-                    to_label="Module",
-                    to_key="id",
-                    to_value=module.id,
-                    rel_type="BELONG_TO",
                 )
 
                 # 关联文件到Workflow
                 for file_id in workflow.files:
-                    await neo4j_client.create_relationship(
+                    await helper.create_belong_to_relationship(
+                        from_id=file_id,
+                        to_id=workflow_id,
                         from_label="File",
-                        from_key="id",
-                        from_value=file_id,
-                        to_label="Workflow",
-                        to_key="id",
-                        to_value=workflow_id,
-                        rel_type="BELONG_TO",
                     )
 
         return module_ids, workflow_ids
