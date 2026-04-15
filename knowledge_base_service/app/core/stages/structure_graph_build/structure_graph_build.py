@@ -11,23 +11,92 @@
 """
 
 import asyncio
-import fnmatch
 import logging
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Callable
-
-from gitignore_parser import parse_gitignore
+from typing import List, Optional
 
 from app.config import get_settings
 from app.core.pipeline import PipelineContext, PipelineStageHandler
+from app.core.stages.structure_graph_build.filters import (
+    FileFilter,
+    FilterResult,
+    GitignoreFilter,
+    PatternFilter,
+)
+from app.domain.analyzer import ParsedSymbol, get_analyzer_for_file, is_supported_file
 from app.domain.graph import Class, Directory, File, GraphHelper, Method, Repository
 from app.domain.models.pipeline import PipelineStage, PipelineStatus, StageResult
-from app.domain.analyzer import get_analyzer_for_file, ParsedSymbol, is_supported_file
 from app.infrastructure.db import get_graph_db_client
 
 logger = logging.getLogger(__name__)
+
+
+class FilterChain:
+    """文件过滤器链.
+
+    组合多个过滤器，按顺序执行过滤检查。
+    提供统一的过滤接口，便于管理和扩展。
+    """
+
+    def __init__(self):
+        self._filters: List[FileFilter] = []
+
+    def add_filter(self, filter_item: FileFilter) -> "FilterChain":
+        """添加过滤器到链尾.
+
+        Args:
+            filter_item: 要添加的过滤器
+
+        Returns:
+            self: 支持链式调用
+        """
+        self._filters.append(filter_item)
+        return self
+
+    def should_filter(self, path: Path, relative_path: str) -> FilterResult:
+        """执行过滤检查.
+
+        依次调用所有过滤器，直到有一个过滤器返回忽略。
+
+        Args:
+            path: 文件的绝对路径
+            relative_path: 相对于仓库根目录的路径
+
+        Returns:
+            FilterResult: 过滤结果
+        """
+        for filter_item in self._filters:
+            result = filter_item.should_filter(path, relative_path)
+            if result.should_ignore:
+                return result
+        return FilterResult(should_ignore=False)
+
+    @classmethod
+    def create_default_chain(cls, repo_root: Path) -> "FilterChain":
+        """创建默认的过滤器链.
+
+        默认链包含:
+        1. 默认排除模式过滤器（忽略常见临时文件和目录）
+        2. Gitignore 过滤器（根据 .gitignore 文件过滤）
+
+        Args:
+            repo_root: 仓库根目录路径
+
+        Returns:
+            FilterChain: 配置好的过滤器链
+        """
+        chain = cls()
+
+        # 1. 添加默认排除模式过滤器
+        chain.add_filter(PatternFilter.default_exclude_patterns())
+
+        # 2. 添加 gitignore 过滤器
+        chain.add_filter(GitignoreFilter.from_repo_root(repo_root))
+
+        logger.info(f"Created default filter chain with {len(chain._filters)} filters")
+        return chain
 
 
 class StructureGraphBuildStage(PipelineStageHandler):
@@ -56,7 +125,8 @@ class StructureGraphBuildStage(PipelineStageHandler):
 
     def __init__(self):
         self.settings = get_settings()
-        self.graph_helper: Optional[GraphHelper] = None
+        graph_db = get_graph_db_client()
+        self.graph_helper = GraphHelper(graph_db)
 
     async def execute(self, context: PipelineContext) -> StageResult:
         """执行结构图构建.
@@ -68,11 +138,8 @@ class StructureGraphBuildStage(PipelineStageHandler):
             阶段执行结果
         """
         try:
-            graph_db = get_graph_db_client()
-            self.graph_helper = GraphHelper(graph_db)
-
             # 从 context 获取 repo_id（初始化请求传入的）
-            pipeline_repo_id = getattr(context, 'repo_id', context.repo_name)
+            pipeline_repo_id = getattr(context, "repo_id", context.repo_name)
 
             # 1. 遍历仓库并直接创建结构节点
             context.stage_msg = "正在遍历仓库文件..."
@@ -95,8 +162,16 @@ class StructureGraphBuildStage(PipelineStageHandler):
 
             # 2. 解析代码文件并创建 File/Class/Method 节点
             context.stage_msg = f"正在解析 {len(files)} 个代码文件..."
-            file_node_ids, class_node_ids, method_node_ids = await self._process_code_files(
-                files, directories, repository.id, context.repo_name, context.repo_path, context, pipeline_repo_id
+            file_node_ids, class_node_ids, method_node_ids = (
+                await self._process_code_files(
+                    files,
+                    directories,
+                    repository.id,
+                    context.repo_name,
+                    context.repo_path,
+                    context,
+                    pipeline_repo_id,
+                )
             )
             node_ids["file_ids"] = file_node_ids
             node_ids["class_ids"] = class_node_ids
@@ -120,9 +195,9 @@ class StructureGraphBuildStage(PipelineStageHandler):
                 stage=self.stage,
                 status=PipelineStatus.COMPLETED,
                 message=f"Structure graph built: {len(directories)} directories, "
-                        f"{len(file_node_ids)} files, "
-                        f"{len(class_node_ids)} classes, "
-                        f"{len(method_node_ids)} methods",
+                f"{len(file_node_ids)} files, "
+                f"{len(class_node_ids)} classes, "
+                f"{len(method_node_ids)} methods",
                 metadata=metadata,
             )
 
@@ -163,14 +238,8 @@ class StructureGraphBuildStage(PipelineStageHandler):
         )
         await self.graph_helper.create_repository(repository)
 
-        # 加载 .gitignore
-        gitignore_path = repo_root / ".gitignore"
-        matches_gitignore: Optional[Callable] = None
-        if gitignore_path.exists():
-            try:
-                matches_gitignore = parse_gitignore(gitignore_path)
-            except Exception as e:
-                logger.warning(f"Failed to parse .gitignore: {e}")
+        # 创建默认过滤器链
+        filter_chain = FilterChain.create_default_chain(repo_root)
 
         directories: List[Directory] = []
         code_files: List[File] = []
@@ -181,8 +250,10 @@ class StructureGraphBuildStage(PipelineStageHandler):
                 relative_path = path.relative_to(repo_root)
                 str_path = str(relative_path).replace("\\", "/")
 
-                # 检查是否应该忽略
-                if self._should_ignore(str_path, path, matches_gitignore):
+                # 使用过滤器链检查是否应该忽略
+                filter_result = filter_chain.should_filter(path, str_path)
+                if filter_result.should_ignore:
+                    logger.debug(f"Filtered out {str_path}: {filter_result.reason}")
                     continue
 
                 if path.is_dir():
@@ -198,7 +269,9 @@ class StructureGraphBuildStage(PipelineStageHandler):
                     parent_id = self._get_parent_id(directory.path, repository.id)
                     # 如果 parent_id 为 None，使用 repo_id 作为父节点
                     effective_parent_id = parent_id if parent_id else repository.id
-                    await self.graph_helper.create_directory(directory, effective_parent_id)
+                    await self.graph_helper.create_directory(
+                        directory, effective_parent_id
+                    )
                     directories.append(directory)
 
                 elif path.is_file():
@@ -226,67 +299,6 @@ class StructureGraphBuildStage(PipelineStageHandler):
 
         return repository, directories, code_files
 
-    def _should_ignore(
-        self,
-        str_path: str,
-        path: Path,
-        matches_gitignore: Optional[Callable],
-    ) -> bool:
-        """检查路径是否应该被忽略.
-
-        Args:
-            str_path: 相对路径字符串
-            path: Path 对象
-            matches_gitignore: gitignore 匹配函数
-
-        Returns:
-            是否应该忽略
-        """
-        # 检查默认排除模式
-        for pattern in self.settings.default_exclude_patterns:
-            if self._match_pattern(str_path, pattern):
-                return True
-
-        # 检查 .gitignore
-        if matches_gitignore and matches_gitignore(path):
-            return True
-
-        # 检查用户配置的排除模式
-        config_patterns = self.settings.default_exclude_patterns
-        for pattern in config_patterns:
-            if self._match_pattern(str_path, pattern):
-                return True
-
-        return False
-
-    def _match_pattern(self, path: str, pattern: str) -> bool:
-        """匹配路径模式.
-
-        Args:
-            path: 文件路径
-            pattern: 匹配模式
-
-        Returns:
-            是否匹配
-        """
-        # 处理 **/ 前缀
-        if pattern.startswith("**/"):
-            suffix = pattern[3:]
-            return fnmatch.fnmatch(path, suffix) or any(
-                fnmatch.fnmatch(str(p), suffix)
-                for p in Path(path).parents
-            )
-
-        # 处理 /** 后缀
-        if pattern.endswith("/**"):
-            prefix = pattern[:-3]
-            return path.startswith(prefix)
-
-        # 处理通配符
-        return fnmatch.fnmatch(path, pattern) or fnmatch.fnmatch(
-            Path(path).name, pattern
-        )
-
     def _determine_file_type(self, path: Path) -> str:
         """确定文件类型.
 
@@ -300,20 +312,54 @@ class StructureGraphBuildStage(PipelineStageHandler):
 
         # 代码文件
         code_extensions = {
-            ".py", ".java", ".js", ".ts", ".go", ".rs", ".cpp", ".c", ".h",
-            ".hpp", ".cs", ".rb", ".php", ".swift", ".kt", ".scala",
-            ".r", ".m", ".mm", ".groovy", ".clj", ".erl", ".ex", ".exs",
+            ".py",
+            ".java",
+            ".js",
+            ".ts",
+            ".go",
+            ".rs",
+            ".cpp",
+            ".c",
+            ".h",
+            ".hpp",
+            ".cs",
+            ".rb",
+            ".php",
+            ".swift",
+            ".kt",
+            ".scala",
+            ".r",
+            ".m",
+            ".mm",
+            ".groovy",
+            ".clj",
+            ".erl",
+            ".ex",
+            ".exs",
         }
 
         # 文档文件
         doc_extensions = {
-            ".md", ".rst", ".txt", ".adoc", ".org",
+            ".md",
+            ".rst",
+            ".txt",
+            ".adoc",
+            ".org",
         }
 
         # 配置文件
         config_extensions = {
-            ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg",
-            ".conf", ".properties", ".xml", ".env", ".env.example",
+            ".json",
+            ".yaml",
+            ".yml",
+            ".toml",
+            ".ini",
+            ".cfg",
+            ".conf",
+            ".properties",
+            ".xml",
+            ".env",
+            ".env.example",
         }
 
         if suffix in code_extensions:
@@ -350,10 +396,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
             (file_ids, class_ids, method_ids)
         """
         # 过滤出支持语言的代码文件
-        code_files = [
-            f for f in code_files
-            if is_supported_file(f.path)
-        ]
+        code_files = [f for f in code_files if is_supported_file(f.path)]
 
         total_files = len(code_files)
         file_ids: List[str] = []
@@ -365,11 +408,13 @@ class StructureGraphBuildStage(PipelineStageHandler):
         # 批量处理
         batch_size = 50
         for i in range(0, total_files, batch_size):
-            batch = code_files[i:i + batch_size]
+            batch = code_files[i : i + batch_size]
 
             # 并发处理
             tasks = [
-                self._parse_and_store_file(f, directories, repo_id, repo_name, repo_path, pipeline_repo_id)
+                self._parse_and_store_file(
+                    f, directories, repo_id, repo_name, repo_path, pipeline_repo_id
+                )
                 for f in batch
             ]
             batch_results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -384,8 +429,12 @@ class StructureGraphBuildStage(PipelineStageHandler):
                     method_ids.extend(m_ids)
 
             progress = min(100, int((i + len(batch)) / total_files * 100))
-            context.stage_msg = f"正在解析代码文件: {i + len(batch)}/{total_files} ({progress}%)"
-            logger.info(f"Processing progress: {progress}% ({i + len(batch)}/{total_files})")
+            context.stage_msg = (
+                f"正在解析代码文件: {i + len(batch)}/{total_files} ({progress}%)"
+            )
+            logger.info(
+                f"Processing progress: {progress}% ({i + len(batch)}/{total_files})"
+            )
 
         context.stage_msg = f"已创建 {len(file_ids)} 个File节点, {len(class_ids)} 个Class节点, {len(method_ids)} 个Method节点"
         logger.info(f"Created {len(class_ids)} Class nodes")
@@ -450,7 +499,12 @@ class StructureGraphBuildStage(PipelineStageHandler):
         class_name_to_id: dict = {}
         for class_symbol in parse_result.classes:
             class_node_id = await self._create_class_from_symbol(
-                class_symbol, file_id, file_node.path, parse_result.language, repo_name, pipeline_repo_id
+                class_symbol,
+                file_id,
+                file_node.path,
+                parse_result.language,
+                repo_name,
+                pipeline_repo_id,
             )
             class_ids.append(class_node_id)
             class_name_to_id[class_symbol.name] = class_node_id
@@ -458,7 +512,10 @@ class StructureGraphBuildStage(PipelineStageHandler):
         # 创建 Method 节点
         for method_symbol in parse_result.methods:
             # 根据 parent_name 判断是类方法还是独立函数
-            if method_symbol.parent_name and method_symbol.parent_name in class_name_to_id:
+            if (
+                method_symbol.parent_name
+                and method_symbol.parent_name in class_name_to_id
+            ):
                 # 类方法
                 class_node_id = class_name_to_id[method_symbol.parent_name]
                 method_node_id = await self._create_method_from_symbol(
@@ -545,7 +602,9 @@ class StructureGraphBuildStage(PipelineStageHandler):
             创建的 Method 节点ID
         """
         if class_name:
-            method_node_id = f"method_{repo_name}_{file_path}_{class_name}_{method_symbol.name}"
+            method_node_id = (
+                f"method_{repo_name}_{file_path}_{class_name}_{method_symbol.name}"
+            )
         else:
             method_node_id = f"method_{repo_name}_{file_path}_{method_symbol.name}"
 
@@ -570,6 +629,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
     def _is_supported_language(self, suffix: str) -> bool:
         """检查是否支持该语言."""
         from app.domain.analyzer import get_analyzer_for_extension
+
         return get_analyzer_for_extension(suffix) is not None
 
     def _get_parent_directory_id(
@@ -599,4 +659,3 @@ class StructureGraphBuildStage(PipelineStageHandler):
             return repo_id
 
         return f"dir_{repo_id.replace('repo_', '')}_{parent_path}"
-

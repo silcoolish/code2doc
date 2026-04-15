@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Any
 
 from app.config import get_settings
 from app.infrastructure.db import GraphDatabaseClient, VectorDatabaseClient
-from app.domain.llm.client import get_llm_service
+from app.domain.llm import get_llm_service
 
 logger = logging.getLogger(__name__)
 

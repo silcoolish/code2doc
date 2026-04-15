@@ -45,7 +45,7 @@ class FlowchartGenerationStage(PipelineStageHandler):
     weight = 1.0  # 流程图生成
 
     def __init__(self):
-        self.graph_db: Optional[GraphDatabaseClient] = None
+        self.graph_db: GraphDatabaseClient = get_graph_db_client()
         self.settings = get_settings()
 
     async def execute(self, context: PipelineContext) -> StageResult:
@@ -58,7 +58,6 @@ class FlowchartGenerationStage(PipelineStageHandler):
             阶段执行结果
         """
         try:
-            self.graph_db = get_graph_db_client()
             repo_id = getattr(context, 'repo_id', context.repo_name)
 
             # 确保图片目录存在

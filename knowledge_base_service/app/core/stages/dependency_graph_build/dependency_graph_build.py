@@ -40,7 +40,8 @@ class DependencyGraphBuildStage(PipelineStageHandler):
     weight = 2.0  # 依赖分析
 
     def __init__(self):
-        self.graph_helper: Optional[GraphHelper] = None
+        graph_db = get_graph_db_client()
+        self.graph_helper = GraphHelper(graph_db)
 
     async def execute(self, context: PipelineContext) -> StageResult:
         """执行依赖图构建.
@@ -52,8 +53,6 @@ class DependencyGraphBuildStage(PipelineStageHandler):
             阶段执行结果
         """
         try:
-            graph_db = get_graph_db_client()
-            self.graph_helper = GraphHelper(graph_db)
             repo_id = getattr(context, 'repo_id', context.repo_name)
 
             # 1. 构建文件依赖（USE 关系）

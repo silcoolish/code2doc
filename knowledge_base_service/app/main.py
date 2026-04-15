@@ -20,12 +20,14 @@ from app.mcp import router as mcp_router
 from app.domain.models.pipeline import PipelineStage
 
 # 导入所有阶段处理器
-from app.core.stages.structure_graph_build import StructureGraphBuildStage
-from app.core.stages.dependency_graph_build import DependencyGraphBuildStage
-from app.core.stages.semantic_analysis import SemanticAnalysisStage
-from app.core.stages.flowchart_generation import FlowchartGenerationStage
-from app.core.stages.vector_db_store import VectorDBStoreStage
-from app.core.stages.module_detection import ModuleDetectionStage
+from app.core.stages import (
+    StructureGraphBuildStage,
+    DependencyGraphBuildStage,
+    SemanticAnalysisStage,
+    FlowchartGenerationStage,
+    VectorDBStoreStage,
+    ModuleDetectionStage,
+)
 
 # 确保日志目录存在
 log_dir = Path("./log")
@@ -93,10 +95,10 @@ async def lifespan(app: FastAPI):
 
     # 初始化 LLM 上下文窗口
     try:
-        from app.domain.llm.client import get_llm_service
+        from app.infrastructure.llm import LLMClient
 
-        llm_service = get_llm_service()
-        await llm_service.initialize_context_window()
+        llm_client = LLMClient()
+        await llm_client.initialize_context_window()
     except Exception as e:
         logger.error(f"Failed to initialize LLM context window: {e}")
         # 服务可以继续启动，使用默认配置值

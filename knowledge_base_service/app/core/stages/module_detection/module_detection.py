@@ -5,7 +5,7 @@ from typing import Any, Dict, Optional
 
 from app.config import get_settings
 from app.core.pipeline import PipelineContext, PipelineStageHandler
-from app.domain.llm.client import get_llm_service
+from app.domain.llm import get_llm_service
 from app.domain.models.pipeline import PipelineStage, PipelineStatus, StageResult
 from app.infrastructure.db.graph.base_client import GraphDatabaseClient
 from app.infrastructure.db import get_graph_db_client
@@ -47,6 +47,7 @@ class ModuleDetectionStage(PipelineStageHandler):
         strategy_config: Optional[Dict[str, Any]] = None,
     ):
         self.llm_service = get_llm_service()
+        self.graph_db: GraphDatabaseClient = get_graph_db_client()
         self._strategy = None
         self._strategy_name = strategy_name
         self._strategy_config = strategy_config or {}
@@ -121,15 +122,12 @@ class ModuleDetectionStage(PipelineStageHandler):
             context.stage_msg = f"使用 {strategy.name} 策略进行模块检测..."
             logger.info(f"Starting module detection with {strategy.name} strategy")
 
-            # 获取图数据库客户端
-            graph_db: GraphDatabaseClient = get_graph_db_client()
-
             # 执行策略检测
             result = await strategy.detect_modules(
                 context=context,
                 repo_id=repo_id,
                 file_summaries=file_summaries,
-                graph_db=graph_db,
+                graph_db=self.graph_db,
                 llm_service=self.llm_service,
             )
 

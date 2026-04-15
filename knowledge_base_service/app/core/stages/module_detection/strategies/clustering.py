@@ -718,18 +718,29 @@ class ClusteringStrategy(ModuleDetectionStrategy):
                 cluster, file_summaries, repo_id, graph_db
             )
 
-            # 构建Prompt
-            prompt = self._build_cluster_detection_prompt(structure_json)
+            # 调用LLMService进行模块检测
+            module_data_list = await llm_service.detect_modules_in_cluster(structure_json)
 
-            # 调用LLM
-            response = await llm_service.complete(
-                prompt=prompt,
-                system_prompt="你是软件架构专家。分析代码结构并识别功能模块，所有描述必须使用中文。",
-                temperature=0.3,
-            )
-
-            # 解析结果
-            modules = self._parse_cluster_detection_response(response)
+            # 转换为ModuleInfo对象
+            modules = [
+                ModuleInfo(
+                    name=m.get("name", "Unknown Module"),
+                    description=m.get("description", ""),
+                    detail=m.get("detail", ""),
+                    files=m.get("files", []),
+                    workflows=[
+                        WorkflowInfo(
+                            name=wf.get("name", "Unknown"),
+                            description=wf.get("description", ""),
+                            files=wf.get("files", []),
+                        )
+                        for wf in m.get("workflows", [])
+                    ],
+                    confidence=m.get("confidence", 0.8),
+                    cross_module_deps=m.get("cross_module_dependencies", []),
+                )
+                for m in module_data_list
+            ]
 
             return ClusterModuleResult(
                 cluster_id=cluster.id,
@@ -1286,17 +1297,24 @@ class ClusteringStrategy(ModuleDetectionStrategy):
                 )
             ]
 
-        # 构建Prompt识别工作流
-        prompt = self._build_workflow_detection_prompt(module, call_chains)
-
         try:
-            response = await llm_service.complete(
-                prompt=prompt,
-                system_prompt="你是业务流程分析专家。基于方法调用链识别业务流程，所有描述必须使用中文。",
-                temperature=0.3,
+            # 调用LLMService进行工作流检测
+            workflow_data_list = await llm_service.detect_module_workflows(
+                module_name=module.name,
+                module_description=module.description,
+                module_file_count=module.file_count,
+                call_chains=call_chains,
             )
 
-            workflows = self._parse_workflow_response(response)
+            # 转换为WorkflowInfo对象
+            workflows = [
+                WorkflowInfo(
+                    name=wf.get("name", "Unknown"),
+                    description=wf.get("description", ""),
+                    files=wf.get("key_files", []),
+                )
+                for wf in workflow_data_list
+            ]
             return workflows
 
         except Exception as e:

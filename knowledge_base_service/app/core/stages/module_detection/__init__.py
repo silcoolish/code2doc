@@ -33,6 +33,39 @@ Strategies:
     - **clustering**: 分层聚类策略，支持任意规模仓库
 """
 
-from .stage import ModuleDetectionStage
+from .module_detection import ModuleDetectionStage
+from .strategies import (
+    ModuleDetectionStrategy,
+    ModuleDetectionStrategyFactory,
+    SimpleTruncationStrategy,
+    ModuleDetectionResult,
+)
+from .models import (
+    FileCluster,
+    WorkflowInfo,
+    ModuleInfo,
+    ClusterModuleResult,
+    MergedModule,
+    FileDependency,
+)
 
-__all__ = ["ModuleDetectionStage"]
+# 延迟导入 ClusteringStrategy 避免循环依赖
+try:
+    from .strategies import ClusteringStrategy
+except ImportError:
+    ClusteringStrategy = None
+
+__all__ = [
+    "ModuleDetectionStage",
+    "ModuleDetectionStrategy",
+    "ModuleDetectionStrategyFactory",
+    "SimpleTruncationStrategy",
+    "ClusteringStrategy",
+    "ModuleDetectionResult",
+    "FileCluster",
+    "WorkflowInfo",
+    "ModuleInfo",
+    "ClusterModuleResult",
+    "MergedModule",
+    "FileDependency",
+]

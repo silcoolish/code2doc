@@ -20,7 +20,7 @@ from app.domain.models.vector import (
     MethodSummaryRecord,
     SemanticSummaryRecord,
 )
-from app.domain.llm.client import get_llm_service
+from app.domain.llm import get_llm_service
 from app.infrastructure.db import (
     GraphDatabaseClient,
     VectorDatabaseClient,
@@ -52,6 +52,8 @@ class VectorDBStoreStage(PipelineStageHandler):
     def __init__(self):
         self.settings = get_settings()
         self.llm_service = get_llm_service()
+        self.graph_db: GraphDatabaseClient = get_graph_db_client()
+        self.vector_db: VectorDatabaseClient = get_vector_db_client()
 
     async def execute(self, context: PipelineContext) -> StageResult:
         """执行向量存储.
@@ -69,8 +71,6 @@ class VectorDBStoreStage(PipelineStageHandler):
             阶段执行结果
         """
         try:
-            graph_db: GraphDatabaseClient = get_graph_db_client()
-            vector_db: VectorDatabaseClient = get_vector_db_client()
             repo_id = getattr(context, 'repo_id', context.repo_name)  # 获取初始化时传入的 repo_id
             batch_size = self.settings.batch_size
 
@@ -97,8 +97,8 @@ class VectorDBStoreStage(PipelineStageHandler):
             for node_type, stat_key, collection_name, is_semantic in node_type_configs:
                 context.stage_msg = f"正在处理 {node_type} 节点..."
                 count = await self._process_node_type_in_batches(
-                    graph_db=graph_db,
-                    vector_db=vector_db,
+                    graph_db=self.graph_db,
+                    vector_db=self.vector_db,
                     repo_id=repo_id,
                     node_type=node_type,
                     collection_name=collection_name,
