@@ -9,8 +9,8 @@ from typing import Dict, Optional
 from app.config import get_settings
 from app.core.generator import DocumentGenerator
 from app.core.state import AgentState, GenerationStatus, create_initial_state
-from app.infrastructure.docx_handler import DocxHandler
 from app.infrastructure.llm_client import LLMClientFactory
+from app.infrastructure.workspace import WorkspaceServiceAdapter
 from app.infrastructure.mcp_client import MCPClient
 from app.utils.logger import get_logger
 
@@ -56,10 +56,7 @@ class DocumentEngine:
         """初始化文档生成引擎."""
         self.settings = get_settings()
         self.mcp_server_url = self.settings.mcp_server_url
-        self.output_dir = self.settings.output_path
-
-        # docx处理器
-        self.docx_handler = DocxHandler()
+        self.workspace_adapter = WorkspaceServiceAdapter()
 
         # 运行中的任务
         self._running_tasks: Dict[str, asyncio.Task] = {}
@@ -68,59 +65,42 @@ class DocumentEngine:
         logger.info(
             "document_engine_initialized",
             mcp_server_url=self.mcp_server_url,
-            output_dir=str(self.output_dir),
         )
 
     async def start_generation(
         self,
         repo_id: str,
-        template_path: str,
+        template_id: str,
         output_filename: Optional[str] = None,
     ) -> str:
         """启动文档生成流程.
 
         Args:
             repo_id: 仓库ID
-            template_path: 模板文件路径
-            output_filename: 输出文件名，默认自动生成
+            template_id: 文档模板ID
+            output_filename: 输出文件名（向后兼容，不再使用）
 
         Returns:
             流程ID
 
         Raises:
-            FileNotFoundError: 模板文件不存在
             ValueError: 参数无效
         """
-        # 验证模板文件
-        template_path_obj = Path(template_path)
-        if not template_path_obj.exists():
-            raise FileNotFoundError(f"Template file not found: {template_path}")
-
         # 生成流程ID
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         flow_id = f"doc_{repo_id}_{timestamp}"
-
-        # 构建输出路径
-        if not output_filename:
-            output_filename = f"{flow_id}.docx"
-        elif not output_filename.endswith(".docx"):
-            output_filename = f"{output_filename}.docx"
-
-        output_path = str(self.output_dir / output_filename)
 
         logger.info(
             "start_generation",
             flow_id=flow_id,
             repo_id=repo_id,
-            template_path=template_path,
-            output_path=output_path,
+            template_id=template_id,
         )
 
         # 初始化状态
         initial_state = create_initial_state(
             repo_id=repo_id,
-            template_path=template_path,
-            output_path=output_path,
+            template_id=template_id,
         )
         initial_state["status"] = GenerationStatus.PARSING.value
         initial_state["message"] = "等待开始生成..."
@@ -147,6 +127,8 @@ class DocumentEngine:
         logger.info(
             "run_generation_start",
             flow_id=flow_id,
+            repo_id=initial_state["repo_id"],
+            template_id=initial_state["template_id"],
         )
 
         try:
@@ -163,11 +145,14 @@ class DocumentEngine:
                     llm_client=llm_client,
                 )
 
+                # 创建workspace适配器
+                workspace_adapter = WorkspaceServiceAdapter()
+
                 # 创建文档生成器
                 document_generator = DocumentGenerator(
                     mcp_client=mcp_client,
                     content_generator=content_generator,
-                    docx_handler=self.docx_handler,
+                    workspace_adapter=workspace_adapter,
                 )
 
                 # 执行工作流
@@ -180,6 +165,7 @@ class DocumentEngine:
                     "run_generation_complete",
                     flow_id=flow_id,
                     status=final_state["status"],
+                    document_id=final_state.get("document_id"),
                 )
 
         except Exception as e:
@@ -222,8 +208,9 @@ class DocumentEngine:
                 "error": "流程不存在",
             }
 
-        total = state["total_paragraphs"]
-        current = state["current_paragraph_index"]
+        # 优先使用block相关字段，兼容paragraph字段
+        total = state.get("total_blocks", 0) or state.get("total_paragraphs", 0)
+        current = state.get("current_block_index", 0) or state.get("current_paragraph_index", 0)
         progress = (current / total * 100) if total > 0 else 0
 
         return {
@@ -234,6 +221,7 @@ class DocumentEngine:
             "current_step": current,
             "total_steps": total,
             "message": state["message"],
+            "document_id": state.get("document_id"),
             "output_path": state.get("output_path"),
             "error": state.get("error"),
         }

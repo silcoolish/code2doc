@@ -5,7 +5,7 @@ import json
 import re
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
@@ -23,6 +23,64 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 # Agent系统提示词
+BATCH_CONTENT_GENERATION_SYSTEM_PROMPT = """你是一个专业的技术文档撰写专家，正在为一款软件系统撰写设计说明文档。
+
+## 你的任务
+根据提供的代码知识库信息，一次性批量生成多个设计说明word文档的段落内容。
+
+## 可用工具
+你可以使用以下工具获取代码信息：
+- get_project_structure: 获取项目目录结构
+- search_code_nodes: 根据关键字语义查询代码节点（File, Class, Method）
+- search_semantic_nodes: 根据关键字语义查询语义节点（Module, Workflow）
+- get_modules: 获取项目的模块列表
+- get_module_workflows: 获取模块对应的工作流列表
+- get_node_dependencies: 获取节点的依赖关系
+- batch_download_flowcharts: 批量下载方法流程图图片（仅用于下载代码流程图）
+
+## 输出格式要求
+**非常重要：必须按以下JSON格式输出所有段落内容：**
+```json
+{
+  "paragraphs": [
+    {
+      "paragraph_id": "段落ID",
+      "content": "生成的段落内容",
+      "is_heading": true/false
+    },
+    ...
+  ]
+}
+```
+
+## 生成要求
+1. 每个段落内容必须准确，基于代码实际情况
+2. 语言专业、简洁、清晰，符合技术文档写作规范
+3. 标题内容要精炼，一般不超过20个字
+4. **正文内容必须是完整的段落式描述，不要简单的分点简述**
+5. **正文内容要详细说明实现原理、处理逻辑、关键步骤等，200字以上**
+6. **正文段落首行必须空两格（即段落开头添加两个全角空格"  "）**
+7. 生成内容为word文档的内容
+8. **重要：生成纯文本格式，不要包含任何Markdown标记（如#、##、**、-、*等）**
+
+## 格式示例
+错误示例（简述）：
+- 用户输入验证
+- 业务逻辑处理
+- 数据持久化存储
+
+正确示例（完整段落）：
+  本功能模块主要负责处理用户提交的订单数据。当用户在前端界面提交订单请求后，系统首先会对请求参数进行合法性验证，包括用户身份校验、商品库存检查以及价格计算核对等关键环节。验证通过后，订单数据将被写入数据库，同时触发库存扣减和消息通知等后续业务流程。系统采用事务机制确保数据一致性，并通过异步队列处理非核心业务流程，以提升整体响应性能。
+
+## 工作流程
+1. 根据所有段落的提示词确定是否需要调用工具
+2. 如果需要则调用工具获取仓库信息
+3. 综合分析后批量生成所有段落内容
+4. 确保每个段落内容完整且准确
+5. 按JSON格式输出所有段落
+
+生成完成后，直接输出JSON格式的最终结果，不需要解释过程。"""
+
 CONTENT_GENERATION_SYSTEM_PROMPT = """你是一个专业的技术文档撰写专家，正在为一款软件系统撰写设计说明文档。
 
 ## 你的任务
@@ -205,6 +263,345 @@ class ContentGenerator:
                 error=str(e),
             )
             raise
+
+    async def generate_batch(
+        self,
+        paragraphs: List[TemplateParagraph],
+        repo_id: str,
+    ) -> Dict[str, GeneratedContentResult]:
+        """批量生成多个独立段落的内容.
+
+        将多个独立的非列表段落打包到单次LLM调用中批量生成，
+        提高LLM调用利用率，减少调用次数。
+
+        Args:
+            paragraphs: 模板段落列表（必须是独立的非列表段落，无children）
+            repo_id: 仓库ID
+
+        Returns:
+            {段落ID: GeneratedContentResult} 映射
+
+        Raises:
+            RuntimeError: 批量生成失败且无法降级时
+        """
+        if not paragraphs:
+            return {}
+
+        logger.info(
+            "generate_batch_start",
+            paragraph_count=len(paragraphs),
+            paragraph_ids=[p.id for p in paragraphs],
+            repo_id=repo_id,
+        )
+
+        try:
+            # 执行批量生成
+            results = await self._execute_batch_generation(paragraphs, repo_id)
+
+            logger.info(
+                "generate_batch_complete",
+                paragraph_count=len(paragraphs),
+                result_count=len(results),
+            )
+
+            return results
+
+        except Exception as e:
+            logger.error(
+                "generate_batch_failed",
+                paragraph_count=len(paragraphs),
+                error=str(e),
+            )
+            # 降级为逐个生成
+            return await self._fallback_to_individual_generation(paragraphs, repo_id)
+
+    async def _execute_batch_generation(
+        self,
+        paragraphs: List[TemplateParagraph],
+        repo_id: str,
+    ) -> Dict[str, GeneratedContentResult]:
+        """执行批量生成.
+
+        Args:
+            paragraphs: 段落列表
+            repo_id: 仓库ID
+
+        Returns:
+            生成结果映射
+        """
+        tools = await self._load_langchain_tools()
+        llm_with_tools = self.llm.bind_tools(tools)
+
+        messages = [
+            SystemMessage(content=BATCH_CONTENT_GENERATION_SYSTEM_PROMPT),
+            HumanMessage(content=self._build_batch_task_message(paragraphs, repo_id)),
+        ]
+
+        # 执行LLM调用（带工具）
+        max_iterations = 15
+        for i in range(max_iterations):
+            response = await llm_with_tools.ainvoke(messages)
+            messages.append(response)
+
+            if hasattr(response, "tool_calls") and response.tool_calls:
+                for tool_call in response.tool_calls:
+                    tool_name = tool_call.get("name", "")
+                    tool_args = tool_call.get("args", {})
+
+                    if "repo_id" not in tool_args:
+                        tool_args["repo_id"] = repo_id
+
+                    try:
+                        result = await self.mcp_client.call_tool(tool_name, tool_args)
+                        if len(result) > 2000:
+                            result = result[:2000] + "\n... (内容已截断)"
+                    except Exception as e:
+                        result = f"工具调用失败: {str(e)}"
+
+                    messages.append(ToolMessage(
+                        content=result,
+                        tool_call_id=tool_call.get("id", ""),
+                        name=tool_name,
+                    ))
+            else:
+                break
+
+        # 解析最终响应
+        final_response = messages[-1]
+        raw_content = final_response.content if hasattr(final_response, "content") else str(final_response)
+
+        return self._parse_batch_response(raw_content, paragraphs)
+
+    async def _fallback_to_individual_generation(
+        self,
+        paragraphs: List[TemplateParagraph],
+        repo_id: str,
+    ) -> Dict[str, GeneratedContentResult]:
+        """降级为逐个生成.
+
+        当批量生成失败时，逐个生成段落作为备用方案。
+
+        Args:
+            paragraphs: 段落列表
+            repo_id: 仓库ID
+
+        Returns:
+            生成结果映射
+        """
+        logger.warning(
+            "fallback_to_individual_generation",
+            paragraph_count=len(paragraphs),
+        )
+
+        results: Dict[str, GeneratedContentResult] = {}
+
+        for paragraph in paragraphs:
+            try:
+                result_list = await self.generate(paragraph, repo_id)
+                if result_list:
+                    results[paragraph.id] = result_list[0]
+            except Exception as e:
+                logger.error(
+                    "individual_generation_failed",
+                    paragraph_id=paragraph.id,
+                    error=str(e),
+                )
+                # 创建一个错误结果
+                results[paragraph.id] = GeneratedContentResult(
+                    is_heading=paragraph.is_heading,
+                    content=f"[生成失败: {str(e)}]",
+                    children=[],
+                    images=[],
+                )
+
+        return results
+
+    def _build_batch_task_message(
+        self,
+        paragraphs: List[TemplateParagraph],
+        repo_id: str,
+    ) -> str:
+        """构建批量生成任务消息.
+
+        Args:
+            paragraphs: 段落列表
+            repo_id: 仓库ID
+
+        Returns:
+            任务消息
+        """
+        task_parts = [
+            f"仓库ID: {repo_id}",
+            "",
+            "## 需要生成的段落列表",
+            f"共 {len(paragraphs)} 个段落，请依次为每个段落生成内容。",
+            "",
+        ]
+
+        for i, paragraph in enumerate(paragraphs, 1):
+            type_desc = "标题" if paragraph.is_heading else "正文"
+            task_parts.append(f"### 段落{i}")
+            task_parts.append(f"- 段落ID: {paragraph.id}")
+            task_parts.append(f"- 类型: {type_desc}")
+            task_parts.append(f"- 主题: {paragraph.prompt}")
+
+            # 添加长度限制
+            length_constraints = []
+            if paragraph.min_length:
+                length_constraints.append(f"最少{paragraph.min_length}字")
+            if paragraph.max_length:
+                length_constraints.append(f"最多{paragraph.max_length}字")
+
+            if length_constraints:
+                task_parts.append(f"- 字数要求: {', '.join(length_constraints)}")
+
+            # 添加参考示例
+            if paragraph.example:
+                task_parts.append(f"- 参考示例: {paragraph.example}")
+
+            task_parts.append("")
+
+        task_parts.extend([
+            "## 输出要求",
+            "请按照以下JSON格式输出所有段落内容：",
+            "```json",
+            "{",
+            '  "paragraphs": [',
+        ])
+
+        for paragraph in paragraphs:
+            task_parts.extend([
+                "    {",
+                f'      "paragraph_id": "{paragraph.id}",',
+                '      "content": "生成的段落内容",',
+                f'      "is_heading": {str(paragraph.is_heading).lower()}',
+                "    },",
+            ])
+
+        task_parts.extend([
+            "  ]",
+            "}",
+            "```",
+            "",
+            "## 格式要求",
+            "- 使用纯文本格式，不要包含任何Markdown标记",
+            "- 正文必须是完整的段落式描述，不要分点简述",
+            "- 正文首行必须空两格（添加两个全角空格）",
+            "- 标题不要添加数字序号",
+            "",
+            "请开始生成。你可以使用工具来获取代码信息。",
+        ])
+
+        return "\n".join(task_parts)
+
+    def _parse_batch_response(
+        self,
+        raw_content: str,
+        paragraphs: List[TemplateParagraph],
+    ) -> Dict[str, GeneratedContentResult]:
+        """解析批量生成的响应.
+
+        Args:
+            raw_content: 原始响应内容
+            paragraphs: 原始段落列表（用于构建默认结果）
+
+        Returns:
+            生成结果映射
+        """
+        results: Dict[str, GeneratedContentResult] = {}
+
+        # 尝试提取JSON内容
+        json_content = self._extract_json_from_response(raw_content)
+
+        if json_content:
+            try:
+                data = json.loads(json_content)
+                paragraph_list = data.get("paragraphs", [])
+
+                # 构建段落ID到段落的映射
+                paragraph_map = {p.id: p for p in paragraphs}
+
+                for item in paragraph_list:
+                    paragraph_id = item.get("paragraph_id")
+                    content = item.get("content", "")
+                    is_heading = item.get("is_heading", False)
+
+                    if paragraph_id and paragraph_id in paragraph_map:
+                        paragraph = paragraph_map[paragraph_id]
+
+                        # 应用长度限制
+                        content = self._apply_length_constraints(
+                            content,
+                            paragraph.min_length,
+                            paragraph.max_length,
+                        )
+
+                        results[paragraph_id] = GeneratedContentResult(
+                            is_heading=is_heading,
+                            content=content,
+                            children=[],
+                            images=[],
+                        )
+
+                        logger.info(
+                            "batch_paragraph_parsed",
+                            paragraph_id=paragraph_id,
+                            content_length=len(content),
+                        )
+
+            except json.JSONDecodeError as e:
+                logger.error("batch_response_json_parse_failed", error=str(e))
+
+        # 为未解析到的段落创建默认结果
+        for paragraph in paragraphs:
+            if paragraph.id not in results:
+                logger.warning(
+                    "batch_paragraph_missing",
+                    paragraph_id=paragraph.id,
+                    fallback_to_default=True,
+                )
+                results[paragraph.id] = GeneratedContentResult(
+                    is_heading=paragraph.is_heading,
+                    content=f"[批量生成中段落 '{paragraph.id}' 内容缺失]",
+                    children=[],
+                    images=[],
+                )
+
+        return results
+
+    def _extract_json_from_response(self, raw_content: str) -> Optional[str]:
+        """从响应中提取JSON内容.
+
+        Args:
+            raw_content: 原始响应
+
+        Returns:
+            提取的JSON字符串，如果没有则返回None
+        """
+        # 尝试直接解析
+        raw_content = raw_content.strip()
+
+        # 查找JSON代码块
+        if "```json" in raw_content:
+            start = raw_content.find("```json") + 7
+            end = raw_content.find("```", start)
+            if end > start:
+                return raw_content[start:end].strip()
+
+        # 查找普通代码块
+        if "```" in raw_content:
+            start = raw_content.find("```") + 3
+            end = raw_content.find("```", start)
+            if end > start:
+                return raw_content[start:end].strip()
+
+        # 尝试查找JSON对象边界
+        json_start = raw_content.find("{")
+        json_end = raw_content.rfind("}")
+        if json_start >= 0 and json_end > json_start:
+            return raw_content[json_start:json_end + 1]
+
+        return None
 
     async def _generate_list_with_children(
         self,

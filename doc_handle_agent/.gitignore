@@ -145,3 +145,5 @@ document/
 *.tmp
 *.bak
 *.orig
+
+./claude

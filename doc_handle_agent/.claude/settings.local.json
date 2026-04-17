@@ -1,0 +1,41 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(conda run:*)",
+      "Bash(pip show:*)",
+      "Bash(python:*)",
+      "Bash(pip list:*)",
+      "Bash(pip3 list:*)",
+      "Bash(pip index:*)",
+      "Bash(pip install:*)",
+      "Bash(del app\\\\infrastructure\\\\llm_client.py)",
+      "Bash(conda activate:*)",
+      "Bash(curl -s http://localhost:8001/health)",
+      "Bash(curl -s -X POST http://localhost:8001/api/v1/documents/generate -H 'Content-Type: application/json' -d '{:*)",
+      "Bash(curl -s http://localhost:8001/api/v1/progress/doc_001_20260408_011001)",
+      "Bash(curl -s http://localhost:8001/api/v1/documents/doc_001_20260408_011001/progress)",
+      "Bash(pkill -f \"python -m app.main\")",
+      "Bash(curl -s http://localhost:8001/api/v1/documents/doc_001_20260408_011211/progress)",
+      "Bash(pkill -f \"app.main\")",
+      "Bash(taskkill /F /IM python.exe)",
+      "Bash(/d/WorkSpace/conda/code2Doc/python:*)",
+      "Bash(curl -s http://localhost:8001/api/v1/documents/doc_001_20260408_011758/progress)",
+      "Bash(find . -type d -name __pycache__ -exec rm -rf {} +)",
+      "Bash(pkill -f app.main)",
+      "Bash(curl -s http://localhost:8001/api/v1/documents/doc_001_20260408_011833/progress)",
+      "Bash(xargs rm:*)",
+      "Bash(find . -name \"*.pyc\" -delete)",
+      "Bash(curl -s http://localhost:8001/api/v1/documents/doc_001_20260408_011931/progress)",
+      "Bash(curl -s http://localhost:8000/health)",
+      "Bash(curl -s http://localhost:8000/mcp/tools)",
+      "Bash(curl -s http://localhost:8000/docs)",
+      "Bash(netstat -ano)",
+      "Bash(curl -v http://localhost:8000/mcp/tools)",
+      "Bash(curl -s http://127.0.0.1:8000/mcp/tools)",
+      "Bash(python3 -c \"import httpx; help\\(httpx.AsyncHTTPTransport.__init__\\)\")",
+      "Bash(netsh winhttp:*)",
+      "Bash(find:*)",
+      "Bash(python3 -c ':*)"
+    ]
+  }
+}

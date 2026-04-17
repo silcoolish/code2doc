@@ -12,10 +12,10 @@ class GenerateDocumentRequest(BaseModel):
     """生成文档请求."""
 
     repo_id: str = Field(..., description="仓库ID")
-    template_path: str = Field(..., description="模板文件路径")
+    template_id: str = Field(..., description="文档模板ID")
     output_filename: Optional[str] = Field(
         default=None,
-        description="输出文件名（可选，默认自动生成）",
+        description="输出文件名（可选，默认自动生成，向后兼容）",
     )
 
 
@@ -25,8 +25,9 @@ class GenerateDocumentResponse(BaseModel):
     flow_id: str = Field(..., description="流程ID")
     status: str = Field(..., description="当前状态")
     repo_id: str = Field(..., description="仓库ID")
-    template_path: str = Field(..., description="模板路径")
-    output_path: str = Field(..., description="输出路径")
+    template_id: str = Field(..., description="文档模板ID")
+    document_id: Optional[str] = Field(None, description="生成的文档ID")
+    output_path: Optional[str] = Field(None, description="输出路径（向后兼容）")
     created_at: str = Field(..., description="创建时间")
 
 

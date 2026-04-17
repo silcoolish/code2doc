@@ -41,6 +41,12 @@ class Settings(BaseSettings):
         alias="MCP_SERVER_URL",
     )
 
+    # Workspace服务配置
+    workspace_service_url: str = Field(
+        default="http://localhost:18867",
+        alias="WORKSPACE_SERVICE_URL",
+    )
+
     # 路径配置
     template_dir: str = Field(default="./templates", alias="TEMPLATE_DIR")
     output_dir: str = Field(default="./output", alias="OUTPUT_DIR")

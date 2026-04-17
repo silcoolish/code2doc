@@ -1,7 +1,6 @@
 """文档生成API路由."""
 
 from datetime import datetime
-from pathlib import Path
 from typing import List
 
 from fastapi import APIRouter, HTTPException
@@ -9,14 +8,10 @@ from fastapi import APIRouter, HTTPException
 from app.api.models.schemas import (
     GenerateDocumentRequest,
     GenerateDocumentResponse,
-    PreviewTemplateRequest,
-    PreviewTemplateResponse,
-    TemplateParagraphInfo,
     ActiveGenerationInfo,
     SystemStatusResponse,
 )
 from app.core.document_engine import get_document_engine
-from app.core.template_parser import TemplateParser
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -37,29 +32,20 @@ async def generate_document(
         生成响应
 
     Raises:
-        HTTPException: 参数无效或文件不存在
+        HTTPException: 参数无效
     """
     logger.info(
         "api_generate_document",
         repo_id=request.repo_id,
-        template_path=request.template_path,
+        template_id=request.template_id,
     )
-
-    # 验证模板文件存在
-    template_path = Path(request.template_path)
-    if not template_path.exists():
-        raise HTTPException(
-            status_code=400,
-            detail=f"Template file not found: {request.template_path}",
-        )
 
     try:
         engine = get_document_engine()
 
         flow_id = await engine.start_generation(
             repo_id=request.repo_id,
-            template_path=request.template_path,
-            output_filename=request.output_filename,
+            template_id=request.template_id,
         )
 
         # 获取初始状态
@@ -69,12 +55,13 @@ async def generate_document(
             flow_id=flow_id,
             status=state["status"],
             repo_id=request.repo_id,
-            template_path=request.template_path,
-            output_path=state["output_path"],
+            template_id=request.template_id,
+            document_id=state.get("document_id"),
+            output_path=state.get("output_path"),
             created_at=datetime.now().isoformat(),
         )
 
-    except FileNotFoundError as e:
+    except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(
@@ -84,73 +71,6 @@ async def generate_document(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to start generation: {str(e)}",
-        )
-
-
-@router.post("/preview-template", response_model=PreviewTemplateResponse)
-async def preview_template(
-    request: PreviewTemplateRequest,
-) -> PreviewTemplateResponse:
-    """预览模板内容块.
-
-    Args:
-        request: 预览请求
-
-    Returns:
-        预览响应
-    """
-    logger.info(
-        "api_preview_template",
-        template_path=request.template_path,
-    )
-
-    parser = TemplateParser()
-
-    # 验证模板
-    is_valid, message = parser.validate_template(request.template_path)
-
-    if not is_valid:
-        return PreviewTemplateResponse(
-            template_path=request.template_path,
-            valid=False,
-            message=message,
-            paragraphs=[],
-        )
-
-    try:
-        # 解析模板段落
-        paragraphs = parser.preview_blocks(request.template_path)
-
-        paragraph_infos = [
-            TemplateParagraphInfo(
-                id=para["id"],
-                is_template=para["is_template"],
-                text=para["text"],
-                is_heading=para["is_heading"],
-                prompt=para.get("prompt"),
-                is_list=para.get("is_list", False),
-                min_length=para.get("min_length"),
-                max_length=para.get("max_length"),
-                example=para.get("example"),
-            )
-            for para in paragraphs
-        ]
-
-        return PreviewTemplateResponse(
-            template_path=request.template_path,
-            valid=True,
-            message=message,
-            paragraphs=paragraph_infos,
-        )
-
-    except Exception as e:
-        logger.error(
-            "preview_template_failed",
-            error=str(e),
-        )
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to preview template: {str(e)}",
         )
 
 

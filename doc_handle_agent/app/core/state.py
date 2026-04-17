@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Optional, TypedDict, Union
+from typing import Any, Dict, List, Optional, TypedDict, Union
 
 
 class ParagraphType(str, Enum):
@@ -10,6 +10,20 @@ class ParagraphType(str, Enum):
 
     TEXT = "text"  # 正文
     HEADLINE = "headline"  # 标题
+
+
+class BlockType(str, Enum):
+    """Block类型."""
+
+    HEADING = "heading"  # 标题
+    PARAGRAPH = "paragraph"  # 正文
+
+
+class TemplateType(str, Enum):
+    """模板类型."""
+
+    STATIC = "static"  # 静态内容
+    TEMPLATE = "template"  # 模板内容
 
 
 class GenerationStatus(str, Enum):
@@ -21,6 +35,91 @@ class GenerationStatus(str, Enum):
     BUILDING = "building"
     COMPLETED = "completed"
     FAILED = "failed"
+
+
+@dataclass
+class TemplateBlock:
+    """模板条目（Block）数据类.
+
+    对应workspace_service返回的block结构，用于文档生成流程。
+    """
+
+    id: str  # 唯一标识
+    parent_block_id: Optional[str]  # 父block ID
+    block_type: str  # "heading" | "paragraph"
+    block_title: str  # block标题
+    heading_level: int  # 标题层级
+    order_no: int  # 排序号
+    markdown_content: str  # Markdown内容
+    text_content: str  # 纯文本内容
+    template: str  # "static" | "template"
+    attrs: Dict[str, Any] = field(default_factory=dict)  # 模板属性
+    source_refs: List[str] = field(default_factory=list)  # 内容生成依据节点ID
+    children: List["TemplateBlock"] = field(default_factory=list)  # 子block列表
+
+    @property
+    def is_template(self) -> bool:
+        """是否为模板内容块."""
+        return self.template == "template"
+
+    @property
+    def is_heading(self) -> bool:
+        """是否为标题."""
+        return self.block_type == "heading"
+
+    @property
+    def is_list(self) -> bool:
+        """是否生成列表."""
+        return self.attrs.get("list", False)
+
+    @property
+    def prompt(self) -> Optional[str]:
+        """获取生成提示词."""
+        return self.attrs.get("prompt")
+
+    @property
+    def min_length(self) -> Optional[int]:
+        """获取最小长度限制."""
+        value = self.attrs.get("min_length")
+        return int(value) if value is not None else None
+
+    @property
+    def max_length(self) -> Optional[int]:
+        """获取最大长度限制."""
+        value = self.attrs.get("max_length")
+        return int(value) if value is not None else None
+
+    @property
+    def example(self) -> Optional[str]:
+        """获取参考示例."""
+        return self.attrs.get("example")
+
+    @property
+    def img(self) -> Optional[str]:
+        """获取图片搜索提示词."""
+        return self.attrs.get("img")
+
+    def to_dict(self) -> Dict:
+        """转换为字典."""
+        result = {
+            "id": self.id,
+            "parent_block_id": self.parent_block_id,
+            "block_type": self.block_type,
+            "block_title": self.block_title,
+            "heading_level": self.heading_level,
+            "order_no": self.order_no,
+            "markdown_content": self.markdown_content,
+            "text_content": self.text_content,
+            "template": self.template,
+            "attrs": self.attrs,
+            "source_refs": self.source_refs,
+        }
+        if self.children:
+            result["children"] = [child.to_dict() for child in self.children]
+        return result
+
+    def __repr__(self) -> str:
+        return f"TemplateBlock(id={self.id}, type={self.block_type}, template={self.is_template}, title={self.block_title[:30]}...)"
 
 
 @dataclass
@@ -170,6 +269,22 @@ class GeneratedContentResult:
 
 
 @dataclass
+class BatchGroup:
+    """可批量生成的段落组.
+
+    包含多个可以一次性批量生成的独立段落。
+    这些段落必须是：is_template=True, is_list=False, children=[]
+    """
+
+    paragraphs: List[TemplateParagraph]  # 段落列表
+    start_index: int  # 起始段落索引
+    end_index: int  # 结束段落索引（不包含）
+
+    def __repr__(self) -> str:
+        return f"BatchGroup(count={len(self.paragraphs)}, start={self.start_index}, end={self.end_index})"
+
+
+@dataclass
 class ListItemResult:
     """列表项生成结果.
 
@@ -234,59 +349,75 @@ class AgentState(TypedDict):
 
     # 输入参数
     repo_id: str
-    template_path: str
-    output_path: str
+    template_id: str  # 模板ID（替代原来的template_path）
+    template_path: str  # 保留用于向后兼容
+    output_path: str  # 保留用于向后兼容
 
-    # 解析结果 - 模板段落列表
+    # 解析结果 - 模板block列表（新结构）
+    blocks: List[TemplateBlock]
+
+    # 解析结果 - 模板段落列表（旧结构，保留向后兼容）
     paragraphs: List[TemplateParagraph]
 
     # 生成结果
-    # {段落ID: 生成结果列表}
-    # 对于列表段落，会有多个结果（每个列表项一个）
-    # 对于单一段落，只有一个结果
+    # {block ID: 生成结果列表}
+    # 对于列表block，会有多个结果（每个列表项一个）
+    # 对于单一block，只有一个结果
     generated_contents: Dict[str, List[GeneratedContentResult]]
 
     # 图片信息
-    # {段落ID: 图片信息列表}
+    # {block ID: 图片信息列表}
     generated_images: Dict[str, List[ImageInfo]]
 
     # 进度
-    current_paragraph_index: int
-    total_paragraphs: int
+    current_block_index: int  # 当前block索引（新）
+    total_blocks: int  # 总block数（新）
+    current_paragraph_index: int  # 保留向后兼容
+    total_paragraphs: int  # 保留向后兼容
     status: str
     message: str
 
     # 错误信息
     error: Optional[str]
 
+    # 生成的文档ID
+    document_id: Optional[str]
+
 
 def create_initial_state(
     repo_id: str,
-    template_path: str,
-    output_path: str,
+    template_id: str,
+    template_path: str = "",
+    output_path: str = "",
 ) -> AgentState:
     """创建初始状态.
 
     Args:
         repo_id: 仓库ID
-        template_path: 模板路径
-        output_path: 输出路径
+        template_id: 模板ID
+        template_path: 模板路径（保留向后兼容）
+        output_path: 输出路径（保留向后兼容）
 
     Returns:
         初始Agent状态
     """
     return {
         "repo_id": repo_id,
+        "template_id": template_id,
         "template_path": template_path,
         "output_path": output_path,
+        "blocks": [],
         "paragraphs": [],
         "generated_contents": {},
         "generated_images": {},
+        "current_block_index": 0,
+        "total_blocks": 0,
         "current_paragraph_index": 0,
         "total_paragraphs": 0,
         "status": GenerationStatus.PENDING.value,
         "message": "等待开始...",
         "error": None,
+        "document_id": None,
     }
 
 

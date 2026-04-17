@@ -5,10 +5,10 @@ from typing import Any, Dict
 from langgraph.graph import END, StateGraph
 
 from app.core.content_generator import ContentGenerator
-from app.core.nodes import BuildDocumentNode, GenerateContentNode, ParseTemplateNode
+from app.core.nodes import GenerateContentNode, ListTemplateBlockNode, StoreBlockListNode
 from app.core.state import AgentState, GenerationStatus
-from app.infrastructure.docx_handler import DocxHandler
 from app.infrastructure.mcp_client import MCPClient
+from app.infrastructure.workspace import WorkspaceServiceAdapter
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -21,18 +21,18 @@ class DocumentGenerator:
         self,
         mcp_client: MCPClient,
         content_generator: ContentGenerator,
-        docx_handler: DocxHandler,
+        workspace_adapter: WorkspaceServiceAdapter = None,
     ):
         """初始化文档生成器.
 
         Args:
             mcp_client: MCP客户端
             content_generator: 内容生成器
-            docx_handler: docx处理器
+            workspace_adapter: workspace服务适配器
         """
         self.mcp_client = mcp_client
         self.content_generator = content_generator
-        self.docx_handler = docx_handler
+        self.workspace_adapter = workspace_adapter or WorkspaceServiceAdapter()
         self.workflow = self._build_workflow()
 
     def _build_workflow(self) -> StateGraph:
@@ -45,32 +45,32 @@ class DocumentGenerator:
 
         # 创建节点实例
         nodes = [
-            ParseTemplateNode(),
+            ListTemplateBlockNode(self.workspace_adapter),
             GenerateContentNode(self.content_generator),
-            BuildDocumentNode(self.docx_handler),
+            StoreBlockListNode(self.workspace_adapter),
         ]
 
-        # 添加节点到工作流 - 只使用抽象基类接口
+        # 添加节点到工作流
         for node in nodes:
             workflow.add_node(node.name, node.execute)
 
         # 设置入口
-        workflow.set_entry_point("parse_template")
+        workflow.set_entry_point("list_template_block")
 
         # 添加边
-        workflow.add_edge("parse_template", "generate_content")
+        workflow.add_edge("list_template_block", "generate_content")
 
         workflow.add_conditional_edges(
             "generate_content",
             self._should_continue,
             {
                 "continue": "generate_content",
-                "done": "build_document",
+                "done": "store_block_list",
                 "error": END,
             },
         )
 
-        workflow.add_edge("build_document", END)
+        workflow.add_edge("store_block_list", END)
 
         return workflow.compile()
 
@@ -85,7 +85,10 @@ class DocumentGenerator:
         """
         if state.get("error"):
             return "error"
-        if state["current_paragraph_index"] < state["total_paragraphs"]:
+        # 优先使用block索引，兼容paragraph索引
+        current = state.get("current_block_index", 0) or state.get("current_paragraph_index", 0)
+        total = state.get("total_blocks", 0) or state.get("total_paragraphs", 0)
+        if current < total:
             return "continue"
         return "done"
 
