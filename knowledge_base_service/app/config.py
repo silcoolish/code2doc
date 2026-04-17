@@ -111,6 +111,7 @@ class Settings(BaseSettings):
     flowchart_service_timeout: int = Field(default=30)
     flowchart_supported_languages: List[str] = Field(default=["c", "cpp"])
     flowchart_image_dir: str = Field(default="./data")
+    flowchart_batch_size: int = Field(default=50)  # 每批处理的方法数量
 
     # Module Detection Strategy Settings
     # Strategy: "simple" | "clustering"

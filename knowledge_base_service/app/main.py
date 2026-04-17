@@ -11,6 +11,7 @@ from app.config import get_settings
 from app.infrastructure.db import get_graph_db_client, get_vector_db_client
 from app.api.routes import initialization, progress, reset
 from app.api.test import (
+    flowchart_generation as test_flowchart_generation,
     module_detection as test_module_detection,
     structure_graph_build as test_structure_graph_build,
     semantic_analysis as test_semantic_analysis,
@@ -176,6 +177,11 @@ def create_app() -> FastAPI:
     )
     app.include_router(
         test_module_detection.router,
+        prefix="/api/v1/test",
+        tags=["test"],
+    )
+    app.include_router(
+        test_flowchart_generation.router,
         prefix="/api/v1/test",
         tags=["test"],
     )

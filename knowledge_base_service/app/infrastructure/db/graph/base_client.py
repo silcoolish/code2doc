@@ -600,3 +600,22 @@ class GraphDatabaseClient(ABC):
             调用链列表，每项包含 method_name, file_path, callees 字段
         """
         pass
+
+    @abstractmethod
+    async def get_file_contents(
+        self,
+        repo_id: str,
+        file_paths: List[str],
+        database: Optional[str] = None,
+    ) -> Dict[str, str]:
+        """获取指定文件的代码内容.
+
+        Args:
+            repo_id: 仓库ID
+            file_paths: 文件路径列表
+            database: 目标数据库名称
+
+        Returns:
+            文件路径到代码内容的映射
+        """
+        pass

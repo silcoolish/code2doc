@@ -1038,6 +1038,40 @@ class Neo4jClient(GraphDatabaseClient):
             query, {"file_paths": file_paths, "limit": limit}, database
         )
 
+    async def get_file_contents(
+        self,
+        repo_id: str,
+        file_paths: List[str],
+        database: Optional[str] = None,
+    ) -> Dict[str, str]:
+        """获取指定文件的代码内容.
+
+        Args:
+            repo_id: 仓库ID
+            file_paths: 文件路径列表
+            database: 目标数据库名称
+
+        Returns:
+            文件路径到代码内容的映射
+        """
+        query = """
+        MATCH (f:File)
+        WHERE f.repoId = $repo_id AND f.path IN $file_paths
+        RETURN f.path as path, f.code as code
+        """
+
+        try:
+            results = await self.execute_query(
+                query,
+                {"repo_id": repo_id, "file_paths": file_paths},
+                database,
+            )
+
+            return {row["path"]: row.get("code", "") for row in results}
+        except Exception as e:
+            logger.error(f"Failed to get file contents: {e}")
+            return {}
+
 
 # 全局客户端实例
 _neo4j_client: Optional[Neo4jClient] = None
