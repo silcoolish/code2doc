@@ -41,18 +41,28 @@ class HttpUtils:
             httpx.HTTPError: HTTP请求失败
             json.JSONDecodeError: 响应解析失败
         """
-        default_headers = {"Accept": "application/json"}
+        default_headers = {
+            "Accept": "application/json",
+            "User-Agent": "doc-handle-agent/1.0",
+        }
         if headers:
             default_headers.update(headers)
 
-        logger.debug(
+        logger.info(
             "http_get_request",
             url=url,
             params=params,
+            headers=default_headers,
         )
 
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
+            async with httpx.AsyncClient(
+                timeout=timeout,
+                follow_redirects=True,
+                http1=True,
+                http2=False,
+                trust_env=False,
+            ) as client:
                 response = await client.get(
                     url,
                     params=params,
@@ -108,7 +118,10 @@ class HttpUtils:
             httpx.HTTPError: HTTP请求失败
             json.JSONDecodeError: 响应解析失败
         """
-        default_headers = {"Accept": "application/json"}
+        default_headers = {
+            "Accept": "application/json",
+            "User-Agent": "doc-handle-agent/1.0",
+        }
         if headers:
             default_headers.update(headers)
 
@@ -123,7 +136,13 @@ class HttpUtils:
         )
 
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
+            async with httpx.AsyncClient(
+                timeout=timeout,
+                follow_redirects=True,
+                http1=True,
+                http2=False,
+                trust_env=False,
+            ) as client:
                 if json_data is not None:
                     response = await client.post(
                         url,
@@ -187,7 +206,10 @@ class HttpUtils:
             httpx.HTTPError: HTTP请求失败
             json.JSONDecodeError: 响应解析失败
         """
-        default_headers = {"Accept": "application/json"}
+        default_headers = {
+            "Accept": "application/json",
+            "User-Agent": "doc-handle-agent/1.0",
+        }
         if headers:
             # 移除Content-Type，让httpx自动设置multipart边界
             headers.pop("Content-Type", None)
@@ -200,7 +222,13 @@ class HttpUtils:
         )
 
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
+            async with httpx.AsyncClient(
+                timeout=timeout,
+                follow_redirects=True,
+                http1=True,
+                http2=False,
+                trust_env=False,
+            ) as client:
                 response = await client.post(
                     url,
                     files=files,

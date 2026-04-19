@@ -13,10 +13,6 @@ class GenerateDocumentRequest(BaseModel):
 
     repo_id: str = Field(..., description="仓库ID")
     template_id: str = Field(..., description="文档模板ID")
-    output_filename: Optional[str] = Field(
-        default=None,
-        description="输出文件名（可选，默认自动生成，向后兼容）",
-    )
 
 
 class GenerateDocumentResponse(BaseModel):

@@ -1,7 +1,7 @@
 # 文档处理Agent服务 API文档
 
 > **服务名称**: doc-handle-agent  
-> **版本**: 1.0.0  
+> **版本**: 1.1.0  
 > **描述**: 基于LangGraph的智能文档生成服务
 
 ---
@@ -49,7 +49,7 @@ GET /
 ```json
 {
   "service": "doc-handle-agent",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "docs": "/docs"
 }
 ```
@@ -61,7 +61,6 @@ GET /
 | 方法 | 端点 | 描述 | 标签 |
 |------|------|------|------|
 | POST | `/documents/generate` | 启动文档生成流程 | documents |
-| POST | `/documents/preview-template` | 预览模板内容块 | documents |
 | GET | `/documents/active` | 列出所有活动的生成任务 | documents |
 | GET | `/documents/status` | 获取系统状态 | documents |
 | GET | `/documents/{flow_id}/progress` | 获取文档生成进度 | progress |
@@ -78,15 +77,13 @@ GET /
 | 字段 | 类型 | 必需 | 描述 |
 |------|------|------|------|
 | repo_id | string | 是 | 仓库ID |
-| template_path | string | 是 | 模板文件路径(.docx) |
-| output_filename | string | 否 | 输出文件名（可选，默认自动生成） |
+| template_id | string | 是 | 文档模板ID |
 
 **请求示例**:
 ```json
 {
   "repo_id": "my-repo-123",
-  "template_path": "./templates/设计文档模板.docx",
-  "output_filename": "生成的设计文档.docx"
+  "template_id": "design-doc-template"
 }
 ```
 
@@ -101,8 +98,9 @@ GET /
 | flow_id | string | 流程ID，用于后续查询进度 |
 | status | string | 当前状态(pending/running/completed/failed) |
 | repo_id | string | 仓库ID |
-| template_path | string | 模板路径 |
-| output_path | string | 输出路径 |
+| template_id | string | 文档模板ID |
+| document_id | string \| null | 生成的文档ID |
+| output_path | string \| null | 输出路径（向后兼容） |
 | created_at | string | 创建时间(ISO 8601格式) |
 
 **响应示例**:
@@ -111,8 +109,9 @@ GET /
   "flow_id": "doc-gen-abc123",
   "status": "running",
   "repo_id": "my-repo-123",
-  "template_path": "./templates/设计文档模板.docx",
-  "output_path": "./output/生成的设计文档.docx",
+  "template_id": "design-doc-template",
+  "document_id": null,
+  "output_path": null,
   "created_at": "2024-01-15T10:30:00"
 }
 ```
@@ -152,75 +151,6 @@ GET /
 
 ---
 
-### PreviewTemplateRequest
-
-预览模板请求
-
-| 字段 | 类型 | 必需 | 描述 |
-|------|------|------|------|
-| template_path | string | 是 | 模板文件路径 |
-
----
-
-### PreviewTemplateResponse
-
-预览模板响应
-
-| 字段 | 类型 | 描述 |
-|------|------|------|
-| template_path | string | 模板路径 |
-| valid | boolean | 是否有效 |
-| message | string \| null | 验证消息 |
-| paragraphs | TemplateParagraphInfo[] | 模板段落列表 |
-
----
-
-### TemplateParagraphInfo
-
-模板段落信息
-
-| 字段 | 类型 | 描述 |
-|------|------|------|
-| id | string | 段落ID |
-| is_template | boolean | 是否为模板段落 |
-| text | string | 原始文本 |
-| is_heading | boolean | 是否为标题 |
-| prompt | string \| null | 生成提示词（模板段落） |
-| is_list | boolean | 是否生成列表 |
-| min_length | int \| null | 最小长度 |
-| max_length | int \| null | 最大长度 |
-| example | string \| null | 内容生成参考示例 |
-
-**完整示例**:
-```json
-{
-  "template_path": "./templates/设计文档模板.docx",
-  "valid": true,
-  "message": "模板验证通过",
-  "paragraphs": [
-    {
-      "id": "para-1",
-      "is_template": false,
-      "text": "1. 项目概述",
-      "is_heading": true
-    },
-    {
-      "id": "para-2",
-      "is_template": true,
-      "text": "{{项目背景与目标:请描述项目的背景信息和核心目标}}",
-      "is_heading": false,
-      "prompt": "请描述项目的背景信息和核心目标",
-      "is_list": false,
-      "min_length": 100,
-      "max_length": 500,
-      "example": "本项目旨在解决..."
-    }
-  ]
-}
-```
-
----
-
 ### SystemStatusResponse
 
 系统状态响应
@@ -236,7 +166,7 @@ GET /
 {
   "status": "running",
   "active_generations": 2,
-  "version": "1.0.0"
+  "version": "1.1.0"
 }
 ```
 
@@ -299,50 +229,13 @@ curl -X POST "http://localhost:8001/api/v1/documents/generate" \
   -H "Content-Type: application/json" \
   -d '{
     "repo_id": "my-project",
-    "template_path": "./templates/设计文档模板.docx",
-    "output_filename": "我的设计文档.docx"
+    "template_id": "design-doc-template"
   }'
 ```
 
 ---
 
-### 2. 预览模板
-
-```
-POST /api/v1/documents/preview-template
-```
-
-预览模板文件，解析出所有模板段落和静态内容，便于调试模板。
-
-#### 请求体
-
-见 [PreviewTemplateRequest](#previewtemplaterequest)
-
-#### 响应
-
-**200 OK**: 成功解析模板  
-见 [PreviewTemplateResponse](#previewtemplateresponse)
-
-**500 Internal Server Error**: 预览失败
-```json
-{
-  "detail": "Failed to preview template: 错误详情"
-}
-```
-
-#### cURL示例
-
-```bash
-curl -X POST "http://localhost:8001/api/v1/documents/preview-template" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "template_path": "./templates/设计文档模板.docx"
-  }'
-```
-
----
-
-### 3. 获取生成进度
+### 2. 获取生成进度
 
 ```
 GET /api/v1/documents/{flow_id}/progress
@@ -376,7 +269,7 @@ curl "http://localhost:8001/api/v1/documents/doc-gen-abc123/progress"
 
 ---
 
-### 4. 列出活动生成任务
+### 3. 列出活动生成任务
 
 ```
 GET /api/v1/documents/active
@@ -408,7 +301,7 @@ curl "http://localhost:8001/api/v1/documents/active"
 
 ---
 
-### 5. 获取系统状态
+### 4. 获取系统状态
 
 ```
 GET /api/v1/documents/status
@@ -429,7 +322,7 @@ curl "http://localhost:8001/api/v1/documents/status"
 
 ---
 
-### 6. 取消生成任务
+### 5. 取消生成任务
 
 ```
 POST /api/v1/documents/{flow_id}/cancel

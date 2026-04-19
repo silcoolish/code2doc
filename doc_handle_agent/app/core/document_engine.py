@@ -138,7 +138,7 @@ class DocumentEngine:
                 llm_client = LLMClientFactory.create()
 
                 # 创建内容生成器
-                from app.core.content_generator import ContentGenerator
+                from app.domain.content_generator import ContentGenerator
 
                 content_generator = ContentGenerator(
                     mcp_client=mcp_client,

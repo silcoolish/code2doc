@@ -202,6 +202,7 @@ class WorkspaceServiceAdapter:
         logger.info(
             "get_template_blocks_request",
             template_id=template_id,
+            url=url,
         )
 
         try:
@@ -229,7 +230,7 @@ class WorkspaceServiceAdapter:
                     order_no=item.get("orderNo", 0),
                     markdown_content=item.get("markdownContent", ""),
                     text_content=item.get("textContent", ""),
-                    template=item.get("template", "static"),
+                    template=item.get("templateType", "static"),
                     attrs=item.get("attrs", {}),
                     source_refs=item.get("sourceRefs", []),
                 )

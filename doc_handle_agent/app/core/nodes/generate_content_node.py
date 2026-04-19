@@ -1,11 +1,12 @@
 """生成内容节点."""
 
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set
+from dataclasses import dataclass
+from typing import List, Set
 
-from app.core.content_generator import ContentGenerator
+from app.domain.content_generator import ContentGenerator
 from app.core.nodes.base import WorkflowNode
-from app.core.state import AgentState, GenerationStatus, TemplateBlock
+from app.core.state import AgentState, GenerationStatus
+from app.domain.model import TemplateBlock
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -19,20 +20,11 @@ class ListExpansionResult:
     old_block_ids: Set[str]  # 被替换的原始block ID集合
 
 
-@dataclass
-class ProcessedBlock:
-    """处理后的block（包含生成内容）."""
-
-    block: TemplateBlock
-    generated_content: str = ""
-    generated_children: List["ProcessedBlock"] = field(default_factory=list)
-
-
 class GenerateContentNode(WorkflowNode):
     """生成内容节点.
 
     按列表顺序处理block，优先处理list属性的子block。
-    处理完所有list属性后，为每个block生成内容。
+    处理完所有list属性后，将整个block列表交由内容生成器批量生成。
     """
 
     def __init__(self, content_generator: ContentGenerator):
@@ -46,38 +38,26 @@ class GenerateContentNode(WorkflowNode):
         """生成内容.
 
         执行流程：
-        1. 处理所有list属性的block（从 deepest 开始，优先处理子list）
-        2. 为所有非list block生成内容
+        1. 处理所有list属性的block（从 deepest 开始，优先递归处理子list）
+        2. 将整个block列表（包含静态和模板block）交由内容生成器批量生成
+           降级策略由内容生成器内部处理
         """
         blocks: List[TemplateBlock] = state.get("blocks", [])
-        current_idx = state.get("current_block_index", 0)
-        total = len(blocks)
 
-        if current_idx >= total:
+        if not blocks:
             return state
 
         try:
             state["status"] = GenerationStatus.GENERATING.value
 
-            # 第一步：处理所有list属性的block
-            # 从当前索引开始处理（因为前面的可能已经处理过了）
-            blocks = self._process_list_blocks(blocks, current_idx, state)
+            # 第一步：递归处理所有list属性的block
+            blocks = await self._process_list_blocks(blocks, state)
             state["blocks"] = blocks
             state["total_blocks"] = len(blocks)
 
-            # 第二步：为所有非list block生成内容
-            while state["current_block_index"] < state["total_blocks"]:
-                idx = state["current_block_index"]
-                block = blocks[idx]
-
-                # 跳过已处理的block（通过检查generated_contents）
-                if block.id in state.get("generated_contents", {}):
-                    state["current_block_index"] = idx + 1
-                    continue
-
-                # 生成内容
-                await self._generate_block_content(state, block, idx)
-                state["current_block_index"] = idx + 1
+            # 第二步：将整个block列表交由内容生成器批量生成
+            # 内容生成器内部处理降级策略
+            await self._generate_blocks_content(state, blocks)
 
         except Exception as e:
             logger.error("generate_content_failed", error=str(e))
@@ -85,74 +65,152 @@ class GenerateContentNode(WorkflowNode):
 
         return state
 
-    def _process_list_blocks(
+    async def _process_list_blocks(
         self,
         blocks: List[TemplateBlock],
-        start_idx: int,
         state: AgentState,
     ) -> List[TemplateBlock]:
         """处理所有list属性的block.
 
-        从start_idx开始遍历，优先处理子list，再处理父list。
+        使用栈来管理嵌套list：
+        1. 遍历block列表
+        2. 遇到list block压栈
+        3. 遇到heading_level <= 栈顶的block，展开栈顶list
+        4. 遇到heading_level > 栈顶且list=true的block，继续压栈
+        5. 遍历完，依次弹出栈中剩余
+
+        展开时：
+        - 先生成列表项(a1,a2,a3)
+        - 把index a+1到b-1的子blocks插入到每个列表项后
+        - 替换后格式：(...a1,子blocks...,a2,子blocks...,a3,子blocks...,b...)
 
         Args:
             blocks: 原始block列表
-            start_idx: 起始索引
             state: 状态（用于更新消息）
 
         Returns:
             处理后的block列表（所有block都没有list属性）
         """
-        result = list(blocks)  # 复制列表
-        idx = start_idx
+        result = list(blocks)
+        idx = 0
+        # 栈中存储 (list_block_index, list_block, children_blocks)
+        stack: List[tuple[int, TemplateBlock, List[TemplateBlock]]] = []
 
         while idx < len(result):
-            block = result[idx]
+            current_block = result[idx]
 
-            # 如果不是list block，跳过
-            if not block.is_list:
-                idx += 1
-                continue
-
-            # 查找该block的所有子block（在当前列表中）
-            children = self._find_children_in_list(block, result, idx)
-
-            # 检查子block中是否有list属性的
-            child_list_indices = [
-                i for i, child in enumerate(children) if child.is_list
-            ]
-
-            if child_list_indices:
-                # 有list属性的子block，优先处理最后一个（最深的）
-                # 找到这个子block在result中的实际索引
-                last_list_child = children[child_list_indices[-1]]
-                child_idx_in_result = next(
-                    (i for i, b in enumerate(result) if b.id == last_list_child.id),
-                    -1,
-                )
-                if child_idx_in_result > idx:
-                    # 跳到子list处处理
-                    idx = child_idx_in_result
+            # 如果栈不为空，检查是否需要展开栈顶的list
+            if stack:
+                top_idx, top_block, _ = stack[-1]
+                # 获取heading_level，正文(None)默认为99
+                current_level = current_block.heading_level if current_block.heading_level is not None else 99
+                top_level = top_block.heading_level if top_block.heading_level is not None else 99
+                # 如果当前block的heading_level <= 栈顶block，展开栈顶
+                if current_level <= top_level:
+                    # 展开栈顶的list block
+                    result = await self._expand_and_replace_list(
+                        result, stack.pop(), idx, state
+                    )
+                    # 从当前位置继续（新插入的block会在后续被跳过，因为不是list）
                     continue
 
-            # 没有list属性的子block，处理当前list block
-            state["message"] = f"正在处理列表: {block.prompt[:30] if block.prompt else ''}..."
+            # 如果当前block是list，压栈
+            if current_block.is_list:
+                children = self._find_children_in_list(current_block, result, idx)
+                stack.append((idx, current_block, children))
+                idx += 1
+            else:
+                idx += 1
 
-            # 展开list block
-            expansion = self._expand_list_block(block, children)
-
-            # 替换原block及其子block
-            result = self._replace_blocks_in_list(
-                result, idx, block, children, expansion.new_blocks
+        # 处理栈中剩余的list
+        while stack:
+            top_idx, top_block, children = stack[-1]
+            # 展开到列表末尾
+            result = await self._expand_and_replace_list(
+                result, stack.pop(), len(result), state
             )
 
-            # 记录被替换的block ID，避免重复处理
-            for old_id in expansion.old_block_ids:
-                if old_id not in state.get("generated_contents", {}):
-                    state["generated_contents"][old_id] = []
+        # 统一重新赋值 order_no，从 0 开始
+        for i, block in enumerate(result):
+            block.order_no = i
 
-            # 索引保持不变，继续处理新插入的block
-            # 但新block都不是list属性，会在while循环中被跳过
+        return result
+
+    async def _expand_and_replace_list(
+        self,
+        blocks: List[TemplateBlock],
+        stack_item: tuple[int, TemplateBlock, List[TemplateBlock]],
+        end_idx: int,
+        state: AgentState,
+    ) -> List[TemplateBlock]:
+        """展开list block并替换到列表中.
+
+        Args:
+            blocks: 原始block列表
+            stack_item: (list_block_index, list_block, children_blocks)
+            end_idx: 结束索引（遇到此索引位置的block时停止，包含该block之后的所有内容）
+            state: 状态
+
+        Returns:
+            替换后的新列表
+        """
+        list_idx, list_block, children = stack_item
+
+        # 获取子block列表（a+1到b-1）
+        child_blocks: List[TemplateBlock] = []
+        if list_idx + 1 < end_idx:
+            for i in range(list_idx + 1, end_idx):
+                child_blocks.append(blocks[i])
+
+        state["message"] = f"正在处理列表: {list_block.prompt[:30] if list_block.prompt else ''}..."
+
+        # 生成列表项
+        list_items = await self.content_generator.generate_list_items(list_block.prompt, state["repo_id"])
+
+        # 构建新的block列表
+        # 格式：(...a1,子blocks...,a2,子blocks...,a3,子blocks...,b...)
+        new_blocks: List[TemplateBlock] = []
+        old_block_ids = {list_block.id}
+
+        for i, item_content in enumerate(list_items):
+            # 创建列表项block
+            new_block = TemplateBlock(
+                id=f"{list_block.id}_item_{i}",
+                parent_block_id=list_block.parent_block_id,
+                block_type=list_block.block_type,
+                block_title=item_content,
+                heading_level=list_block.heading_level,
+                order_no=list_block.order_no + i,
+                markdown_content=f"- {item_content}",
+                text_content=item_content,
+                template="static",
+                attrs={},
+                source_refs=list_block.source_refs,
+                children=[],
+            )
+
+            # 先添加列表项block
+            new_blocks.append(new_block)
+
+            # 再添加子blocks（复制到每个列表项后）
+            for child in child_blocks:
+                child_copy = self._copy_block_with_new_parent(
+                    child, new_block.id, len(new_blocks)
+                )
+                new_blocks.append(child_copy)
+                old_block_ids.add(child.id)
+
+        # 构建新列表
+        result = blocks[:list_idx] + new_blocks
+
+        # 添加end_idx之后的block
+        if end_idx < len(blocks):
+            result.extend(blocks[end_idx:])
+
+        # 记录被替换的block ID
+        for old_id in old_block_ids:
+            if old_id not in state.get("generated_contents", {}):
+                state["generated_contents"][old_id] = []
 
         return result
 
@@ -165,7 +223,6 @@ class GenerateContentNode(WorkflowNode):
         """在列表中查找parent的所有直接子block.
 
         利用有序性：子block一定在parent之后，且heading_level大于parent。
-        在parent之后、遇到同层级或更高层级的block之前，heading_level大于parent的都是其子block。
 
         Args:
             parent: 父block
@@ -176,102 +233,19 @@ class GenerateContentNode(WorkflowNode):
             子block列表
         """
         children = []
-        parent_level = parent.heading_level
+        parent_level = parent.heading_level if parent.heading_level is not None else 99
 
         for i in range(parent_idx + 1, len(blocks)):
             block = blocks[i]
+            block_level = block.heading_level if block.heading_level is not None else 99
 
-            # 如果遇到同层级或更高层级的block，说明parent的子block已结束
-            if block.heading_level <= parent_level:
+            if block_level <= parent_level:
                 break
 
-            # 只取直接子block（层级比parent大1）
-            if block.heading_level == parent_level + 1:
+            if block_level == parent_level + 1:
                 children.append(block)
 
         return children
-
-    def _expand_list_block(
-        self,
-        list_block: TemplateBlock,
-        children: List[TemplateBlock],
-    ) -> ListExpansionResult:
-        """展开list block.
-
-        调用content_generator生成列表项，每个列表项替换为一个新的block。
-        新block包含原list_block的所有子block作为其子block。
-
-        Args:
-            list_block: 带有list属性的block
-            children: list_block的直接子block列表
-
-        Returns:
-            展开结果
-        """
-        # TODO: 这里需要调用content_generator生成列表项
-        # 暂时返回一个占位实现，后续需要完善
-
-        # 生成列表项（这里需要实际调用LLM）
-        list_items = self._generate_list_items(list_block, children)
-
-        new_blocks = []
-        old_block_ids = {list_block.id}
-
-        # 为每个列表项创建一个新的block
-        for i, item_content in enumerate(list_items):
-            # 创建新的block（代表一个列表项）
-            new_block = TemplateBlock(
-                id=f"{list_block.id}_item_{i}",
-                parent_block_id=list_block.parent_block_id,
-                block_type=list_block.block_type,
-                block_title=item_content,  # 列表项内容作为标题
-                heading_level=list_block.heading_level,
-                order_no=list_block.order_no + i,
-                markdown_content=f"- {item_content}",
-                text_content=item_content,
-                template="static",  # 列表项是静态内容
-                attrs={},  # 清空attrs，不再有list属性
-                source_refs=list_block.source_refs,
-                children=[],  # 子block在列表中体现
-            )
-
-            # 为每个列表项添加原list_block的子block作为其子block
-            # 这些子block需要复制，并调整parent_block_id
-            for child in children:
-                child_copy = self._copy_block_with_new_parent(
-                    child, new_block.id, len(new_blocks)
-                )
-                new_blocks.append(child_copy)
-                old_block_ids.add(child.id)
-
-            new_blocks.append(new_block)
-
-        return ListExpansionResult(
-            new_blocks=new_blocks,
-            old_block_ids=old_block_ids,
-        )
-
-    def _generate_list_items(
-        self,
-        list_block: TemplateBlock,
-        children: List[TemplateBlock],
-    ) -> List[str]:
-        """生成列表项.
-
-        TODO: 这里需要调用content_generator或LLM来生成列表项。
-        暂时返回占位符。
-
-        Args:
-            list_block: list属性的block
-            children: 子block列表
-
-        Returns:
-            列表项字符串列表
-        """
-        # 临时实现：返回示例列表项
-        # 实际应该调用content_generator.generate_list_items
-        prompt = list_block.prompt or "列表项"
-        return [f"{prompt} 1", f"{prompt} 2", f"{prompt} 3"]
 
     def _copy_block_with_new_parent(
         self,
@@ -279,16 +253,7 @@ class GenerateContentNode(WorkflowNode):
         new_parent_id: str,
         offset: int,
     ) -> TemplateBlock:
-        """复制block并设置新的parent.
-
-        Args:
-            block: 原始block
-            new_parent_id: 新的parent block ID
-            offset: 顺序偏移量
-
-        Returns:
-            复制后的新block
-        """
+        """复制block并设置新的parent."""
         return TemplateBlock(
             id=f"{block.id}_copy_{offset}",
             parent_block_id=new_parent_id,
@@ -304,146 +269,95 @@ class GenerateContentNode(WorkflowNode):
             children=[],
         )
 
-    def _replace_blocks_in_list(
-        self,
-        blocks: List[TemplateBlock],
-        list_idx: int,
-        list_block: TemplateBlock,
-        children: List[TemplateBlock],
-        new_blocks: List[TemplateBlock],
-    ) -> List[TemplateBlock]:
-        """在列表中替换block.
-
-        用new_blocks替换list_block及其children。
-
-        Args:
-            blocks: 原始block列表
-            list_idx: list_block的索引
-            list_block: 被替换的list block
-            children: list_block的子block列表
-            new_blocks: 新的block列表
-
-        Returns:
-            替换后的新列表
-        """
-        # 计算需要移除的范围
-        remove_count = 1  # list_block本身
-        remove_ids = {list_block.id}
-
-        # 收集所有需要移除的子block（包括嵌套的）
-        for child in children:
-            if child.id not in remove_ids:
-                remove_ids.add(child.id)
-                remove_count += 1
-                # 递归收集孙block
-                grand_children = self._find_children_in_list(child, blocks, list_idx)
-                for gc in grand_children:
-                    remove_ids.add(gc.id)
-
-        # 构建新列表
-        result = blocks[:list_idx] + new_blocks
-
-        # 添加list_block之后的其他block（跳过被移除的）
-        for i in range(list_idx + 1, len(blocks)):
-            if blocks[i].id not in remove_ids:
-                result.append(blocks[i])
-
-        return result
-
-    async def _generate_block_content(
+    async def _generate_blocks_content(
         self,
         state: AgentState,
-        block: TemplateBlock,
-        idx: int,
+        blocks: List[TemplateBlock],
     ) -> None:
-        """为单个block生成内容.
+        """生成所有block的内容.
+
+        将整个block列表（包含静态block和模板block）交由内容生成器批量生成。
+        降级策略由内容生成器内部处理，节点层不处理降级。
+
+        生成的内容结果中包含图片ID列表作为属性。
 
         Args:
             state: 工作流状态
-            block: 要处理的block
-            idx: block索引
+            blocks: 完整的block列表（包含静态和模板block）
         """
-        total = state["total_blocks"]
+        if not blocks:
+            logger.info("no_blocks_to_generate")
+            return
 
+        total = len(blocks)
         logger.info(
-            "generate_block_content_start",
-            current=idx + 1,
-            total=total,
-            block_id=block.id,
-            block_title=block.block_title[:30] if block.block_title else "",
+            "generate_blocks_content_start",
+            total_blocks=total,
+            template_blocks=sum(1 for b in blocks if b.is_template),
+            static_blocks=sum(1 for b in blocks if not b.is_template),
         )
 
-        state["message"] = f"正在生成第{idx + 1}/{total}个内容块: {block.block_title[:30] if block.block_title else ''}..."
+        state["message"] = f"正在生成 {total} 个内容块..."
 
-        try:
-            # 将TemplateBlock转换为TemplateParagraph进行生成
-            from app.core.state import GeneratedContentResult, TemplateParagraph
+        # 将整个block列表交给内容生成器处理
+        # 内容生成器内部处理：批量生成、上下文检测、降级策略
+        results = await self.content_generator.generate_blocks_batch(
+            blocks=blocks,
+            repo_id=state["repo_id"],
+        )
 
-            paragraph = TemplateParagraph(
-                id=block.id,
-                is_template=block.is_template,
-                text=block.markdown_content,
-                style_name=f"Heading {block.heading_level}" if block.is_heading else "Normal",
-                is_heading=block.is_heading,
-                prompt=block.prompt,
-                is_list=block.is_list,
-                min_length=block.min_length,
-                max_length=block.max_length,
-                img=block.img,
-                example=block.example,
-            )
+        # 保存生成结果到state
+        for block_id, result_list in results.items():
+            state["generated_contents"][block_id] = result_list
 
-            # 调用生成器
-            results = await self.content_generator.generate(
-                paragraph=paragraph,
-                repo_id=state["repo_id"],
-            )
+            # 更新block的text_content、markdown_content和图片信息
+            if result_list:
+                block = next((b for b in blocks if b.id == block_id), None)
+                if block:
+                    text_content = result_list[0].text_content
+                    block.text_content = text_content
+                    # 根据block_type和heading_level生成markdown_content
+                    block.markdown_content = self._generate_markdown_content(
+                        text_content, block.block_type, block.heading_level
+                    )
+                    # 图片ID直接作为block属性存储
+                    if result_list[0].imgs:
+                        block.source_refs = result_list[0].imgs
 
-            # 保存生成的内容
-            state["generated_contents"][block.id] = results
-
-            # 更新block的text_content
-            if results:
-                block.text_content = results[0].content
-
-            # 收集图片信息
+            # 收集图片信息到state
             images = []
-            for result in results:
-                images.extend(result.images)
-                images.extend(self._collect_images_recursive(result.children))
+            for result in result_list:
+                images.extend(result.imgs)
 
             if images:
-                state["generated_images"][block.id] = images
+                state["generated_images"][block_id] = images
 
-            logger.info(
-                "generate_block_content_success",
-                block_id=block.id,
-                result_count=len(results),
-                image_count=len(images),
-            )
+        # 更新进度
+        state["current_block_index"] = len(blocks)
 
-        except Exception as e:
-            logger.error("generate_block_content_failed", block_id=block.id, error=str(e))
-            from app.core.state import GeneratedContentResult
+        logger.info(
+            "generate_blocks_content_complete",
+            total_blocks=total,
+            result_count=len(results),
+        )
 
-            state["generated_contents"][block.id] = [
-                GeneratedContentResult(
-                    is_heading=block.is_heading,
-                    content=f"[生成失败: {str(e)}]",
-                    children=[],
-                    images=[],
-                )
-            ]
-            block.text_content = f"[生成失败: {str(e)}]"
+    def _generate_markdown_content(
+        self, text_content: str, block_type: str, heading_level: int
+    ) -> str:
+        """根据text_content、block_type和heading_level生成markdown_content.
 
-    def _collect_images_recursive(self, results: list) -> list:
-        """递归收集所有子block的图片."""
-        from app.core.state import GeneratedContentResult
+        Args:
+            text_content: 生成的文本内容
+            block_type: block类型 ("heading" | "paragraph")
+            heading_level: 标题层级
 
-        images = []
-        for result in results:
-            if isinstance(result, GeneratedContentResult):
-                images.extend(result.images)
-                if result.children:
-                    images.extend(self._collect_images_recursive(result.children))
-        return images
+        Returns:
+            生成的markdown内容
+        """
+        if block_type == "heading":
+            # 根据heading_level生成对应数量的#
+            level = max(1, min(6, heading_level))  # 限制在1-6之间
+            return f"{'#' * level} {text_content}"
+        else:
+            # paragraph类型直接返回文本内容
+            return text_content

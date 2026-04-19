@@ -3,7 +3,8 @@
 from typing import List, Optional
 
 from app.core.nodes.base import WorkflowNode
-from app.core.state import AgentState, GenerationStatus, TemplateBlock
+from app.core.state import AgentState, GenerationStatus
+from app.domain.model import TemplateBlock
 from app.infrastructure.workspace import WorkspaceServiceAdapter
 from app.utils.logger import get_logger
 
@@ -51,7 +52,6 @@ class ListTemplateBlockNode(WorkflowNode):
             # 直接存储到state中，不做任何处理
             state["blocks"] = blocks
             state["total_blocks"] = len(blocks)
-            state["current_block_index"] = 0
             state["status"] = GenerationStatus.GENERATING.value
             state["message"] = f"获取完成，共{len(blocks)}个内容块待生成"
 

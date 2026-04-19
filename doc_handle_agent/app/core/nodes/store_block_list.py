@@ -4,12 +4,8 @@ from pathlib import Path
 from typing import List, Optional
 
 from app.core.nodes.base import WorkflowNode
-from app.core.state import (
-    AgentState,
-    GenerationStatus,
-    ImageInfo,
-    TemplateBlock,
-)
+from app.core.state import AgentState, GenerationStatus
+from app.domain.model import ImageInfo, TemplateBlock
 from app.infrastructure.workspace import (
     SaveDocumentRequest,
     WorkspaceServiceAdapter,
@@ -145,16 +141,16 @@ class StoreBlockListNode(WorkflowNode):
                     # 列表block，需要合并所有列表项的内容
                     text_contents = []
                     for result in content_results:
-                        text_contents.append(result.content)
+                        text_contents.append(result.text_content)
                         # 处理子内容
                         if result.children:
                             for child in result.children:
-                                text_contents.append(child.content)
+                                text_contents.append(child.text_content)
                     block_data["textContent"] = "\n".join(text_contents)
                 else:
                     # 单一block
                     result = content_results[0]
-                    block_data["textContent"] = result.content
+                    block_data["textContent"] = result.text_content
 
             doc_blocks.append(block_data)
 

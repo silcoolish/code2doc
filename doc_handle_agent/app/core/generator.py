@@ -4,7 +4,7 @@ from typing import Any, Dict
 
 from langgraph.graph import END, StateGraph
 
-from app.core.content_generator import ContentGenerator
+from app.domain.content_generator import ContentGenerator
 from app.core.nodes import GenerateContentNode, ListTemplateBlockNode, StoreBlockListNode
 from app.core.state import AgentState, GenerationStatus
 from app.infrastructure.mcp_client import MCPClient
