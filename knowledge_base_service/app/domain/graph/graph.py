@@ -1,5 +1,6 @@
 """图数据库模型定义."""
 
+import json
 from abc import ABC
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -66,7 +67,7 @@ class Repository(BaseNode):
             "totalLines": self.total_lines,
             "totalSize": self.total_size,
             "languages": self.languages,
-            "languageDistribution": self.language_distribution,
+            "languageDistribution": json.dumps(self.language_distribution, ensure_ascii=False) if self.language_distribution else "",
         })
         return result
 

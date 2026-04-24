@@ -1,5 +1,6 @@
 """Neo4j 图数据库客户端."""
 
+import json
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -1296,7 +1297,18 @@ class Neo4jClient(GraphDatabaseClient):
                r.languages as languages, r.languageDistribution as language_distribution
         """
         results = await self._execute_query(query, {"repo_id": repo_id}, database)
-        return results[0] if results else None
+        if not results:
+            return None
+        result = results[0]
+        lang_dist = result.get("language_distribution")
+        if isinstance(lang_dist, str) and lang_dist:
+            try:
+                result["language_distribution"] = json.loads(lang_dist)
+            except json.JSONDecodeError:
+                result["language_distribution"] = {}
+        elif lang_dist is None:
+            result["language_distribution"] = {}
+        return result
 
     async def get_repo_node_counts(
         self,
