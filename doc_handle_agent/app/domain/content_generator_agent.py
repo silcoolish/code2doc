@@ -1,15 +1,19 @@
 """内容生成器Agent - 负责LLM调用和工具执行."""
 
-from typing import Any, Dict, List, Optional
+import json
+import uuid
+from typing import Any, Dict, List
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 
 from app.config import get_settings
 from app.infrastructure.mcp_client import MCPClient
+from app.utils.agent_logger import get_agent_logger
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
+agent_logger = get_agent_logger()
 
 
 class ContentGeneratorAgent:
@@ -59,6 +63,11 @@ class ContentGeneratorAgent:
             model=self.model_name,
             context_limit=self._context_limit,
         )
+
+        # 工具结果缓存，避免同一会话中重复查询
+        self._tool_result_cache: Dict[str, str] = {}
+        self._cache_hits = 0
+        self._cache_misses = 0
 
     @property
     def context_limit(self) -> int:
@@ -268,6 +277,48 @@ class ContentGeneratorAgent:
             raise RuntimeError("MCP client not connected")
         return self.mcp_client.get_available_tools()
 
+    def _serialize_messages(self, messages: List[Any]) -> List[Dict[str, Any]]:
+        """序列化消息列表为可 JSON 序列化的格式.
+
+        Args:
+            messages: 消息列表
+
+        Returns:
+            序列化后的字典列表
+        """
+        serialized = []
+        for msg in messages:
+            if isinstance(msg, SystemMessage):
+                serialized.append({"role": "system", "content": msg.content})
+            elif isinstance(msg, HumanMessage):
+                serialized.append({"role": "user", "content": msg.content})
+            elif isinstance(msg, ToolMessage):
+                serialized.append({
+                    "role": "tool",
+                    "content": msg.content,
+                    "tool_call_id": msg.tool_call_id,
+                    "name": msg.name,
+                })
+            elif hasattr(msg, "content"):
+                # AI 消息响应
+                tool_calls = None
+                if hasattr(msg, "tool_calls") and msg.tool_calls:
+                    tool_calls = [
+                        {
+                            "id": tc.get("id", ""),
+                            "name": tc.get("name", ""),
+                            "args": tc.get("args", {}),
+                        }
+                        for tc in msg.tool_calls
+                    ]
+                entry: Dict[str, Any] = {"role": "assistant", "content": msg.content}
+                if tool_calls:
+                    entry["tool_calls"] = tool_calls
+                serialized.append(entry)
+            else:
+                serialized.append({"role": "unknown", "content": str(msg)})
+        return serialized
+
     async def generate_with_tools(
         self,
         system_prompt: str,
@@ -286,6 +337,18 @@ class ContentGeneratorAgent:
         Returns:
             生成的原始内容字符串
         """
+        # 生成会话唯一标识
+        session_id = str(uuid.uuid4())
+
+        # 记录 agent 请求开始
+        agent_logger.log_agent_request(
+            session_id=session_id,
+            system_prompt=system_prompt,
+            task_message=task_message,
+            repo_id=repo_id,
+            max_iterations=max_iterations,
+        )
+
         tools = await self._load_langchain_tools()
         llm_with_tools = self.llm.bind_tools(tools)
 
@@ -294,9 +357,46 @@ class ContentGeneratorAgent:
             HumanMessage(content=task_message),
         ]
 
+        final_iteration = 0
+        end_reason = "completed"
+
         for i in range(max_iterations):
+            final_iteration = i + 1
+
+            # 记录 LLM 调用请求
+            agent_logger.log_llm_call(
+                session_id=session_id,
+                iteration=final_iteration,
+                messages=self._serialize_messages(messages),
+                model_name=self.model_name,
+            )
+
             response = await llm_with_tools.ainvoke(messages)
             messages.append(response)
+
+            # 提取响应内容
+            response_content = response.content if hasattr(response, "content") else str(response)
+
+            # 提取工具调用信息
+            tool_calls_data = None
+            if hasattr(response, "tool_calls") and response.tool_calls:
+                tool_calls_data = [
+                    {
+                        "id": tc.get("id", ""),
+                        "name": tc.get("name", ""),
+                        "args": tc.get("args", {}),
+                    }
+                    for tc in response.tool_calls
+                ]
+
+            # 记录 LLM 响应
+            agent_logger.log_llm_response(
+                session_id=session_id,
+                iteration=final_iteration,
+                response_content=response_content,
+                tool_calls=tool_calls_data,
+                model_name=self.model_name,
+            )
 
             if hasattr(response, "tool_calls") and response.tool_calls:
                 for tool_call in response.tool_calls:
@@ -306,12 +406,31 @@ class ContentGeneratorAgent:
                     if "repo_id" not in tool_args:
                         tool_args["repo_id"] = repo_id
 
+                    # 记录工具调用请求
+                    agent_logger.log_tool_call(
+                        session_id=session_id,
+                        iteration=final_iteration,
+                        tool_name=tool_name,
+                        arguments=tool_args,
+                    )
+
                     try:
-                        result = await self.mcp_client.call_tool(tool_name, tool_args)
-                        if len(result) > 2000:
-                            result = result[:2000] + "\n... (内容已截断)"
+                        result = await self.call_tool(tool_name, tool_args)
+
+                        # 记录工具调用成功响应 (仅在非缓存命中时记录，避免重复)
+                        # call_tool 内部已记录，这里省略避免重复
                     except Exception as e:
                         result = f"工具调用失败: {str(e)}"
+
+                        # 记录工具调用失败响应
+                        agent_logger.log_tool_response(
+                            session_id=session_id,
+                            iteration=final_iteration,
+                            tool_name=tool_name,
+                            response=result,
+                            success=False,
+                            error=str(e),
+                        )
 
                     messages.append(ToolMessage(
                         content=result,
@@ -320,12 +439,27 @@ class ContentGeneratorAgent:
                     ))
             else:
                 break
+        else:
+            # 达到最大迭代次数
+            end_reason = "max_iterations_reached"
 
         final_response = messages[-1]
-        return final_response.content if hasattr(final_response, "content") else str(final_response)
+        final_content = final_response.content if hasattr(final_response, "content") else str(final_response)
+
+        # 记录 agent 请求完成
+        agent_logger.log_agent_completion(
+            session_id=session_id,
+            total_iterations=final_iteration,
+            final_content=final_content,
+            reason=end_reason,
+        )
+
+        return final_content
 
     async def call_tool(self, tool_name: str, tool_args: Dict[str, Any]) -> str:
-        """调用MCP工具.
+        """调用MCP工具（带缓存）.
+
+        相同参数的工具调用会在同一会话中缓存结果，避免重复查询数据库。
 
         Args:
             tool_name: 工具名称
@@ -334,52 +468,97 @@ class ContentGeneratorAgent:
         Returns:
             工具调用结果
         """
+        # 构造缓存键（基于工具名和排序后的参数）
+        cache_key = self._build_tool_cache_key(tool_name, tool_args)
+
+        if cache_key in self._tool_result_cache:
+            self._cache_hits += 1
+            logger.debug(
+                "tool_cache_hit",
+                tool_name=tool_name,
+                cache_hits=self._cache_hits,
+                cache_misses=self._cache_misses,
+            )
+            return self._tool_result_cache[cache_key]
+
+        self._cache_misses += 1
+
+        # 生成会话唯一标识（独立调用）
+        session_id = str(uuid.uuid4())
+
+        # 记录工具调用请求
+        agent_logger.log_tool_call(
+            session_id=session_id,
+            iteration=1,
+            tool_name=tool_name,
+            arguments=tool_args,
+        )
+
         try:
             result = await self.mcp_client.call_tool(tool_name, tool_args)
-            if len(result) > 2000:
-                result = result[:2000] + "\n... (内容已截断)"
+
+            # 记录工具调用成功响应
+            agent_logger.log_tool_response(
+                session_id=session_id,
+                iteration=1,
+                tool_name=tool_name,
+                response=result,
+                success=True,
+            )
+
+            # 缓存结果
+            self._tool_result_cache[cache_key] = result
             return result
         except Exception as e:
-            return f"工具调用失败: {str(e)}"
+            error_msg = f"工具调用失败: {str(e)}"
 
-    async def search_code_nodes(
-        self,
-        repo_id: str,
-        query: str,
-        node_types: List[str],
-        top_k: int = 5,
-    ) -> str:
-        """搜索代码节点.
+            # 记录工具调用失败响应
+            agent_logger.log_tool_response(
+                session_id=session_id,
+                iteration=1,
+                tool_name=tool_name,
+                response=error_msg,
+                success=False,
+                error=str(e),
+            )
+            # 失败结果也缓存，避免重复失败请求
+            self._tool_result_cache[cache_key] = error_msg
+            return error_msg
 
-        Args:
-            repo_id: 仓库ID
-            query: 搜索查询
-            node_types: 节点类型列表
-            top_k: 返回结果数量
-
-        Returns:
-            搜索结果JSON字符串
-        """
-        return await self.call_tool(
-            "search_code_nodes",
-            {
-                "repo_id": repo_id,
-                "queries": [
-                    {"query": query, "node_types": node_types, "top_k": top_k}
-                ]
-            }
-        )
-
-    async def batch_download_flowcharts(self, method_ids: List[str]) -> str:
-        """批量下载流程图.
+    def _build_tool_cache_key(self, tool_name: str, tool_args: Dict[str, Any]) -> str:
+        """构建工具缓存键.
 
         Args:
-            method_ids: 方法ID列表
+            tool_name: 工具名称
+            tool_args: 工具参数
 
         Returns:
-            下载结果JSON字符串
+            缓存键字符串
         """
-        return await self.call_tool(
-            "batch_download_flowcharts",
-            {"method_ids": method_ids}
-        )
+        try:
+            sorted_args = json.dumps(tool_args, sort_keys=True, ensure_ascii=False)
+        except (TypeError, ValueError):
+            sorted_args = str(tool_args)
+        return f"{tool_name}:{sorted_args}"
+
+    def clear_tool_cache(self) -> None:
+        """清空工具结果缓存."""
+        self._tool_result_cache.clear()
+        self._cache_hits = 0
+        self._cache_misses = 0
+        logger.info("tool_cache_cleared")
+
+    def get_cache_stats(self) -> Dict[str, int]:
+        """获取缓存统计信息.
+
+        Returns:
+            缓存统计字典
+        """
+        total = self._cache_hits + self._cache_misses
+        return {
+            "hits": self._cache_hits,
+            "misses": self._cache_misses,
+            "total": total,
+            "hit_rate": round(self._cache_hits / total, 4) if total > 0 else 0.0,
+        }
+

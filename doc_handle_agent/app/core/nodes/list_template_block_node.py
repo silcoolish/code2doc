@@ -4,9 +4,9 @@ from typing import List, Optional
 
 from app.core.nodes.base import WorkflowNode
 from app.core.state import AgentState, GenerationStatus
-from app.domain.model import TemplateBlock
 from app.infrastructure.workspace import WorkspaceServiceAdapter
 from app.utils.logger import get_logger
+from app.utils.timing import log_timing
 
 logger = get_logger(__name__)
 
@@ -46,10 +46,9 @@ class ListTemplateBlockNode(WorkflowNode):
         )
 
         try:
-            # 获取模板block列表（已按order_no排序）
-            blocks = await self.workspace_adapter.get_template_blocks(template_id)
+            with log_timing("list_template_blocks", template_id=template_id):
+                blocks = await self.workspace_adapter.get_template_blocks(template_id)
 
-            # 直接存储到state中，不做任何处理
             state["blocks"] = blocks
             state["total_blocks"] = len(blocks)
             state["status"] = GenerationStatus.GENERATING.value
@@ -65,7 +64,9 @@ class ListTemplateBlockNode(WorkflowNode):
             logger.error(
                 "list_template_block_failed",
                 template_id=template_id,
+                error_type=type(e).__name__,
                 error=str(e),
+                exc_info=True,
             )
             state["error"] = str(e)
             state["status"] = GenerationStatus.FAILED.value

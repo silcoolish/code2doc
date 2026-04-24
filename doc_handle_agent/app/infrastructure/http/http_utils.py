@@ -1,13 +1,24 @@
 """HTTP请求工具类."""
 
 import json
+import time
 from typing import Any, Dict, Optional
 
 import httpx
+import structlog
 
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _get_trace_id() -> Optional[str]:
+    """从日志上下文中获取 trace_id."""
+    try:
+        ctx = structlog.contextvars.get_contextvars()
+        return ctx.get("trace_id")
+    except Exception:
+        return None
 
 
 class HttpUtils:
@@ -26,21 +37,7 @@ class HttpUtils:
         headers: Optional[Dict[str, str]] = None,
         timeout: float = DEFAULT_TIMEOUT,
     ) -> Dict[str, Any]:
-        """发送GET请求.
-
-        Args:
-            url: 请求URL
-            params: URL参数
-            headers: 请求头
-            timeout: 超时时间（秒）
-
-        Returns:
-            响应数据（已解析为JSON）
-
-        Raises:
-            httpx.HTTPError: HTTP请求失败
-            json.JSONDecodeError: 响应解析失败
-        """
+        """发送GET请求."""
         default_headers = {
             "Accept": "application/json",
             "User-Agent": "doc-handle-agent/1.0",
@@ -48,13 +45,11 @@ class HttpUtils:
         if headers:
             default_headers.update(headers)
 
-        logger.info(
-            "http_get_request",
-            url=url,
-            params=params,
-            headers=default_headers,
-        )
+        trace_id = _get_trace_id()
+        if trace_id:
+            default_headers["X-Request-ID"] = trace_id
 
+        start = time.monotonic()
         try:
             async with httpx.AsyncClient(
                 timeout=timeout,
@@ -71,26 +66,41 @@ class HttpUtils:
                 response.raise_for_status()
 
                 data = response.json()
-                logger.debug(
-                    "http_get_success",
+                elapsed_ms = round((time.monotonic() - start) * 1000, 2)
+                logger.info(
+                    "http_request",
+                    method="GET",
                     url=url,
                     status_code=response.status_code,
+                    elapsed_ms=elapsed_ms,
+                    trace_id=trace_id,
                 )
                 return data
 
         except httpx.HTTPStatusError as e:
+            elapsed_ms = round((time.monotonic() - start) * 1000, 2)
             logger.error(
-                "http_get_failed",
+                "http_request_failed",
+                method="GET",
                 url=url,
                 status_code=e.response.status_code,
-                response=e.response.text,
+                response=e.response.text[:500],
+                elapsed_ms=elapsed_ms,
+                trace_id=trace_id,
+                exc_info=True,
             )
             raise
         except Exception as e:
+            elapsed_ms = round((time.monotonic() - start) * 1000, 2)
             logger.error(
-                "http_get_error",
+                "http_request_error",
+                method="GET",
                 url=url,
+                elapsed_ms=elapsed_ms,
+                error_type=type(e).__name__,
                 error=str(e),
+                trace_id=trace_id,
+                exc_info=True,
             )
             raise
 
@@ -102,22 +112,7 @@ class HttpUtils:
         headers: Optional[Dict[str, str]] = None,
         timeout: float = DEFAULT_TIMEOUT,
     ) -> Dict[str, Any]:
-        """发送POST请求.
-
-        Args:
-            url: 请求URL
-            json_data: JSON请求体
-            data: 表单数据
-            headers: 请求头
-            timeout: 超时时间（秒）
-
-        Returns:
-            响应数据（已解析为JSON）
-
-        Raises:
-            httpx.HTTPError: HTTP请求失败
-            json.JSONDecodeError: 响应解析失败
-        """
+        """发送POST请求."""
         default_headers = {
             "Accept": "application/json",
             "User-Agent": "doc-handle-agent/1.0",
@@ -128,13 +123,11 @@ class HttpUtils:
         if json_data and "Content-Type" not in default_headers:
             default_headers["Content-Type"] = "application/json"
 
-        logger.debug(
-            "http_post_request",
-            url=url,
-            has_json=json_data is not None,
-            has_form=data is not None,
-        )
+        trace_id = _get_trace_id()
+        if trace_id:
+            default_headers["X-Request-ID"] = trace_id
 
+        start = time.monotonic()
         try:
             async with httpx.AsyncClient(
                 timeout=timeout,
@@ -158,27 +151,42 @@ class HttpUtils:
 
                 response.raise_for_status()
 
-                data = response.json()
-                logger.debug(
-                    "http_post_success",
+                result = response.json()
+                elapsed_ms = round((time.monotonic() - start) * 1000, 2)
+                logger.info(
+                    "http_request",
+                    method="POST",
                     url=url,
                     status_code=response.status_code,
+                    elapsed_ms=elapsed_ms,
+                    trace_id=trace_id,
                 )
-                return data
+                return result
 
         except httpx.HTTPStatusError as e:
+            elapsed_ms = round((time.monotonic() - start) * 1000, 2)
             logger.error(
-                "http_post_failed",
+                "http_request_failed",
+                method="POST",
                 url=url,
                 status_code=e.response.status_code,
-                response=e.response.text,
+                response=e.response.text[:500],
+                elapsed_ms=elapsed_ms,
+                trace_id=trace_id,
+                exc_info=True,
             )
             raise
         except Exception as e:
+            elapsed_ms = round((time.monotonic() - start) * 1000, 2)
             logger.error(
-                "http_post_error",
+                "http_request_error",
+                method="POST",
                 url=url,
+                elapsed_ms=elapsed_ms,
+                error_type=type(e).__name__,
                 error=str(e),
+                trace_id=trace_id,
+                exc_info=True,
             )
             raise
 
@@ -190,37 +198,20 @@ class HttpUtils:
         headers: Optional[Dict[str, str]] = None,
         timeout: float = DEFAULT_TIMEOUT,
     ) -> Dict[str, Any]:
-        """发送multipart/form-data POST请求（用于文件上传）.
-
-        Args:
-            url: 请求URL
-            files: 文件字典，格式为 {field_name: (filename, file_content, content_type)}
-            data: 额外的表单数据
-            headers: 请求头（注意：不要设置Content-Type，httpx会自动设置）
-            timeout: 超时时间（秒）
-
-        Returns:
-            响应数据（已解析为JSON）
-
-        Raises:
-            httpx.HTTPError: HTTP请求失败
-            json.JSONDecodeError: 响应解析失败
-        """
+        """发送multipart/form-data POST请求（用于文件上传）."""
         default_headers = {
             "Accept": "application/json",
             "User-Agent": "doc-handle-agent/1.0",
         }
         if headers:
-            # 移除Content-Type，让httpx自动设置multipart边界
             headers.pop("Content-Type", None)
             default_headers.update(headers)
 
-        logger.debug(
-            "http_multipart_request",
-            url=url,
-            file_fields=list(files.keys()),
-        )
+        trace_id = _get_trace_id()
+        if trace_id:
+            default_headers["X-Request-ID"] = trace_id
 
+        start = time.monotonic()
         try:
             async with httpx.AsyncClient(
                 timeout=timeout,
@@ -238,25 +229,40 @@ class HttpUtils:
                 response.raise_for_status()
 
                 result = response.json()
-                logger.debug(
-                    "http_multipart_success",
+                elapsed_ms = round((time.monotonic() - start) * 1000, 2)
+                logger.info(
+                    "http_request",
+                    method="POST_MULTIPART",
                     url=url,
                     status_code=response.status_code,
+                    elapsed_ms=elapsed_ms,
+                    trace_id=trace_id,
                 )
                 return result
 
         except httpx.HTTPStatusError as e:
+            elapsed_ms = round((time.monotonic() - start) * 1000, 2)
             logger.error(
-                "http_multipart_failed",
+                "http_request_failed",
+                method="POST_MULTIPART",
                 url=url,
                 status_code=e.response.status_code,
-                response=e.response.text,
+                response=e.response.text[:500],
+                elapsed_ms=elapsed_ms,
+                trace_id=trace_id,
+                exc_info=True,
             )
             raise
         except Exception as e:
+            elapsed_ms = round((time.monotonic() - start) * 1000, 2)
             logger.error(
-                "http_multipart_error",
+                "http_request_error",
+                method="POST_MULTIPART",
                 url=url,
+                elapsed_ms=elapsed_ms,
+                error_type=type(e).__name__,
                 error=str(e),
+                trace_id=trace_id,
+                exc_info=True,
             )
             raise

@@ -2,7 +2,9 @@
 
 import logging
 import sys
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Any, Dict, Generator, Optional
 
 import structlog
 from pythonjsonlogger import jsonlogger
@@ -41,6 +43,7 @@ def setup_logging() -> None:
     # 配置structlog
     structlog.configure(
         processors=[
+            structlog.contextvars.merge_contextvars,
             structlog.stdlib.filter_by_level,
             structlog.stdlib.add_logger_name,
             structlog.stdlib.add_log_level,
@@ -65,3 +68,25 @@ def setup_logging() -> None:
 def get_logger(name: str):
     """获取结构化日志记录器."""
     return structlog.get_logger(name)
+
+
+@contextmanager
+def bind_log_context(**kwargs: Any) -> Generator[None, None, None]:
+    """绑定日志上下文变量.
+
+    在上下文范围内，所有日志自动携带绑定的字段。
+
+    Usage:
+        with bind_log_context(trace_id=flow_id, repo_id=repo_id):
+            logger.info("event")  # 自动包含 trace_id 和 repo_id
+    """
+    structlog.contextvars.bind_contextvars(**kwargs)
+    try:
+        yield
+    finally:
+        structlog.contextvars.unbind_contextvars(*kwargs.keys())
+
+
+def clear_log_context() -> None:
+    """清除所有日志上下文变量."""
+    structlog.contextvars.clear_contextvars()

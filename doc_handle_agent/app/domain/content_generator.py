@@ -1,12 +1,13 @@
 """内容生成器 - 负责构建提示词和解析响应."""
 
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 from app.domain.content_generator_agent import ContentGeneratorAgent
 from app.domain.generation_strategies import (
     BatchedGenerationStrategy,
     FilteredContextStrategy,
+    FullContextStrategy,
     StrategySelector,
 )
 from app.domain.prompts import LIST_GENERATION_SYSTEM_PROMPT
@@ -14,10 +15,17 @@ from app.domain.model import (
     DocumentBlock,
     TemplateBlock,
 )
+from app.domain.static_list_provider import ListItem, StaticListProvider
 from app.infrastructure.mcp_client import MCPClient
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+STRATEGY_NAME_MAP = {
+    "full_context": FullContextStrategy,
+    "filtered_context": FilteredContextStrategy,
+    "batched_generation": BatchedGenerationStrategy,
+}
 
 
 class ContentGenerator:
@@ -40,67 +48,76 @@ class ContentGenerator:
         """
         self.agent = ContentGeneratorAgent(mcp_client, llm_client)
         self.strategy_selector = StrategySelector(self.agent)
+        self.static_list_provider = StaticListProvider(mcp_client)
         logger.info("content_generator_initialized")
 
-    async def generate_blocks_batch(
+    def select_strategy(
         self,
+        blocks: List[TemplateBlock],
+    ) -> Tuple[str, int]:
+        """选择最适合的生成策略.
+
+        Args:
+            blocks: 完整block列表
+
+        Returns:
+            (策略名称, 预估token数)
+        """
+        strategy, estimated_tokens = self.strategy_selector.select(blocks)
+        return strategy.name, estimated_tokens
+
+    async def execute_strategy(
+        self,
+        strategy_name: str,
         blocks: List[TemplateBlock],
         repo_id: str,
     ) -> Dict[str, List[DocumentBlock]]:
-        """批量生成多个block的内容.
-
-        根据预估的token数自动选择最适合的策略：
-        1. 完整上下文策略：将整个block列表交给Agent处理
-        2. 精简上下文策略：过滤静态block后交给Agent处理
-        3. 分批生成策略：将模板block分批处理
+        """按指定策略执行生成.
 
         Args:
-            blocks: block列表（已展开list，无嵌套children）
+            strategy_name: 策略名称
+            blocks: block列表
             repo_id: 仓库ID
 
         Returns:
+            生成结果映射
         """
         if not blocks:
             return {}
 
         logger.info(
-            "generate_blocks_batch_start",
+            "execute_strategy_start",
+            strategy_name=strategy_name,
             block_count=len(blocks),
             template_blocks=sum(1 for b in blocks if b.is_template),
             static_blocks=sum(1 for b in blocks if not b.is_template),
             repo_id=repo_id,
         )
 
-        # 选择最适合的策略
-        strategy, estimated_tokens = self.strategy_selector.select(blocks)
+        strategy_cls = STRATEGY_NAME_MAP.get(strategy_name)
+        if not strategy_cls:
+            logger.error("unknown_strategy", strategy_name=strategy_name)
+            return self._build_error_results(blocks)
 
-        logger.info(
-            "strategy_chosen",
-            strategy_name=strategy.name,
-            estimated_tokens=estimated_tokens,
-        )
+        strategy = strategy_cls(self.agent)
 
         try:
-            # 执行选中的策略
             results = await strategy.execute(blocks, repo_id)
-
             logger.info(
-                "generate_blocks_batch_complete",
+                "execute_strategy_complete",
+                strategy_name=strategy_name,
                 total_results=len(results),
             )
-
             return results
-
         except Exception as e:
-            # 策略执行失败，降级到下一个策略
             logger.error(
                 "strategy_execution_failed",
-                strategy=strategy.name,
+                strategy=strategy_name,
+                error_type=type(e).__name__,
                 error=str(e),
+                exc_info=True,
             )
-            return await self._fallback_to_next_strategy(
-                strategy.name, blocks, repo_id
-            )
+            return await self._fallback_to_next_strategy(strategy_name, blocks, repo_id)
 
     async def _fallback_to_next_strategy(
         self,
@@ -136,7 +153,9 @@ class ContentGenerator:
             logger.error(
                 "fallback_strategy_failed",
                 strategy=strategy.name,
+                error_type=type(e).__name__,
                 error=str(e),
+                exc_info=True,
             )
             # 继续降级
             return await self._fallback_to_next_strategy(strategy.name, blocks, repo_id)
@@ -159,9 +178,9 @@ class ContentGenerator:
 
         for block in blocks:
             if block.is_template:
-                content = f"[内容生成失败: {block.block_title}]"
+                content = f"[内容生成失败: {block.content_text}]"
             else:
-                content = block.text_content or block.block_title or ""
+                content = block.content_text or ""
 
             results[block.id] = [
                 DocumentBlock(
@@ -169,6 +188,7 @@ class ContentGenerator:
                     text_content=content,
                     heading_level=block.heading_level,
                     source_refs=block.source_refs,
+                    source_node_ids=block.source_node_ids,
                     imgs=[],
                 )
             ]
@@ -179,17 +199,32 @@ class ContentGenerator:
         self,
         prompt: str,
         repo_id: str,
-    ) -> List[str]:
+        example: str | None = None,
+        list_tool: str | None = None,
+    ) -> List[ListItem]:
         """生成列表项.
+
+        当 list_tool 有值时，直接调用静态 MCP 工具获取列表项；
+        否则交由 LLM 推理生成。
 
         Args:
             prompt: 提示词
             repo_id: 仓库ID
+            example: 生成列表项的参考示例（可选）
+            list_tool: 静态工具名称（如 get_all_methods / get_all_classes / get_all_modules），为空则使用 LLM
 
         Returns:
-            列表项字符串列表
+            列表项列表
         """
-        task_message = self._build_list_task_message(prompt, repo_id)
+        if list_tool:
+            logger.info(
+                "generate_list_items_static",
+                list_tool=list_tool,
+                repo_id=repo_id,
+            )
+            return await self.static_list_provider.get_list_items(list_tool, repo_id)
+
+        task_message = self._build_list_task_message(prompt, repo_id, example)
         raw_content = await self.agent.generate_with_tools(
             system_prompt=LIST_GENERATION_SYSTEM_PROMPT,
             task_message=task_message,
@@ -197,25 +232,29 @@ class ContentGenerator:
             max_iterations=10,
         )
 
-        return self._parse_list_content(raw_content)
+        item_names = self._parse_list_content(raw_content)
+        return [ListItem(name=name) for name in item_names]
 
-    def _build_list_task_message(self, prompt: str, repo_id: str) -> str:
+    def _build_list_task_message(self, prompt: str, repo_id: str, example: str | None = None) -> str:
         """构建列表生成任务消息."""
         task_parts = [
             f"仓库ID: {repo_id}",
-            "",
-            f"请根据以下主题生成一个简洁的标题列表:",
             f"主题: {prompt}",
-            "",
-            "要求：",
-            "1. 列表项应该简洁明了，每个项不超过15个字",
-            "2. 列表项应该是同一级别的并列关系",
-            "3. 直接输出列表，每行一个列表项",
-            "4. 不要输出编号或解释",
-            "5. 使用纯文本格式，不要包含任何Markdown标记（如#、##、**、-、*等）",
-            "",
-            "请开始生成。你可以使用工具来获取代码信息。",
         ]
+
+        if example:
+            task_parts.extend([
+                "",
+                "## 参考示例",
+                "以下是你应该参考的列表项示例格式：",
+                "",
+                example,
+            ])
+
+        task_parts.extend([
+            "",
+            "请开始生成。你可以使用工具来获取代码仓库信息。",
+        ])
 
         return "\n".join(task_parts)
 

@@ -79,7 +79,9 @@ class MCPClient:
         except Exception as e:
             logger.error(
                 "mcp_connect_failed",
+                error_type=type(e).__name__,
                 error=str(e),
+                exc_info=True,
             )
             raise
 
@@ -146,7 +148,9 @@ class MCPClient:
                 "tool_call_failed",
                 tool_name=tool_name,
                 arguments=arguments,
+                error_type=type(e).__name__,
                 error=str(e),
+                exc_info=True,
             )
             raise
 

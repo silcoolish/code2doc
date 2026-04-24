@@ -12,7 +12,8 @@ from app.core.state import AgentState, GenerationStatus, create_initial_state
 from app.infrastructure.llm_client import LLMClientFactory
 from app.infrastructure.workspace import WorkspaceServiceAdapter
 from app.infrastructure.mcp_client import MCPClient
-from app.utils.logger import get_logger
+from app.utils.logger import get_logger, bind_log_context
+from app.utils.timing import log_timing
 
 logger = get_logger(__name__)
 
@@ -40,6 +41,7 @@ def cleanup_temp_files(repo_id: str) -> None:
                 repo_id=repo_id,
                 temp_dir=str(temp_repo_dir),
                 error=str(e),
+                exc_info=True,
             )
     else:
         logger.debug(
@@ -108,14 +110,19 @@ class DocumentEngine:
         # 保存初始状态
         self._task_states[flow_id] = initial_state
 
-        # 启动异步任务
+        # 启动异步任务，在日志上下文中绑定 trace_id 和 repo_id
         task = asyncio.create_task(
-            self._run_generation(flow_id, initial_state),
+            self._run_generation_with_context(flow_id, initial_state),
             name=f"generation_{flow_id}",
         )
         self._running_tasks[flow_id] = task
 
         return flow_id
+
+    async def _run_generation_with_context(self, flow_id: str, initial_state: AgentState):
+        """在日志上下文中运行生成任务."""
+        with bind_log_context(trace_id=flow_id, repo_id=initial_state["repo_id"]):
+            await self._run_generation(flow_id, initial_state)
 
     async def _run_generation(self, flow_id: str, initial_state: AgentState):
         """执行生成工作流.
@@ -172,7 +179,9 @@ class DocumentEngine:
             logger.error(
                 "run_generation_failed",
                 flow_id=flow_id,
+                error_type=type(e).__name__,
                 error=str(e),
+                exc_info=True,
             )
 
             # 更新失败状态

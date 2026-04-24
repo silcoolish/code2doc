@@ -19,6 +19,13 @@ class TemplateType(str, Enum):
     TEMPLATE = "template"  # 模板内容
 
 
+class ContentType(str, Enum):
+    """内容类型."""
+
+    TEXT = "text"  # 文本内容
+    IMAGE = "img"  # 图片内容
+
+
 class GenerationStatus(str, Enum):
     """生成状态."""
 
@@ -34,21 +41,23 @@ class GenerationStatus(str, Enum):
 class TemplateBlock:
     """模板条目（Block）数据类.
 
-    对应workspace_service返回的block结构，用于文档生成流程。
+    对应 workspace DocumentBlockPayload 结构，用于文档生成流程。
+    保留 template/children/source_node_ids 等内部专用字段。
     """
 
     id: str  # 唯一标识
     parent_block_id: Optional[str]  # 父block ID
-    block_type: str  # "heading" | "paragraph"
-    block_title: str  # block标题
+    block_type: str  # "heading" | "paragraph" | "list" | "table" | "code" | "image" | "diagram"
     heading_level: int  # 标题层级
     order_no: int  # 排序号
-    markdown_content: str  # Markdown内容
-    text_content: str  # 纯文本内容
-    template: str  # "static" | "template"
+    content_text: str  # 纯文本内容（对应 workspace contentText）
+    template: str  # "static" | "template"（内部使用，保存时不传递）
     attrs: Dict[str, Any] = field(default_factory=dict)  # 模板属性
-    source_refs: List[str] = field(default_factory=list)  # 内容生成依据节点ID
-    children: List["TemplateBlock"] = field(default_factory=list)  # 子block列表
+    source_refs: List[Dict[str, Any]] = field(default_factory=list)  # 源码来源引用（对应 workspace sourceRefs）
+    source_node_ids: List[str] = field(default_factory=list)  # 内容生成依据节点ID（内部使用）
+    block_style: Dict[str, Any] = field(default_factory=dict)  # 块级样式（对应 workspace blockStyle）
+    inline_styles: List[Dict[str, Any]] = field(default_factory=list)  # 行内样式列表（对应 workspace inlineStyles）
+    children: List["TemplateBlock"] = field(default_factory=list)  # 子block列表（内部使用，保存时不传递）
 
     @property
     def is_template(self) -> bool:
@@ -88,8 +97,41 @@ class TemplateBlock:
         return self.attrs.get("example")
 
     @property
+    def content_type(self) -> str:
+        """获取内容类型 (text|img).
+
+        默认为 text，如果 attrs 中有 type 则使用 type 值。
+        """
+        return self.attrs.get("type", "text")
+
+    @property
+    def is_image_block(self) -> bool:
+        """是否为图片类型内容块."""
+        return self.content_type == "img"
+
+    @property
+    def image_id(self) -> Optional[str]:
+        """获取图片 ID.
+
+        当 type=img 时使用，存储需要获取 URL 的图片 ID。
+        """
+        return self.attrs.get("image_id")
+
+    @property
+    def list_tool(self) -> Optional[str]:
+        """获取静态列表工具名称.
+
+        当 list=true 时有效，指定直接调用的 MCP 工具名称（如 get_all_nodes）。
+        若为空，则交由 LLM 判断生成列表项。
+        """
+        return self.attrs.get("list_tool")
+
+    @property
     def img(self) -> Optional[str]:
-        """获取图片搜索提示词."""
+        """获取图片搜索提示词 (已废弃，保留用于兼容).
+
+        现在使用 type 和 image_ids 属性替代。
+        """
         return self.attrs.get("img")
 
     def to_dict(self) -> Dict:
@@ -98,21 +140,23 @@ class TemplateBlock:
             "id": self.id,
             "parent_block_id": self.parent_block_id,
             "block_type": self.block_type,
-            "block_title": self.block_title,
             "heading_level": self.heading_level,
             "order_no": self.order_no,
-            "markdown_content": self.markdown_content,
-            "text_content": self.text_content,
+            "content_text": self.content_text,
             "template": self.template,
             "attrs": self.attrs,
             "source_refs": self.source_refs,
+            "source_node_ids": self.source_node_ids,
+            "block_style": self.block_style,
+            "inline_styles": self.inline_styles,
         }
         if self.children:
             result["children"] = [child.to_dict() for child in self.children]
         return result
 
     def __repr__(self) -> str:
-        return f"TemplateBlock(id={self.id}, type={self.block_type}, template={self.is_template}, title={self.block_title[:30]}...)"
+        snippet = self.content_text[:30] if self.content_text else ""
+        return f"TemplateBlock(id={self.id}, type={self.block_type}, template={self.is_template}, content={snippet}...)"
 
 
 @dataclass
@@ -150,7 +194,8 @@ class DocumentBlock:
     block_type: str  # "heading" | "paragraph"
     text_content: str  # 文本内容
     heading_level: int = 0  # 标题层级
-    source_refs: List[str] = field(default_factory=list)  # 内容生成依据节点ID
+    source_refs: List[Dict[str, Any]] = field(default_factory=list)  # 源码来源引用（workspace 格式）
+    source_node_ids: List[str] = field(default_factory=list)  # 内容生成依据节点ID（内部使用）
     imgs: List[str] = field(default_factory=list)  # 包含的图片id
 
     def __post_init__(self):
@@ -175,5 +220,6 @@ class DocumentBlock:
             "text_content": self.text_content,
             "heading_level": self.heading_level,
             "source_refs": self.source_refs,
+            "source_node_ids": self.source_node_ids,
             "imgs": self.imgs,
         }

@@ -3,11 +3,12 @@
 封装与workspace_service的交互，提供模板获取、文档保存和资源上传功能。
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from app.config import get_settings
+from app.domain.model.block import TemplateBlock
 from app.infrastructure.http import HttpUtils
 from app.utils.logger import get_logger
 
@@ -15,118 +16,39 @@ logger = get_logger(__name__)
 
 
 @dataclass
-class TemplateBlock:
-    """模板条目（Block）数据类.
-
-    对应workspace_service返回的block结构。
-    """
-
-    id: str
-    parent_block_id: Optional[str]
-    block_type: str  # "heading" | "paragraph"
-    block_title: str
-    heading_level: int
-    order_no: int
-    markdown_content: str
-    text_content: str
-    template: str  # "static" | "template"
-    attrs: Dict[str, Any] = field(default_factory=dict)
-    source_refs: List[str] = field(default_factory=list)
-
-    @property
-    def is_template(self) -> bool:
-        """是否为模板内容块."""
-        return self.template == "template"
-
-    @property
-    def is_heading(self) -> bool:
-        """是否为标题."""
-        return self.block_type == "heading"
-
-    @property
-    def is_list(self) -> bool:
-        """是否生成列表."""
-        return self.attrs.get("list", False)
-
-    @property
-    def prompt(self) -> Optional[str]:
-        """获取生成提示词."""
-        return self.attrs.get("prompt")
-
-    @property
-    def min_length(self) -> Optional[int]:
-        """获取最小长度限制."""
-        value = self.attrs.get("min_length")
-        return int(value) if value is not None else None
-
-    @property
-    def max_length(self) -> Optional[int]:
-        """获取最大长度限制."""
-        value = self.attrs.get("max_length")
-        return int(value) if value is not None else None
-
-    @property
-    def example(self) -> Optional[str]:
-        """获取参考示例."""
-        return self.attrs.get("example")
-
-    @property
-    def img(self) -> Optional[str]:
-        """获取图片搜索提示词."""
-        return self.attrs.get("img")
-
-    def to_dict(self) -> Dict[str, Any]:
-        """转换为字典."""
-        return {
-            "id": self.id,
-            "parent_block_id": self.parent_block_id,
-            "block_type": self.block_type,
-            "block_title": self.block_title,
-            "heading_level": self.heading_level,
-            "order_no": self.order_no,
-            "markdown_content": self.markdown_content,
-            "text_content": self.text_content,
-            "template": self.template,
-            "attrs": self.attrs,
-            "source_refs": self.source_refs,
-        }
-
-
-@dataclass
 class SaveDocumentRequest:
-    """保存文档请求."""
+    """保存文档请求 - 对齐 workspace DocumentSaveRequest."""
 
     repo_id: str
+    doc_type: str
+    target_key: str
     title: str
     blocks: List[Dict[str, Any]]
-    document_kind: str = "project"
-    node_id: str = "__project__"
-    subtitle: str = ""
-    summary: str = ""
-    focus_path: Optional[str] = None
-    raw_markdown: str = ""
-    snapshot_hash: str = ""
-    source: str = "agent"
+    description: str = ""
+    target_path: Optional[str] = None
+    template_id: Optional[str] = None
+    source_type: str = "agent"
     status: str = "draft"
     created_by: str = "agent"
 
     def to_api_payload(self) -> Dict[str, Any]:
         """转换为API请求体."""
-        return {
+        payload: Dict[str, Any] = {
             "repoId": self.repo_id,
-            "documentKind": self.document_kind,
-            "nodeId": self.node_id,
+            "docType": self.doc_type,
+            "targetKey": self.target_key,
             "title": self.title,
-            "subtitle": self.subtitle,
-            "summary": self.summary,
-            "focusPath": self.focus_path,
-            "rawMarkdown": self.raw_markdown,
-            "snapshotHash": self.snapshot_hash,
-            "source": self.source,
+            "description": self.description,
+            "sourceType": self.source_type,
             "status": self.status,
             "createdBy": self.created_by,
             "blocks": self.blocks,
         }
+        if self.target_path is not None:
+            payload["targetPath"] = self.target_path
+        if self.template_id is not None:
+            payload["templateId"] = self.template_id
+        return payload
 
 
 @dataclass
@@ -142,6 +64,44 @@ class SaveDocumentResponse:
 @dataclass
 class UploadResourceResponse:
     """上传资源响应."""
+
+    success: bool
+    resource_id: Optional[str] = None
+    url: Optional[str] = None
+    message: Optional[str] = None
+    error: Optional[str] = None
+
+
+@dataclass
+class SaveResourceRequest:
+    """保存资源请求 - 对齐 workspace DocumentResourceSaveRequest."""
+
+    owner_type: str
+    owner_id: str
+    resource_type: str
+    file_name: str
+    mime_type: str
+    storage_path: str
+    block_id: Optional[str] = None
+
+    def to_api_payload(self) -> Dict[str, Any]:
+        """转换为API请求体."""
+        payload: Dict[str, Any] = {
+            "ownerType": self.owner_type,
+            "ownerId": self.owner_id,
+            "resourceType": self.resource_type,
+            "fileName": self.file_name,
+            "mimeType": self.mime_type,
+            "storagePath": self.storage_path,
+        }
+        if self.block_id is not None:
+            payload["blockId"] = self.block_id
+        return payload
+
+
+@dataclass
+class SaveResourceResponse:
+    """保存资源响应."""
 
     success: bool
     resource_id: Optional[str] = None
@@ -225,14 +185,14 @@ class WorkspaceServiceAdapter:
                     id=item.get("id", ""),
                     parent_block_id=item.get("parentBlockId"),
                     block_type=item.get("blockType", "paragraph"),
-                    block_title=item.get("blockTitle", ""),
                     heading_level=item.get("headingLevel", 0),
                     order_no=item.get("orderNo", 0),
-                    markdown_content=item.get("markdownContent", ""),
-                    text_content=item.get("textContent", ""),
+                    content_text=item.get("contentText", ""),
                     template=item.get("templateType", "static"),
                     attrs=item.get("attrs", {}),
                     source_refs=item.get("sourceRefs", []),
+                    block_style=item.get("blockStyle", {}),
+                    inline_styles=item.get("inlineStyles", []),
                 )
                 blocks.append(block)
 
@@ -248,7 +208,9 @@ class WorkspaceServiceAdapter:
             logger.error(
                 "get_template_blocks_error",
                 template_id=template_id,
+                error_type=type(e).__name__,
                 error=str(e),
+                exc_info=True,
             )
             raise
 
@@ -266,6 +228,8 @@ class WorkspaceServiceAdapter:
         logger.info(
             "save_document_request",
             repo_id=request.repo_id,
+            doc_type=request.doc_type,
+            target_key=request.target_key,
             title=request.title,
             block_count=len(request.blocks),
         )
@@ -303,9 +267,81 @@ class WorkspaceServiceAdapter:
             logger.error(
                 "save_document_error",
                 repo_id=request.repo_id,
+                error_type=type(e).__name__,
                 error=str(e),
+                exc_info=True,
             )
             return SaveDocumentResponse(
+                success=False,
+                error=str(e),
+            )
+
+    async def save_resource(
+        self,
+        request: SaveResourceRequest,
+    ) -> SaveResourceResponse:
+        """创建资源记录.
+
+        调用 workspace /api/resources 接口创建资源元数据记录。
+        当 storage_path 为 http URL 且不传 provider/objectKey 时，
+        workspace 会自动识别为 external_url 类型。
+
+        Args:
+            request: 保存资源请求
+
+        Returns:
+            保存资源响应
+        """
+        url = self._build_url("/api/resources")
+
+        logger.info(
+            "save_resource_request",
+            owner_type=request.owner_type,
+            owner_id=request.owner_id,
+            resource_type=request.resource_type,
+            storage_path=request.storage_path,
+        )
+
+        try:
+            response = await self.http.post(
+                url,
+                json_data=request.to_api_payload(),
+            )
+
+            if response.get("success"):
+                data = response.get("data", {})
+                logger.info(
+                    "save_resource_success",
+                    resource_id=data.get("id"),
+                    access_url=data.get("accessUrl"),
+                )
+                return SaveResourceResponse(
+                    success=True,
+                    resource_id=data.get("id"),
+                    url=data.get("accessUrl") or data.get("url"),
+                    message=response.get("message"),
+                )
+            else:
+                error_msg = response.get("message", "Unknown error")
+                logger.error(
+                    "save_resource_failed",
+                    owner_id=request.owner_id,
+                    error=error_msg,
+                )
+                return SaveResourceResponse(
+                    success=False,
+                    error=error_msg,
+                )
+
+        except Exception as e:
+            logger.error(
+                "save_resource_error",
+                owner_id=request.owner_id,
+                error_type=type(e).__name__,
+                error=str(e),
+                exc_info=True,
+            )
+            return SaveResourceResponse(
                 success=False,
                 error=str(e),
             )
@@ -403,7 +439,9 @@ class WorkspaceServiceAdapter:
                 "upload_resource_error",
                 owner_id=owner_id,
                 file_path=str(file_path),
+                error_type=type(e).__name__,
                 error=str(e),
+                exc_info=True,
             )
             return UploadResourceResponse(
                 success=False,

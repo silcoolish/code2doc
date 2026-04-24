@@ -1,15 +1,18 @@
 """内容生成策略 - 定义不同上下文处理策略的实现."""
 
+import asyncio
+import json
 from abc import ABC, abstractmethod
-from typing import Dict, List
+from typing import Any, Dict, List
 
 from app.domain.content_generator_agent import ContentGeneratorAgent
 from app.domain.prompts import (
-    STRATEGY1_FULL_CONTEXT_PROMPT,
-    STRATEGY2_FILTERED_CONTEXT_PROMPT,
+    FULL_CONTEXT_STRATEGY_PROMPT,
+    FILTERED_CONTEXT_STRATEGY_PROMPT,
 )
 from app.domain.model import DocumentBlock, TemplateBlock
 from app.utils.logger import get_logger
+from app.utils.token_estimator import TokenEstimator
 
 logger = get_logger(__name__)
 
@@ -69,9 +72,10 @@ class GenerationStrategy(ABC):
             results[block.id] = [
                 DocumentBlock(
                     block_type="heading" if block.is_heading else "paragraph",
-                    text_content=block.text_content or block.block_title or "",
+                    text_content=block.content_text or "",
                     heading_level=block.heading_level,
                     source_refs=block.source_refs,
+                    source_node_ids=block.source_node_ids,
                     imgs=[],
                 )
             ]
@@ -87,7 +91,6 @@ class GenerationStrategy(ABC):
         Returns:
             提取的JSON字符串，如果没有则返回None
         """
-        import json
 
         raw_content = raw_content.strip()
 
@@ -120,9 +123,7 @@ class GenerationStrategy(ABC):
             raw_content: Agent返回的原始内容
 
         Returns:
-            是否是降级信号
         """
-        import json
 
         try:
             json_content = self._extract_json_from_response(raw_content)
@@ -157,6 +158,80 @@ class GenerationStrategy(ABC):
             )
 
         return content
+
+    def _serialize_blocks(
+        self,
+        blocks: List[TemplateBlock],
+    ) -> List[Dict[str, Any]]:
+        """将block列表序列化为LLM所需的精简格式.
+
+        过滤掉blockStyle、inlineStyles、sourceRefs等LLM不需要的字段，
+        只保留与内容生成相关的核心属性。
+
+        Args:
+            blocks: 原始block列表
+
+        Returns:
+            精简后的字典列表
+        """
+        result: List[Dict[str, Any]] = []
+        for block in blocks:
+            data: Dict[str, Any] = {
+                "id": block.id,
+                "block_type": block.block_type,
+                "heading_level": block.heading_level,
+                "content_text": block.content_text,
+                "template": block.template,
+                "content_type": block.content_type,
+            }
+            if block.is_template:
+                if block.prompt:
+                    data["prompt"] = block.prompt
+                if block.image_id:
+                    data["image_id"] = block.image_id
+                if block.min_length is not None:
+                    data["min_length"] = block.min_length
+                if block.max_length is not None:
+                    data["max_length"] = block.max_length
+                if block.example:
+                    data["example"] = block.example
+            result.append(data)
+        return result
+
+    def _build_task_message(
+        self,
+        blocks: List[TemplateBlock],
+        repo_id: str,
+        context_description: str = "",
+    ) -> str:
+        """构建任务消息.
+
+        将block列表序列化为JSON后直接嵌入提示词，
+        由LLM自行解析字段含义并生成内容。
+
+        Args:
+            blocks: block列表
+            repo_id: 仓库ID
+            context_description: 上下文描述（如"共X个内容块"）
+
+        Returns:
+            任务消息字符串
+        """
+        payload = self._serialize_blocks(blocks)
+        blocks_json = json.dumps(payload, ensure_ascii=False, indent=2)
+
+        parts = [
+            f"仓库ID: {repo_id}",
+            "",
+            context_description,
+            "",
+            "## 内容块列表",
+            "",
+            "```json",
+            blocks_json,
+            "```",
+        ]
+        return "\n".join(parts)
 
 
 class FullContextStrategy(GenerationStrategy):
@@ -199,7 +274,7 @@ class FullContextStrategy(GenerationStrategy):
         task_message = self._build_task_message(blocks, repo_id)
 
         raw_content = await self.agent.generate_with_tools(
-            system_prompt=STRATEGY1_FULL_CONTEXT_PROMPT,
+            system_prompt=FULL_CONTEXT_STRATEGY_PROMPT,
             task_message=task_message,
             repo_id=repo_id,
             max_iterations=15,
@@ -217,94 +292,9 @@ class FullContextStrategy(GenerationStrategy):
         blocks: List[TemplateBlock],
         repo_id: str,
     ) -> str:
-        """构建任务消息.
-
-        Args:
-            blocks: 完整block列表
-            repo_id: 仓库ID
-
-        Returns:
-            任务消息
-        """
-        task_parts = [
-            f"仓库ID: {repo_id}",
-            "",
-            "## 完整文档内容块列表",
-            f"共 {len(blocks)} 个内容块。请处理所有内容块：",
-            "- 对于 `template='static'` 的内容块：保留其 `block_title` 或 `text_content` 作为内容",
-            "- 对于 `template='template'` 的内容块：根据 `prompt` 生成新内容",
-            "",
-            "### 内容块列表",
-            "",
-        ]
-
-        for i, block in enumerate(blocks, 1):
-            task_parts.append(f"#### 内容块{i}")
-            task_parts.append(f"- ID: {block.id}")
-            task_parts.append(f"- 类型: {'标题' if block.is_heading else '正文'}")
-            task_parts.append(f"- 模板类型: {block.template}")
-            task_parts.append(f"- 标题/主题: {block.block_title}")
-
-            if block.is_template:
-                task_parts.append(f"- 生成提示词: {block.prompt or '无'}")
-
-                # 添加长度限制
-                length_constraints = []
-                if block.min_length:
-                    length_constraints.append(f"最少{block.min_length}字")
-                if block.max_length:
-                    length_constraints.append(f"最多{block.max_length}字")
-
-                if length_constraints:
-                    task_parts.append(f"- 字数要求: {', '.join(length_constraints)}")
-
-                # 添加参考示例
-                if block.example:
-                    task_parts.append(f"- 参考示例: {block.example}")
-            else:
-                task_parts.append(f"- 静态内容: {block.text_content or block.block_title}")
-
-            task_parts.append("")
-
-        task_parts.extend(
-            [
-                "## 输出要求",
-                '请按照以下JSON格式输出所有内容块的内容（包含静态和模板内容块）：',
-                "```json",
-                "{",
-                '  "paragraphs": [',
-            ]
-        )
-
-        for block in blocks:
-            task_parts.extend(
-                [
-                    "    {",
-                    f'      "paragraph_id": "{block.id}",',
-                    '      "content": "生成的内容",',
-                    f'      "is_heading": {str(block.is_heading).lower()}',
-                    "    },",
-                ]
-            )
-
-        task_parts.extend(
-            [
-                "  ]",
-                "}",
-                "```",
-                "",
-                "## 格式要求",
-                "- 静态内容块直接保留原标题或正文",
-                "- 模板内容块生成纯文本格式，不要包含任何Markdown标记",
-                "- 正文必须是完整的段落式描述，不要分点简述",
-                "- 正文首行必须空两格（添加两个全角空格）",
-                "- 标题不要添加数字序号",
-                "",
-                "请开始生成。你可以使用工具来获取代码信息。",
-            ]
-        )
-
-        return "\n".join(task_parts)
+        """构建任务消息."""
+        desc = f"共 {len(blocks)} 个内容块（包含静态和模板内容块），请按规则处理所有内容块。"
+        return super()._build_task_message(blocks, repo_id, desc)
 
     def _parse_response(
         self,
@@ -317,10 +307,7 @@ class FullContextStrategy(GenerationStrategy):
             raw_content: 原始响应内容
             blocks: 原始block列表
 
-        Returns:
-            生成结果映射
         """
-        import json
 
         results: Dict[str, List[DocumentBlock]] = {}
 
@@ -336,34 +323,72 @@ class FullContextStrategy(GenerationStrategy):
                     block_id = item.get("paragraph_id")
                     content = item.get("content", "")
                     is_heading = item.get("is_heading", False)
+                    is_image = item.get("is_image", False)
 
                     if block_id and block_id in block_map:
                         block = block_map[block_id]
 
-                        content = self._apply_length_constraints(
-                            content,
-                            block.min_length,
-                            block.max_length,
-                        )
-
-                        results[block_id] = [
-                            DocumentBlock(
-                                block_type="heading" if is_heading else "paragraph",
-                                text_content=content,
-                                heading_level=block.heading_level if is_heading else 0,
-                                source_refs=block.source_refs,
-                                imgs=[],
+                        # 判断是否为图片类型的block
+                        if is_image or block.is_image_block:
+                            # 图片类型的block：content是单个图片URL
+                            image_url = content.strip()
+                            if image_url:
+                                results[block_id] = [
+                                    DocumentBlock(
+                                        block_type="paragraph",
+                                        text_content=f"![{block.content_text}]({image_url})",
+                                        heading_level=0,
+                                        source_refs=block.source_refs,
+                                        source_node_ids=block.source_node_ids,
+                                        imgs=[image_url],
+                                    )
+                                ]
+                                logger.info(
+                                    "image_block_parsed",
+                                    block_id=block_id,
+                                    image_url=image_url,
+                                )
+                            else:
+                                results[block_id] = [
+                                    DocumentBlock(
+                                        block_type="paragraph",
+                                        text_content=f"[图片获取失败: {block.content_text}]",
+                                        heading_level=0,
+                                        source_refs=block.source_refs,
+                                        source_node_ids=block.source_node_ids,
+                                        imgs=[],
+                                    )
+                                ]
+                        else:
+                            content = self._apply_length_constraints(
+                                content,
+                                block.min_length,
+                                block.max_length,
                             )
-                        ]
 
-                        logger.info(
-                            "block_parsed",
-                            block_id=block_id,
-                            content_length=len(content),
-                        )
+                            results[block_id] = [
+                                DocumentBlock(
+                                    block_type="heading" if is_heading else "paragraph",
+                                    text_content=content,
+                                    heading_level=block.heading_level if is_heading else 0,
+                                    source_refs=block.source_refs,
+                                    source_node_ids=block.source_node_ids,
+                                    imgs=[],
+                                )
+                            ]
+
+                            logger.info(
+                                "block_parsed",
+                                block_id=block_id,
+                                content_length=len(content),
+                            )
 
             except json.JSONDecodeError as e:
-                logger.error("response_json_parse_failed", error=str(e))
+                logger.error(
+                    "response_json_parse_failed",
+                    error=str(e),
+                    exc_info=True,
+                )
 
         # 为未解析到的block创建默认结果
         for block in blocks:
@@ -376,11 +401,11 @@ class FullContextStrategy(GenerationStrategy):
                 results[block.id] = [
                     DocumentBlock(
                         block_type="heading" if block.is_heading else "paragraph",
-                        text_content=block.text_content
-                        or block.block_title
+                        text_content=block.content_text
                         or f"[内容块 '{block.id}' 生成缺失]",
                         heading_level=block.heading_level,
                         source_refs=block.source_refs,
+                        source_node_ids=block.source_node_ids,
                         imgs=[],
                     )
                 ]
@@ -440,7 +465,7 @@ class FilteredContextStrategy(GenerationStrategy):
         task_message = self._build_task_message(template_blocks, repo_id)
 
         raw_content = await self.agent.generate_with_tools(
-            system_prompt=STRATEGY2_FILTERED_CONTEXT_PROMPT,
+            system_prompt=FILTERED_CONTEXT_STRATEGY_PROMPT,
             task_message=task_message,
             repo_id=repo_id,
             max_iterations=15,
@@ -479,84 +504,9 @@ class FilteredContextStrategy(GenerationStrategy):
         template_blocks: List[TemplateBlock],
         repo_id: str,
     ) -> str:
-        """构建任务消息.
-
-        Args:
-            template_blocks: 模板block列表
-            repo_id: 仓库ID
-
-        Returns:
-            任务消息
-        """
-        task_parts = [
-            f"仓库ID: {repo_id}",
-            "",
-            "## 模板内容块列表",
-            f"共 {len(template_blocks)} 个模板内容块，请依次为每个内容块生成内容。",
-            "",
-        ]
-
-        for i, block in enumerate(template_blocks, 1):
-            type_desc = "标题" if block.is_heading else "正文"
-            task_parts.append(f"### 内容块{i}")
-            task_parts.append(f"- ID: {block.id}")
-            task_parts.append(f"- 类型: {type_desc}")
-            task_parts.append(f"- 主题: {block.prompt or block.block_title}")
-
-            # 添加长度限制
-            length_constraints = []
-            if block.min_length:
-                length_constraints.append(f"最少{block.min_length}字")
-            if block.max_length:
-                length_constraints.append(f"最多{block.max_length}字")
-
-            if length_constraints:
-                task_parts.append(f"- 字数要求: {', '.join(length_constraints)}")
-
-            # 添加参考示例
-            if block.example:
-                task_parts.append(f"- 参考示例: {block.example}")
-
-            task_parts.append("")
-
-        task_parts.extend(
-            [
-                "## 输出要求",
-                '请按照以下JSON格式输出所有内容块的内容：',
-                "```json",
-                "{",
-                '  "paragraphs": [',
-            ]
-        )
-
-        for block in template_blocks:
-            task_parts.extend(
-                [
-                    "    {",
-                    f'      "paragraph_id": "{block.id}",',
-                    '      "content": "生成的段落内容",',
-                    f'      "is_heading": {str(block.is_heading).lower()}',
-                    "    },",
-                ]
-            )
-
-        task_parts.extend(
-            [
-                "  ]",
-                "}",
-                "```",
-                "",
-                "## 格式要求",
-                "- 使用纯文本格式，不要包含任何Markdown标记",
-                "- 正文必须是完整的段落式描述，不要分点简述",
-                "- 正文首行必须空两格（添加两个全角空格）",
-                "- 标题不要添加数字序号",
-                "",
-                "请开始生成。你可以使用工具来获取代码信息。",
-            ]
-        )
-
-        return "\n".join(task_parts)
+        """构建任务消息."""
+        desc = f"共 {len(template_blocks)} 个模板内容块，请依次为每个内容块生成内容。"
+        return super()._build_task_message(template_blocks, repo_id, desc)
 
     def _parse_response(
         self,
@@ -568,11 +518,7 @@ class FilteredContextStrategy(GenerationStrategy):
         Args:
             raw_content: 原始响应内容
             template_blocks: 模板block列表
-
-        Returns:
-            生成结果映射
         """
-        import json
 
         results: Dict[str, List[DocumentBlock]] = {}
 
@@ -592,6 +538,37 @@ class FilteredContextStrategy(GenerationStrategy):
                     if block_id and block_id in block_map:
                         block = block_map[block_id]
 
+                        if block.is_image_block:
+                            image_url = content.strip()
+                            if image_url:
+                                results[block_id] = [
+                                    DocumentBlock(
+                                        block_type="paragraph",
+                                        text_content=f"![{block.content_text}]({image_url})",
+                                        heading_level=0,
+                                        source_refs=block.source_refs,
+                                        source_node_ids=block.source_node_ids,
+                                        imgs=[image_url],
+                                    )
+                                ]
+                                logger.info(
+                                    "image_block_parsed",
+                                    block_id=block_id,
+                                    image_url=image_url,
+                                )
+                            else:
+                                results[block_id] = [
+                                    DocumentBlock(
+                                        block_type="paragraph",
+                                        text_content=f"[图片获取失败: {block.content_text}]",
+                                        heading_level=0,
+                                        source_refs=block.source_refs,
+                                        source_node_ids=block.source_node_ids,
+                                        imgs=[],
+                                    )
+                                ]
+                            continue
+
                         content = self._apply_length_constraints(
                             content,
                             block.min_length,
@@ -604,6 +581,7 @@ class FilteredContextStrategy(GenerationStrategy):
                                 text_content=content,
                                 heading_level=block.heading_level if is_heading else 0,
                                 source_refs=block.source_refs,
+                                source_node_ids=block.source_node_ids,
                                 imgs=[],
                             )
                         ]
@@ -615,7 +593,11 @@ class FilteredContextStrategy(GenerationStrategy):
                         )
 
             except json.JSONDecodeError as e:
-                logger.error("response_json_parse_failed", error=str(e))
+                logger.error(
+                    "response_json_parse_failed",
+                    error=str(e),
+                    exc_info=True,
+                )
 
         # 为未解析到的block创建默认结果
         for block in template_blocks:
@@ -631,6 +613,7 @@ class FilteredContextStrategy(GenerationStrategy):
                         text_content=f"[内容块 '{block.id}' 生成缺失]",
                         heading_level=block.heading_level,
                         source_refs=block.source_refs,
+                        source_node_ids=block.source_node_ids,
                         imgs=[],
                     )
                 ]
@@ -694,21 +677,35 @@ class BatchedGenerationStrategy(GenerationStrategy):
             total_batches=total_batches,
         )
 
-        # 分批处理
-        all_template_results: Dict[str, List[DocumentBlock]] = {}
-
+        # 分批处理（各批次之间无依赖，并行执行）
+        tasks = []
         for i in range(0, len(template_blocks), batch_size):
             batch = template_blocks[i : i + batch_size]
             batch_num = i // batch_size + 1
 
             logger.info(
-                "processing_batch",
+                "scheduling_batch",
                 batch_num=batch_num,
                 total_batches=total_batches,
                 batch_size=len(batch),
             )
 
-            batch_results = await self._process_batch(batch, repo_id, batch_num)
+            tasks.append(self._process_batch(batch, repo_id, batch_num))
+
+        # 并行执行所有批次
+        batch_results_list = await asyncio.gather(*tasks, return_exceptions=True)
+
+        all_template_results: Dict[str, List[DocumentBlock]] = {}
+        for batch_num, batch_results in enumerate(batch_results_list, start=1):
+            if isinstance(batch_results, Exception):
+                logger.error(
+                    "batch_processing_exception",
+                    batch_num=batch_num,
+                    error_type=type(batch_results).__name__,
+                    error=str(batch_results),
+                    exc_info=True,
+                )
+                continue
             all_template_results.update(batch_results)
 
         # 构建静态block的结果
@@ -722,11 +719,33 @@ class BatchedGenerationStrategy(GenerationStrategy):
             elif block.id in static_results:
                 all_results[block.id] = static_results[block.id]
 
+        # 为缺失的模板 block 补充占位符（某个批次异常时）
+        template_block_ids = {b.id for b in template_blocks}
+        missing_ids = template_block_ids - set(all_template_results.keys())
+        for block_id in missing_ids:
+            block = next((b for b in template_blocks if b.id == block_id), None)
+            if block:
+                logger.warning(
+                    "batch_block_missing_fallback",
+                    block_id=block_id,
+                )
+                all_results[block_id] = [
+                    DocumentBlock(
+                        block_type="heading" if block.is_heading else "paragraph",
+                        text_content=f"[内容块 '{block_id}' 生成缺失]",
+                        heading_level=block.heading_level,
+                        source_refs=block.source_refs,
+                        source_node_ids=block.source_node_ids,
+                        imgs=[],
+                    )
+                ]
+
         logger.info(
             "batched_generation_strategy_complete",
             total_results=len(all_results),
             template_results=len(all_template_results),
             static_results=len(static_results),
+            missing_blocks=len(missing_ids),
         )
 
         return all_results
@@ -734,7 +753,7 @@ class BatchedGenerationStrategy(GenerationStrategy):
     def _calculate_batch_size(self, template_blocks: List[TemplateBlock]) -> int:
         """计算每批处理的block数量.
 
-        根据预估的token数和模型上下文限制动态计算。
+        使用 TokenEstimator 根据预估的token数和模型上下文限制动态计算。
 
         Args:
             template_blocks: 模板block列表
@@ -742,33 +761,10 @@ class BatchedGenerationStrategy(GenerationStrategy):
         Returns:
             每批block数量
         """
-        if not template_blocks:
-            return 0
-
-        # 预估每个block的平均token数
-        total_chars = sum(
-            len(b.id)
-            + len(b.block_title)
-            + len(b.prompt or "")
-            + len(b.markdown_content)
-            + len(b.text_content or "")
-            + 100  # JSON开销
-            for b in template_blocks
+        return TokenEstimator.estimate_batch_size(
+            template_blocks,
+            self.agent.context_limit,
         )
-        total_tokens = total_chars // 2
-        avg_tokens_per_block = total_tokens // len(template_blocks)
-
-        # 获取模型上下文限制
-        context_limit = self.agent.context_limit
-
-        # 计算安全批次大小
-        safe_context = context_limit * self.SAFETY_RATIO
-        batch_size = int(safe_context // avg_tokens_per_block) if avg_tokens_per_block > 0 else self.MAX_BATCH_SIZE
-
-        # 确保每批至少1个，最多MAX_BATCH_SIZE个
-        batch_size = max(1, min(batch_size, self.MAX_BATCH_SIZE))
-
-        return batch_size
 
     async def _process_batch(
         self,
@@ -785,120 +781,37 @@ class BatchedGenerationStrategy(GenerationStrategy):
 
         Returns:
             批次生成结果
+
+        Raises:
+            RuntimeError: 当批次处理失败时
         """
-        try:
-            task_message = self._build_task_message(batch, repo_id)
+        task_message = self._build_task_message(batch, repo_id)
 
-            raw_content = await self.agent.generate_with_tools(
-                system_prompt=STRATEGY2_FILTERED_CONTEXT_PROMPT,
-                task_message=task_message,
-                repo_id=repo_id,
-                max_iterations=15,
-            )
+        raw_content = await self.agent.generate_with_tools(
+            system_prompt=FILTERED_CONTEXT_STRATEGY_PROMPT,
+            task_message=task_message,
+            repo_id=repo_id,
+            max_iterations=15,
+        )
 
-            # 检查降级信号
-            if self._is_fallback_signal(raw_content):
-                logger.warning(
-                    "batch_fallback_signal_received",
-                    batch_num=batch_num,
-                )
-                # 降级为单个block逐个生成
-                return await self._generate_individual(batch, repo_id)
-
-            return self._parse_response(raw_content, batch)
-
-        except Exception as e:
-            logger.error(
-                "batch_processing_failed",
+        # 检查降级信号
+        if self._is_fallback_signal(raw_content):
+            logger.warning(
+                "batch_fallback_signal_received",
                 batch_num=batch_num,
-                error=str(e),
             )
-            # 降级为单个block逐个生成
-            return await self._generate_individual(batch, repo_id)
+            raise RuntimeError("Agent returned fallback signal")
+
+        return self._parse_response(raw_content, batch)
 
     def _build_task_message(
         self,
         batch: List[TemplateBlock],
         repo_id: str,
     ) -> str:
-        """构建批次任务消息.
-
-        Args:
-            batch: 批次block列表
-            repo_id: 仓库ID
-
-        Returns:
-            任务消息
-        """
-        task_parts = [
-            f"仓库ID: {repo_id}",
-            "",
-            "## 模板内容块列表",
-            f"共 {len(batch)} 个模板内容块，请依次为每个内容块生成内容。",
-            "",
-        ]
-
-        for i, block in enumerate(batch, 1):
-            type_desc = "标题" if block.is_heading else "正文"
-            task_parts.append(f"### 内容块{i}")
-            task_parts.append(f"- ID: {block.id}")
-            task_parts.append(f"- 类型: {type_desc}")
-            task_parts.append(f"- 主题: {block.prompt or block.block_title}")
-
-            # 添加长度限制
-            length_constraints = []
-            if block.min_length:
-                length_constraints.append(f"最少{block.min_length}字")
-            if block.max_length:
-                length_constraints.append(f"最多{block.max_length}字")
-
-            if length_constraints:
-                task_parts.append(f"- 字数要求: {', '.join(length_constraints)}")
-
-            # 添加参考示例
-            if block.example:
-                task_parts.append(f"- 参考示例: {block.example}")
-
-            task_parts.append("")
-
-        task_parts.extend(
-            [
-                "## 输出要求",
-                '请按照以下JSON格式输出所有内容块的内容：',
-                "```json",
-                "{",
-                '  "paragraphs": [',
-            ]
-        )
-
-        for block in batch:
-            task_parts.extend(
-                [
-                    "    {",
-                    f'      "paragraph_id": "{block.id}",',
-                    '      "content": "生成的段落内容",',
-                    f'      "is_heading": {str(block.is_heading).lower()}',
-                    "    },",
-                ]
-            )
-
-        task_parts.extend(
-            [
-                "  ]",
-                "}",
-                "```",
-                "",
-                "## 格式要求",
-                "- 使用纯文本格式，不要包含任何Markdown标记",
-                "- 正文必须是完整的段落式描述，不要分点简述",
-                "- 正文首行必须空两格（添加两个全角空格）",
-                "- 标题不要添加数字序号",
-                "",
-                "请开始生成。你可以使用工具来获取代码信息。",
-            ]
-        )
-
-        return "\n".join(task_parts)
+        """构建批次任务消息."""
+        desc = f"共 {len(batch)} 个模板内容块，请依次为每个内容块生成内容。"
+        return super()._build_task_message(batch, repo_id, desc)
 
     def _parse_response(
         self,
@@ -908,13 +821,8 @@ class BatchedGenerationStrategy(GenerationStrategy):
         """解析批次响应.
 
         Args:
-            raw_content: 原始响应内容
-            batch: 批次block列表
-
-        Returns:
             生成结果映射
         """
-        import json
 
         results: Dict[str, List[DocumentBlock]] = {}
 
@@ -934,6 +842,37 @@ class BatchedGenerationStrategy(GenerationStrategy):
                     if block_id and block_id in block_map:
                         block = block_map[block_id]
 
+                        if block.is_image_block:
+                            image_url = content.strip()
+                            if image_url:
+                                results[block_id] = [
+                                    DocumentBlock(
+                                        block_type="paragraph",
+                                        text_content=f"![{block.content_text}]({image_url})",
+                                        heading_level=0,
+                                        source_refs=block.source_refs,
+                                        source_node_ids=block.source_node_ids,
+                                        imgs=[image_url],
+                                    )
+                                ]
+                                logger.info(
+                                    "image_block_parsed",
+                                    block_id=block_id,
+                                    image_url=image_url,
+                                )
+                            else:
+                                results[block_id] = [
+                                    DocumentBlock(
+                                        block_type="paragraph",
+                                        text_content=f"[图片获取失败: {block.content_text}]",
+                                        heading_level=0,
+                                        source_refs=block.source_refs,
+                                        source_node_ids=block.source_node_ids,
+                                        imgs=[],
+                                    )
+                                ]
+                            continue
+
                         content = self._apply_length_constraints(
                             content,
                             block.min_length,
@@ -946,12 +885,17 @@ class BatchedGenerationStrategy(GenerationStrategy):
                                 text_content=content,
                                 heading_level=block.heading_level if is_heading else 0,
                                 source_refs=block.source_refs,
+                                source_node_ids=block.source_node_ids,
                                 imgs=[],
                             )
                         ]
 
             except json.JSONDecodeError as e:
-                logger.error("batch_response_json_parse_failed", error=str(e))
+                logger.error(
+                    "batch_response_json_parse_failed",
+                    error=str(e),
+                    exc_info=True,
+                )
 
         # 为未解析到的block创建默认结果
         for block in batch:
@@ -962,115 +906,7 @@ class BatchedGenerationStrategy(GenerationStrategy):
                         text_content=f"[内容块 '{block.id}' 生成缺失]",
                         heading_level=block.heading_level,
                         source_refs=block.source_refs,
-                        imgs=[],
-                    )
-                ]
-
-        return results
-
-    async def _generate_individual(
-        self,
-        blocks: List[TemplateBlock],
-        repo_id: str,
-    ) -> Dict[str, List[DocumentBlock]]:
-        """逐个生成block（降级方案）.
-
-        Args:
-            blocks: block列表
-            repo_id: 仓库ID
-
-        Returns:
-            生成结果映射
-        """
-        from app.domain.prompts import CONTENT_GENERATION_SYSTEM_PROMPT
-
-        logger.warning(
-            "fallback_to_individual_generation",
-            block_count=len(blocks),
-        )
-
-        results: Dict[str, List[DocumentBlock]] = {}
-
-        for block in blocks:
-            try:
-                type_desc = "标题" if block.is_heading else "正文"
-                task_parts = [
-                    f"仓库ID: {repo_id}",
-                    "",
-                    f"请根据以下主题生成{type_desc}内容:",
-                    f"主题: {block.prompt}",
-                ]
-
-                length_constraints = []
-                if block.min_length:
-                    length_constraints.append(f"最少{block.min_length}字")
-                if block.max_length:
-                    length_constraints.append(f"最多{block.max_length}字")
-
-                if length_constraints:
-                    task_parts.append(f"\n字数要求: {', '.join(length_constraints)}")
-
-                if block.example:
-                    task_parts.extend(["\n参考示例:", block.example])
-
-                task_parts.append("\n请生成一段完整的内容。")
-                task_parts.extend(
-                    [
-                        "\n格式要求：",
-                        "- 使用纯文本格式，不要包含任何Markdown标记",
-                        "- 直接输出内容，不要使用代码块包裹",
-                    ]
-                )
-
-                if block.is_heading:
-                    task_parts.append("- 标题应为纯文本，不要添加数字序号")
-                else:
-                    task_parts.extend(
-                        [
-                            "- 正文必须是完整的段落式描述，不要分点简述",
-                            "- 正文首行必须空两格（添加两个全角空格）",
-                            "- 正文要详细说明实现原理、处理逻辑、关键步骤等",
-                        ]
-                    )
-
-                task_parts.append("\n请开始生成。你可以使用工具来获取代码信息。")
-                task_message = "\n".join(task_parts)
-
-                raw_content = await self.agent.generate_with_tools(
-                    system_prompt=CONTENT_GENERATION_SYSTEM_PROMPT,
-                    task_message=task_message,
-                    repo_id=repo_id,
-                    max_iterations=10,
-                )
-
-                content = raw_content.strip()
-                import re
-                content = re.sub(r'^#{1,6}\s*', '', content)
-                content = re.sub(r'\*\*', '', content)
-                content = re.sub(r'\*', '', content)
-
-                results[block.id] = [
-                    DocumentBlock(
-                        block_type="heading" if block.is_heading else "paragraph",
-                        text_content=content,
-                        heading_level=block.heading_level,
-                        source_refs=block.source_refs,
-                        imgs=[],
-                    )
-                ]
-
-            except Exception as e:
-                logger.error(
-                    "individual_generation_failed",
-                    block_id=block.id,
-                    error=str(e),
-                )
-                results[block.id] = [
-                    DocumentBlock(
-                        block_type="heading" if block.is_heading else "paragraph",
-                        text_content=f"[生成失败: {str(e)}]",
-                        heading_level=block.heading_level,
-                        source_refs=block.source_refs,
+                        source_node_ids=block.source_node_ids,
                         imgs=[],
                     )
                 ]
@@ -1084,9 +920,6 @@ class StrategySelector:
     根据预估的token数和模型上下文限制选择最适合的生成策略。
     """
 
-    # 安全比例 - 使用80%的上下文限制作为安全阈值
-    SAFETY_RATIO = 0.8
-
     def __init__(self, agent: ContentGeneratorAgent):
         """初始化策略选择器.
 
@@ -1098,9 +931,9 @@ class StrategySelector:
     def select(self, blocks: List[TemplateBlock]) -> tuple[GenerationStrategy, int]:
         """选择最适合的生成策略.
 
-        策略选择逻辑：
-        1. 完整上下文策略：完整block列表token < 80%上下文限制
-        2. 精简上下文策略：过滤静态后token < 80%上下文限制
+        策略选择逻辑（TokenEstimator 已内部包含安全余量）：
+        1. 完整上下文策略：预估 token < 上下文限制
+        2. 精简上下文策略：过滤静态后预估 token < 上下文限制
         3. 分批生成策略：以上都不满足
 
         Args:
@@ -1111,11 +944,12 @@ class StrategySelector:
         """
         context_limit = self.agent.context_limit
 
-        # 预估完整上下文的token
-        full_context_tokens = self._estimate_tokens(blocks)
+        # 使用 TokenEstimator 预估完整上下文的 token
+        full_context_tokens = TokenEstimator.estimate_full_context(blocks)
 
         # 如果完整上下文在安全范围内，选择完整上下文策略
-        if full_context_tokens < context_limit * self.SAFETY_RATIO:
+        # TokenEstimator 已内部包含安全余量，直接与 context_limit 比较
+        if full_context_tokens < context_limit:
             logger.info(
                 "strategy_selected",
                 strategy="full_context",
@@ -1124,19 +958,22 @@ class StrategySelector:
             )
             return FullContextStrategy(self.agent), full_context_tokens
 
-        # 预估精简上下文的token（过滤静态block）
+        # 预估精简上下文的 token（过滤静态 block）
         template_blocks = [b for b in blocks if b.is_template]
-        filtered_context_tokens = self._estimate_tokens(template_blocks)
+        static_blocks = [b for b in blocks if not b.is_template]
+        filtered_context_tokens = TokenEstimator.estimate_filtered_context(
+            template_blocks, static_blocks
+        )
 
         # 如果精简上下文在安全范围内，选择精简上下文策略
-        if filtered_context_tokens < context_limit * self.SAFETY_RATIO:
+        if filtered_context_tokens < context_limit:
             logger.info(
                 "strategy_selected",
                 strategy="filtered_context",
                 estimated_tokens=filtered_context_tokens,
                 context_limit=context_limit,
                 template_blocks=len(template_blocks),
-                static_blocks=len(blocks) - len(template_blocks),
+                static_blocks=len(static_blocks),
             )
             return FilteredContextStrategy(self.agent), filtered_context_tokens
 
@@ -1149,26 +986,3 @@ class StrategySelector:
             template_blocks=len(template_blocks),
         )
         return BatchedGenerationStrategy(self.agent), filtered_context_tokens
-
-    def _estimate_tokens(self, blocks: List[TemplateBlock]) -> int:
-        """预估block列表的token数量.
-
-        Args:
-            blocks: block列表
-
-        Returns:
-            预估token数
-        """
-        # 预估每个block的字符数
-        total_chars = sum(
-            len(b.id)
-            + len(b.block_title)
-            + len(b.prompt or "")
-            + len(b.markdown_content)
-            + len(b.text_content or "")
-            + 100  # JSON开销
-            for b in blocks
-        )
-
-        # 转换为token (保守估计: 2字符/token) + 安全余量
-        return total_chars // 2 + 20000

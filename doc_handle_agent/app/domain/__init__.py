@@ -17,6 +17,7 @@ from app.domain.model import (
     TemplateBlock,
     TemplateType,
 )
+from app.domain.static_list_provider import ListItem, StaticListProvider
 
 __all__ = [
     # 内容生成
@@ -35,4 +36,7 @@ __all__ = [
     "TemplateBlock",
     "ImageInfo",
     "DocumentBlock",
+    # 静态列表
+    "ListItem",
+    "StaticListProvider",
 ]

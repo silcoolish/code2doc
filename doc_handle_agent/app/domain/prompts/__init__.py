@@ -32,29 +32,41 @@ def _load_prompt(filename: str) -> str:
     return content
 
 
-# 批量内容生成系统提示词
-BATCH_CONTENT_GENERATION_SYSTEM_PROMPT: str = _load_prompt("batch_content_generation")
+# 知识底座图模型介绍（供内容生成策略复用）
+_KNOWLEDGE_BASE_MODEL_PROMPT: str = _load_prompt("knowledge_base_model")
 
-# 单个内容生成系统提示词
-CONTENT_GENERATION_SYSTEM_PROMPT: str = _load_prompt("content_generation")
+# 内容块格式说明与输出要求（供内容生成策略复用）
+_BLOCK_FORMAT_GUIDE_PROMPT: str = _load_prompt("block_format_guide")
+
+# 批量内容生成系统提示词
+BATCH_CONTENT_GENERATION_SYSTEM_PROMPT: str = (
+    _load_prompt("batch_content_generation") + "\n\n" + _KNOWLEDGE_BASE_MODEL_PROMPT
+)
 
 # 列表生成系统提示词
 LIST_GENERATION_SYSTEM_PROMPT: str = _load_prompt("list_generation")
 
-# 图片下载系统提示词
-IMAGE_DOWNLOAD_SYSTEM_PROMPT: str = _load_prompt("image_download")
+# 完整上下文策略系统提示词
+FULL_CONTEXT_STRATEGY_PROMPT: str = (
+    _load_prompt("full_context_strategy")
+    + "\n\n"
+    + _BLOCK_FORMAT_GUIDE_PROMPT
+    + "\n\n"
+    + _KNOWLEDGE_BASE_MODEL_PROMPT
+)
 
-# 策略一：完整上下文内容生成系统提示词
-STRATEGY1_FULL_CONTEXT_PROMPT: str = _load_prompt("strategy1_full_context")
-
-# 策略二：精简上下文内容生成系统提示词
-STRATEGY2_FILTERED_CONTEXT_PROMPT: str = _load_prompt("strategy2_filtered_context")
+# 精简上下文策略系统提示词
+FILTERED_CONTEXT_STRATEGY_PROMPT: str = (
+    _load_prompt("filtered_context_strategy")
+    + "\n\n"
+    + _BLOCK_FORMAT_GUIDE_PROMPT
+    + "\n\n"
+    + _KNOWLEDGE_BASE_MODEL_PROMPT
+)
 
 __all__ = [
     "BATCH_CONTENT_GENERATION_SYSTEM_PROMPT",
-    "CONTENT_GENERATION_SYSTEM_PROMPT",
     "LIST_GENERATION_SYSTEM_PROMPT",
-    "IMAGE_DOWNLOAD_SYSTEM_PROMPT",
-    "STRATEGY1_FULL_CONTEXT_PROMPT",
-    "STRATEGY2_FILTERED_CONTEXT_PROMPT",
+    "FULL_CONTEXT_STRATEGY_PROMPT",
+    "FILTERED_CONTEXT_STRATEGY_PROMPT",
 ]

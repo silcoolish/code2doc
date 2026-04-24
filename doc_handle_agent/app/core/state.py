@@ -51,6 +51,10 @@ class AgentState(TypedDict):
     # 生成的文档ID
     document_id: Optional[str]
 
+    # 策略选择结果
+    selected_strategy: Optional[str]  # 选中的策略名称
+    estimated_tokens: int  # 预估token数
+
     # 向后兼容的字段
     template_path: str
     output_path: str
@@ -93,4 +97,6 @@ def create_initial_state(
         "message": "等待开始...",
         "error": None,
         "document_id": None,
+        "selected_strategy": None,
+        "estimated_tokens": 0,
     }

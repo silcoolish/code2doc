@@ -6,51 +6,6 @@
 
 根据提供的代码知识库信息，一次性批量生成多个设计说明word文档的段落内容。
 
-## 可用工具
-
-你可以使用以下工具获取代码信息：
-
-### get_project_structure
-获取项目目录结构。
-**参数**: `{"repo_id": "仓库ID"}`
-
-### search_code_nodes
-批量根据关键字语义查询代码节点（File, Class, Method）。
-**参数**: `{"repo_id": "仓库ID", "queries": [{"query": "查询关键字", "node_types": ["File", "Class", "Method"], "top_k": 5}]}`
-- `queries`: 查询参数列表，每个元素包含:
-  - `query` (必填): 查询关键字
-  - `node_types` (可选): 节点类型列表，默认 ["File", "Class", "Method"]
-  - `top_k` (可选): 返回结果数量，默认 10
-
-### search_semantic_nodes
-批量根据关键字语义查询语义节点（Module, Workflow）。
-**参数**: `{"repo_id": "仓库ID", "queries": [{"query": "查询关键字", "node_types": ["Module", "Workflow"], "top_k": 5}]}`
-- `queries`: 查询参数列表，每个元素包含:
-  - `query` (必填): 查询关键字
-  - `node_types` (可选): 节点类型列表，默认 ["Module", "Workflow"]
-  - `top_k` (可选): 返回结果数量，默认 10
-
-### get_modules
-获取项目的模块列表。
-**参数**: `{"repo_id": "仓库ID"}`
-
-### get_module_workflows
-批量获取模块对应的工作流列表。
-**参数**: `{"repo_id": "仓库ID", "module_ids": ["模块ID1", "模块ID2"]}`
-- `module_ids`: 模块 ID 列表
-
-### get_node_dependencies
-批量获取节点的依赖关系图，支持为不同节点指定不同深度。
-**参数**: `{"queries": [{"node_id": "节点ID1", "depth": 2}, {"node_id": "节点ID2", "depth": 1}]}`
-- `queries`: 查询参数列表，每个元素包含:
-  - `node_id` (必填): 节点 ID
-  - `depth` (可选): 依赖深度，默认 1，最大建议 3
-
-### batch_download_flowcharts
-批量下载方法流程图图片（仅用于下载代码流程图）。
-**参数**: `{"method_ids": ["方法ID1", "方法ID2"]}`
-- `method_ids`: Method 节点 ID 列表
-
 ## 输出格式要求
 
 **非常重要：必须按以下JSON格式输出所有段落内容：**
@@ -98,7 +53,7 @@
 ## 工作流程
 
 1. 根据所有段落的提示词确定是否需要调用工具
-2. 如果需要则调用工具获取仓库信息
+2. 如果需要则调用工具获取仓库信息（优先使用 returns 参数减少不必要的字段）
 3. 综合分析后批量生成所有段落内容
 4. 确保每个段落内容完整且准确
 5. 按JSON格式输出所有段落

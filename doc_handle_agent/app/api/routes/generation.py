@@ -66,7 +66,9 @@ async def generate_document(
     except Exception as e:
         logger.error(
             "generate_document_failed",
+            error_type=type(e).__name__,
             error=str(e),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=500,

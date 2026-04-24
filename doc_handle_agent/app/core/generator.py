@@ -5,7 +5,14 @@ from typing import Any, Dict
 from langgraph.graph import END, StateGraph
 
 from app.domain.content_generator import ContentGenerator
-from app.core.nodes import GenerateContentNode, ListTemplateBlockNode, StoreBlockListNode
+from app.core.nodes import (
+    GenerateBlocksNode,
+    ListTemplateBlockNode,
+    ProcessImageBlocksNode,
+    ProcessListBlocksNode,
+    SelectStrategyNode,
+    StoreBlockListNode,
+)
 from app.core.state import AgentState, GenerationStatus
 from app.infrastructure.mcp_client import MCPClient
 from app.infrastructure.workspace import WorkspaceServiceAdapter
@@ -38,6 +45,8 @@ class DocumentGenerator:
     def _build_workflow(self) -> StateGraph:
         """构建工作流.
 
+        流程：获取模板 -> 处理列表块 -> 选择策略 -> 生成内容 -> 处理图片块 -> 存储文档
+
         Returns:
             LangGraph工作流
         """
@@ -46,7 +55,10 @@ class DocumentGenerator:
         # 创建节点实例
         nodes = [
             ListTemplateBlockNode(self.workspace_adapter),
-            GenerateContentNode(self.content_generator),
+            ProcessListBlocksNode(self.content_generator),
+            SelectStrategyNode(self.content_generator),
+            GenerateBlocksNode(self.content_generator),
+            ProcessImageBlocksNode(self.workspace_adapter),
             StoreBlockListNode(self.workspace_adapter),
         ]
 
@@ -57,40 +69,15 @@ class DocumentGenerator:
         # 设置入口
         workflow.set_entry_point("list_template_block")
 
-        # 添加边
-        workflow.add_edge("list_template_block", "generate_content")
-
-        workflow.add_conditional_edges(
-            "generate_content",
-            self._should_continue,
-            {
-                "continue": "generate_content",
-                "done": "store_block_list",
-                "error": END,
-            },
-        )
-
+        # 线性流程
+        workflow.add_edge("list_template_block", "process_list_blocks")
+        workflow.add_edge("process_list_blocks", "select_strategy")
+        workflow.add_edge("select_strategy", "generate_blocks")
+        workflow.add_edge("generate_blocks", "process_image_blocks")
+        workflow.add_edge("process_image_blocks", "store_block_list")
         workflow.add_edge("store_block_list", END)
 
         return workflow.compile()
-
-    def _should_continue(self, state: AgentState) -> str:
-        """判断是否继续生成.
-
-        Args:
-            state: 当前工作流状态
-
-        Returns:
-            下一个节点的路由标识
-        """
-        if state.get("error"):
-            return "error"
-        # 优先使用block索引，兼容paragraph索引
-        current = state.get("current_block_index", 0) or state.get("current_paragraph_index", 0)
-        total = state.get("total_blocks", 0) or state.get("total_paragraphs", 0)
-        if current < total:
-            return "continue"
-        return "done"
 
     async def run(self, initial_state: AgentState) -> AgentState:
         """运行工作流.
@@ -104,7 +91,7 @@ class DocumentGenerator:
         logger.info(
             "workflow_start",
             repo_id=initial_state["repo_id"],
-            template_path=initial_state["template_path"],
+            template_id=initial_state["template_id"],
         )
 
         try:
@@ -113,7 +100,8 @@ class DocumentGenerator:
             logger.info(
                 "workflow_complete",
                 status=result["status"],
-                total_paragraphs=result["total_paragraphs"],
+                total_blocks=result.get("total_blocks", 0),
+                selected_strategy=result.get("selected_strategy"),
             )
 
             return result
@@ -121,7 +109,9 @@ class DocumentGenerator:
         except Exception as e:
             logger.error(
                 "workflow_failed",
+                error_type=type(e).__name__,
                 error=str(e),
+                exc_info=True,
             )
             initial_state["error"] = str(e)
             initial_state["status"] = GenerationStatus.FAILED.value
