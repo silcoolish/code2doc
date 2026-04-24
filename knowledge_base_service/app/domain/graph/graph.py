@@ -44,6 +44,12 @@ class Repository(BaseNode):
     path: str = ""
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+    total_files: int = 0
+    total_code_files: int = 0
+    total_lines: int = 0
+    total_size: int = 0
+    languages: List[str] = field(default_factory=list)
+    language_distribution: Dict[str, int] = field(default_factory=dict)
 
     def __post_init__(self):
         if not self.type:
@@ -55,6 +61,12 @@ class Repository(BaseNode):
             "path": self.path,
             "createdAt": self.created_at.isoformat() if self.created_at else None,
             "updatedAt": self.updated_at.isoformat() if self.updated_at else None,
+            "totalFiles": self.total_files,
+            "totalCodeFiles": self.total_code_files,
+            "totalLines": self.total_lines,
+            "totalSize": self.total_size,
+            "languages": self.languages,
+            "languageDistribution": self.language_distribution,
         })
         return result
 

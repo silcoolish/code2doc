@@ -43,7 +43,7 @@ class Neo4jClient(GraphDatabaseClient):
             self._driver = None
             logger.info("Neo4j connection closed")
 
-    async def execute_query(
+    async def _execute_query(
         self,
         query: str,
         parameters: Optional[Dict[str, Any]] = None,
@@ -94,7 +94,7 @@ class Neo4jClient(GraphDatabaseClient):
         CREATE (n:{label} $properties)
         RETURN n.id as node_id
         """
-        result = await self.execute_query(
+        result = await self._execute_query(
             query,
             {"properties": properties},
             database,
@@ -126,7 +126,7 @@ class Neo4jClient(GraphDatabaseClient):
         SET n += $properties
         RETURN n.id as node_id
         """
-        result = await self.execute_query(
+        result = await self._execute_query(
             query,
             {
                 "key_value": key_value,
@@ -181,8 +181,109 @@ class Neo4jClient(GraphDatabaseClient):
         RETURN count(r) as created
         """ % (from_label, from_key, to_label, to_key, rel_type, props_str)
 
-        result = await self.execute_query(query, params, database)
+        result = await self._execute_query(query, params, database)
         return result[0]["created"] > 0 if result else False
+
+    async def batch_merge_nodes(
+        self,
+        label: str,
+        nodes: List[Dict[str, Any]],
+        database: Optional[str] = None,
+    ) -> int:
+        """批量合并节点（使用UNWIND优化）.
+
+        将多个同类型节点的MERGE操作合并为一次数据库查询，
+        大幅减少网络往返，提升写入性能。
+
+        Args:
+            label: 节点标签
+            nodes: 节点属性列表，每项为 {"id": str, "properties": dict}
+            database: 目标数据库名称
+
+        Returns:
+            成功合并的节点数量
+        """
+        if not nodes:
+            return 0
+
+        BATCH_SIZE = 200
+        total = 0
+
+        for i in range(0, len(nodes), BATCH_SIZE):
+            batch = nodes[i : i + BATCH_SIZE]
+            query = f"""
+            UNWIND $nodes as node
+            MERGE (n:{label} {{id: node.id}})
+            SET n += node.properties
+            RETURN count(n) as count
+            """
+            try:
+                result = await self._execute_query(
+                    query,
+                    {"nodes": batch},
+                    database,
+                )
+                total += result[0]["count"] if result else 0
+            except Neo4jError as e:
+                logger.error(f"Batch merge {label} failed: {e}")
+                raise
+
+        return total
+
+    async def batch_create_relationships(
+        self,
+        rel_type: str,
+        relationships: List[Dict[str, str]],
+        from_label: Optional[str] = None,
+        to_label: Optional[str] = None,
+        database: Optional[str] = None,
+    ) -> int:
+        """批量创建关系（使用UNWIND优化）.
+
+        将多个同类型关系的CREATE操作合并为一次数据库查询。
+        当 from_label/to_label 指定时，MATCH 语句会包含标签以利用索引。
+
+        Args:
+            rel_type: 关系类型
+            relationships: 关系列表，每项为 {"from_id": str, "to_id": str}
+            from_label: 起始节点标签（可选，用于优化MATCH）
+            to_label: 目标节点标签（可选，用于优化MATCH）
+            database: 目标数据库名称
+
+        Returns:
+            成功创建的关系数量
+        """
+        if not relationships:
+            return 0
+
+        BATCH_SIZE = 500
+        total = 0
+
+        # 构建带标签的 MATCH 模式（如果提供了标签）
+        from_pattern = f"(from:{from_label} {{id: rel.from_id}})" if from_label else "(from {id: rel.from_id})"
+        to_pattern = f"(to:{to_label} {{id: rel.to_id}})" if to_label else "(to {id: rel.to_id})"
+
+        for i in range(0, len(relationships), BATCH_SIZE):
+            batch = relationships[i : i + BATCH_SIZE]
+            query = f"""
+            UNWIND $relationships as rel
+            MATCH {from_pattern}
+            MATCH {to_pattern}
+            CREATE (from)-[r:{rel_type}]->(to)
+            RETURN count(r) as count
+            """
+            try:
+                result = await self._execute_query(
+                    query,
+                    {"relationships": batch},
+                    database,
+                )
+                total += result[0]["count"] if result else 0
+            except Neo4jError as e:
+                logger.error(f"Batch create {rel_type} relationships failed: {e}")
+                raise
+
+        return total
 
     async def delete_repo_data(self, repo_id: str, database: Optional[str] = None) -> int:
         """删除仓库相关数据.
@@ -201,7 +302,7 @@ class Neo4jClient(GraphDatabaseClient):
         DELETE r, n
         RETURN count(DISTINCT n) as deleted
         """
-        result = await self.execute_query(
+        result = await self._execute_query(
             query,
             {"repo_id": repo_id},
             database,
@@ -228,7 +329,7 @@ class Neo4jClient(GraphDatabaseClient):
         MATCH (n {id: $node_id})
         RETURN n as node, labels(n) as labels
         """
-        result = await self.execute_query(
+        result = await self._execute_query(
             query,
             {"node_id": node_id},
             database,
@@ -267,7 +368,7 @@ class Neo4jClient(GraphDatabaseClient):
             RETURN r as relationship, m as related, type(r) as rel_type
             """
 
-        return await self.execute_query(
+        return await self._execute_query(
             query,
             {"node_id": node_id},
             database,
@@ -288,7 +389,7 @@ class Neo4jClient(GraphDatabaseClient):
         WHERE f.repoId = $repo_id AND f.fileType = 'code'
         RETURN f.id as id, f.path as path, f.code as code, f.suffix as suffix
         """
-        result = await self.execute_query(query, {"repo_id": repo_id}, database)
+        result = await self._execute_query(query, {"repo_id": repo_id}, database)
 
         # 添加 language 字段
         language_map = {
@@ -312,23 +413,43 @@ class Neo4jClient(GraphDatabaseClient):
 
         return result
 
-    async def get_all_methods(self, repo_id: str, database: Optional[str] = None) -> List[Dict[str, Any]]:
-        """获取指定仓库的所有 Method 节点.
+    async def get_all_nodes(
+        self,
+        repo_id: str,
+        node_types: List[str],
+        database: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """获取指定仓库的所有指定类型节点.
 
         Args:
             repo_id: 仓库ID
+            node_types: 节点类型列表，如 ["File", "Class", "Method"]
             database: 目标数据库名称
 
         Returns:
-            Method 节点列表，包含 id, name, code, language, file_path 等字段
+            节点列表，每项包含 id, name, type, file_path, summary, language 等字段
         """
-        query = """
-        MATCH (m:Method)
-        WHERE m.repoId = $repo_id
-        RETURN m.id as id, m.name as name, m.code as code,
-               m.language as language, m.filePath as file_path
-        """
-        return await self.execute_query(query, {"repo_id": repo_id}, database)
+        if not node_types:
+            node_types = ["File", "Class", "Method"]
+
+        results = []
+        for node_type in node_types:
+            query = """
+            MATCH (n:%s)
+            WHERE n.repoId = $repo_id
+            RETURN n.id as id, n.name as name, labels(n) as types,
+                   coalesce(n.filePath, n.path) as file_path,
+                   n.summary as summary, n.language as language,
+                   n.description as description
+            ORDER BY n.name
+            """ % node_type
+
+            type_results = await self._execute_query(
+                query, {"repo_id": repo_id}, database
+            )
+            results.extend(type_results)
+
+        return results
 
     async def get_methods_with_calls(self, repo_id: str, database: Optional[str] = None) -> List[Dict[str, Any]]:
         """获取所有 Method 节点及其 CALL 关系.
@@ -348,7 +469,7 @@ class Neo4jClient(GraphDatabaseClient):
                m.language as language, m.name as name, m.summary as summary,
                collect(DISTINCT callee.id) as callee_ids
         """
-        return await self.execute_query(query, {"repo_id": repo_id}, database)
+        return await self._execute_query(query, {"repo_id": repo_id}, database)
 
     async def get_classes_with_methods(self, repo_id: str, database: Optional[str] = None) -> List[Dict[str, Any]]:
         """获取所有 Class 节点及其包含的 Method summaries.
@@ -368,7 +489,7 @@ class Neo4jClient(GraphDatabaseClient):
                c.language as language, c.name as name, c.summary as summary,
                collect(DISTINCT m.summary) as method_summaries
         """
-        return await self.execute_query(query, {"repo_id": repo_id}, database)
+        return await self._execute_query(query, {"repo_id": repo_id}, database)
 
     async def get_files_for_summary(self, repo_id: str, database: Optional[str] = None) -> List[Dict[str, Any]]:
         """获取所有 File 节点及其包含的 Class/Method summaries.
@@ -390,7 +511,7 @@ class Neo4jClient(GraphDatabaseClient):
                collect(DISTINCT c.summary) as class_summaries,
                collect(DISTINCT m.summary) as method_summaries
         """
-        return await self.execute_query(query, {"repo_id": repo_id}, database)
+        return await self._execute_query(query, {"repo_id": repo_id}, database)
 
     async def update_node_summary(
         self,
@@ -415,7 +536,7 @@ class Neo4jClient(GraphDatabaseClient):
         SET n.summary = $summary
         """
         try:
-            await self.execute_query(query, {"node_id": node_id, "summary": summary}, database)
+            await self._execute_query(query, {"node_id": node_id, "summary": summary}, database)
             return True
         except Exception as e:
             logger.warning(f"Failed to update summary for {label} {node_id}: {e}")
@@ -456,7 +577,7 @@ class Neo4jClient(GraphDatabaseClient):
         """
 
         try:
-            result = await self.execute_query(
+            result = await self._execute_query(
                 query, {"updates": updates_dict}, database
             )
             updated_count = result[0]["updated_count"] if result else 0
@@ -485,7 +606,7 @@ class Neo4jClient(GraphDatabaseClient):
         RETURN n.id as node_id, labels(n) as labels
         LIMIT 10
         """
-        return await self.execute_query(query, {"keyword": keyword}, database)
+        return await self._execute_query(query, {"keyword": keyword}, database)
 
     async def get_nodes_with_summary(
         self,
@@ -536,7 +657,7 @@ class Neo4jClient(GraphDatabaseClient):
         else:
             return []
 
-        return await self.execute_query(query, {"repo_id": repo_id}, database)
+        return await self._execute_query(query, {"repo_id": repo_id}, database)
 
     async def count_nodes_with_summary(
         self,
@@ -563,7 +684,7 @@ class Neo4jClient(GraphDatabaseClient):
         RETURN count(n) as total
         """
 
-        result = await self.execute_query(
+        result = await self._execute_query(
             query, {"repo_id": repo_id}, database
         )
         return result[0]["total"] if result else 0
@@ -633,7 +754,7 @@ class Neo4jClient(GraphDatabaseClient):
         else:
             return []
 
-        return await self.execute_query(query, params, database)
+        return await self._execute_query(query, params, database)
 
     async def update_node_embedding_id(
         self,
@@ -658,7 +779,7 @@ class Neo4jClient(GraphDatabaseClient):
         SET n.embeddingId = $embedding_id
         """
         try:
-            await self.execute_query(query, {"id": node_id, "embedding_id": embedding_id}, database)
+            await self._execute_query(query, {"id": node_id, "embedding_id": embedding_id}, database)
             return True
         except Exception as e:
             logger.warning(f"Failed to update embeddingId for {label} {node_id}: {e}")
@@ -699,7 +820,7 @@ class Neo4jClient(GraphDatabaseClient):
         """
 
         try:
-            result = await self.execute_query(
+            result = await self._execute_query(
                 query, {"updates": updates_dict}, database
             )
             updated_count = result[0]["updated_count"] if result else 0
@@ -728,7 +849,7 @@ class Neo4jClient(GraphDatabaseClient):
         RETURN n.id as id, n.path as path, n.type as type, labels(n) as labels, n.summary as summary
         ORDER BY path
         """
-        return await self.execute_query(query, {"repo_id": repo_id}, database)
+        return await self._execute_query(query, {"repo_id": repo_id}, database)
 
     async def get_modules(
         self,
@@ -749,31 +870,50 @@ class Neo4jClient(GraphDatabaseClient):
         WHERE m.repoId = $repo_id
         RETURN m.id as id, m.name as name, m.description as description, m.summary as summary
         """
-        return await self.execute_query(
+        return await self._execute_query(
             query,
             {"repo_id": repo_id},
             database,
         )
 
-    async def get_module_workflows(
+    async def get_related_nodes(
         self,
-        module_id: str,
+        node_id: str,
+        rel_type: str,
+        direction: str = "out",
         database: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """获取 Module 对应的 Workflow 列表.
+        """获取与指定节点具有特定关系的所有节点.
 
         Args:
-            module_id: Module ID
+            node_id: 节点ID
+            rel_type: 关系类型，如 "BELONG_TO", "CONTAIN", "CALL"
+            direction: 关系方向 ("out", "in", "both")
             database: 目标数据库名称
 
         Returns:
-            Workflow 列表，每项包含 id, name, description, summary 字段
+            关联节点列表，每项包含 id, name, labels, summary, description 等字段
         """
-        query = """
-        MATCH (w:Workflow)-[:BELONG_TO]->(m:Module {id: $module_id})
-        RETURN w.id as id, w.name as name, w.description as description, w.summary as summary
-        """
-        return await self.execute_query(query, {"module_id": module_id}, database)
+        if direction == "out":
+            query = """
+            MATCH (n {id: $node_id})-[r:%s]->(m)
+            RETURN m.id as id, m.name as name, labels(m) as labels,
+                   m.summary as summary, m.description as description
+            """ % rel_type
+        elif direction == "in":
+            query = """
+            MATCH (n {id: $node_id})<-[r:%s]-(m)
+            RETURN m.id as id, m.name as name, labels(m) as labels,
+                   m.summary as summary, m.description as description
+            """ % rel_type
+        else:
+            query = """
+            MATCH (n {id: $node_id})-[r:%s]-(m)
+            RETURN m.id as id, m.name as name, labels(m) as labels,
+                   m.summary as summary, m.description as description
+            """ % rel_type
+
+        return await self._execute_query(query, {"node_id": node_id}, database)
 
     async def get_node_dependencies(
         self,
@@ -800,7 +940,7 @@ class Neo4jClient(GraphDatabaseClient):
                length(path) as distance
         LIMIT 100
         """
-        results = await self.execute_query(
+        results = await self._execute_query(
             query,
             {"node_id": node_id, "depth": depth},
             database,
@@ -845,7 +985,7 @@ class Neo4jClient(GraphDatabaseClient):
         RETURN m.id as id, m.name as name, m.code as code,
                m.language as language, m.filePath as file_path, m.image as image
         """
-        return await self.execute_query(
+        return await self._execute_query(
             query,
             {"repo_id": repo_id, "languages": languages},
             database,
@@ -872,7 +1012,7 @@ class Neo4jClient(GraphDatabaseClient):
         SET m.image = $image_id
         """
         try:
-            await self.execute_query(
+            await self._execute_query(
                 query,
                 {"method_id": method_id, "image_id": image_id},
                 database,
@@ -902,7 +1042,7 @@ class Neo4jClient(GraphDatabaseClient):
         RETURN f.id as id, f.path as path, f.name as name,
                f.suffix as suffix, f.summary as summary
         """
-        return await self.execute_query(
+        return await self._execute_query(
             query, {"repo_id": repo_id}, database
         )
 
@@ -925,7 +1065,7 @@ class Neo4jClient(GraphDatabaseClient):
         WHERE f1.repoId = $repo_id AND f2.repoId = $repo_id
         RETURN f1.id as source, f2.id as target, count(*) as weight
         """
-        return await self.execute_query(
+        return await self._execute_query(
             query, {"repo_id": repo_id}, database
         )
 
@@ -952,7 +1092,7 @@ class Neo4jClient(GraphDatabaseClient):
           AND f1 <> f2
         RETURN f1.id as source, f2.id as target, count(*) as weight
         """
-        return await self.execute_query(
+        return await self._execute_query(
             query, {"repo_id": repo_id}, database
         )
 
@@ -976,7 +1116,7 @@ class Neo4jClient(GraphDatabaseClient):
         RETURN c.name as name, c.summary as summary
         ORDER BY c.name
         """
-        return await self.execute_query(
+        return await self._execute_query(
             query, {"file_path": file_path}, database
         )
 
@@ -1005,7 +1145,7 @@ class Neo4jClient(GraphDatabaseClient):
         ORDER BY callee_count DESC
         LIMIT $limit
         """
-        return await self.execute_query(
+        return await self._execute_query(
             query, {"file_path": file_path, "limit": limit}, database
         )
 
@@ -1034,7 +1174,7 @@ class Neo4jClient(GraphDatabaseClient):
                collect(DISTINCT callee.name) as callees
         LIMIT $limit
         """
-        return await self.execute_query(
+        return await self._execute_query(
             query, {"file_paths": file_paths, "limit": limit}, database
         )
 
@@ -1061,7 +1201,7 @@ class Neo4jClient(GraphDatabaseClient):
         """
 
         try:
-            results = await self.execute_query(
+            results = await self._execute_query(
                 query,
                 {"repo_id": repo_id, "file_paths": file_paths},
                 database,
@@ -1071,6 +1211,124 @@ class Neo4jClient(GraphDatabaseClient):
         except Exception as e:
             logger.error(f"Failed to get file contents: {e}")
             return {}
+
+    async def search_nodes_by_name(
+        self,
+        repo_id: str,
+        name: str,
+        node_types: List[str],
+        fuzzy: bool = True,
+        top_k: int = 10,
+        database: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """根据节点名称搜索代码节点."""
+        if fuzzy:
+            query = """
+            MATCH (n)
+            WHERE n.repoId = $repo_id
+              AND ANY(label IN labels(n) WHERE label IN $node_types)
+              AND n.name CONTAINS $name
+            RETURN n.id as id, n.name as name, labels(n) as types,
+                   coalesce(n.filePath, n.path) as file_path,
+                   n.summary as summary, n.docstring as docstring
+            LIMIT $top_k
+            """
+        else:
+            query = """
+            MATCH (n)
+            WHERE n.repoId = $repo_id
+              AND ANY(label IN labels(n) WHERE label IN $node_types)
+              AND n.name = $name
+            RETURN n.id as id, n.name as name, labels(n) as types,
+                   coalesce(n.filePath, n.path) as file_path,
+                   n.summary as summary, n.docstring as docstring
+            LIMIT $top_k
+            """
+
+        return await self._execute_query(
+            query,
+            {"repo_id": repo_id, "name": name, "node_types": node_types, "top_k": top_k},
+            database,
+        )
+
+    async def batch_get_node_details(
+        self,
+        repo_id: str,
+        node_ids: List[str],
+        database: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """批量根据节点 ID 获取节点详情."""
+        query = """
+        MATCH (n)
+        WHERE n.repoId = $repo_id AND n.id IN $node_ids
+        RETURN n.id as id, n.name as name, labels(n) as types,
+               coalesce(n.filePath, n.path) as file_path,
+               n.code as code, n.summary as summary,
+               n.docstring as docstring, n.language as language,
+               n.type as node_type, n.suffix as suffix
+        """
+
+        return await self._execute_query(
+            query,
+            {"repo_id": repo_id, "node_ids": node_ids},
+            database,
+        )
+
+    async def get_repository_stats(
+        self,
+        repo_id: str,
+        database: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """获取仓库节点的统计信息.
+
+        Args:
+            repo_id: 仓库ID
+            database: 目标数据库名称
+
+        Returns:
+            包含 name, path, totalFiles, totalCodeFiles, totalLines, totalSize, languages, languageDistribution 等字段的字典，或 None
+        """
+        query = """
+        MATCH (r:Repository {repoId: $repo_id})
+        RETURN r.name as name, r.path as path,
+               r.totalFiles as total_files, r.totalCodeFiles as total_code_files,
+               r.totalLines as total_lines, r.totalSize as total_size,
+               r.languages as languages, r.languageDistribution as language_distribution
+        """
+        results = await self._execute_query(query, {"repo_id": repo_id}, database)
+        return results[0] if results else None
+
+    async def get_repo_node_counts(
+        self,
+        repo_id: str,
+        database: Optional[str] = None,
+    ) -> Dict[str, int]:
+        """获取仓库中目录、类、方法的数量统计.
+
+        Args:
+            repo_id: 仓库ID
+            database: 目标数据库名称
+
+        Returns:
+            包含 directory_count, class_count, method_count 的字典
+        """
+        query = """
+        MATCH (r:Repository {repoId: $repo_id})
+        OPTIONAL MATCH (d:Directory {repoId: $repo_id})
+        OPTIONAL MATCH (c:Class {repoId: $repo_id})
+        OPTIONAL MATCH (m:Method {repoId: $repo_id})
+        RETURN count(DISTINCT d) as directory_count,
+               count(DISTINCT c) as class_count,
+               count(DISTINCT m) as method_count
+        """
+        results = await self._execute_query(query, {"repo_id": repo_id}, database)
+        if results:
+            return {
+                "directory_count": results[0].get("directory_count", 0),
+                "class_count": results[0].get("class_count", 0),
+                "method_count": results[0].get("method_count", 0),
+            }
+        return {"directory_count": 0, "class_count": 0, "method_count": 0}
 
 
 # 全局客户端实例

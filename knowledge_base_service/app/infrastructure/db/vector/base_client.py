@@ -79,13 +79,13 @@ class VectorDatabaseClient(ABC):
         pass
 
     @abstractmethod
-    async def delete_repo_data(self, repo_id: str) -> Dict[str, int]:
+    async def delete_repo_data(self, repo_id: str) -> int:
         """删除指定仓库的所有数据.
 
         Args:
             repo_id: 仓库ID
 
         Returns:
-            各 collection/索引 删除数量统计
+            删除的记录数量
         """
         pass

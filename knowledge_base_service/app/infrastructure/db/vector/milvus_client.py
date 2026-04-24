@@ -13,23 +13,12 @@ from pymilvus import (
 )
 
 from app.config import get_settings
-from app.domain.models.vector import (
-    FileSummaryRecord,
-    ClassSummaryRecord,
-    MethodSummaryRecord,
-    SemanticSummaryRecord,
-)
 from app.infrastructure.db.vector.base_client import VectorDatabaseClient
 
 logger = logging.getLogger(__name__)
 
-# Collection 名称常量
-COLLECTIONS = {
-    "file_summary": "file_summary_collection",
-    "class_summary": "class_summary_collection",
-    "method_summary": "method_summary_collection",
-    "semantic_summary": "semantic_summary_collection",
-}
+# 统一的 collection 名称
+COLLECTION_NAME = "code_vectors"
 
 
 class MilvusClient(VectorDatabaseClient):
@@ -58,8 +47,8 @@ class MilvusClient(VectorDatabaseClient):
                 f"Connected to Milvus at {settings.milvus_host}:{settings.milvus_port}"
             )
 
-            # 初始化 collections
-            await self._init_collections()
+            # 初始化 collection
+            await self._init_collection()
 
     async def close(self) -> None:
         """关闭数据库连接."""
@@ -68,10 +57,9 @@ class MilvusClient(VectorDatabaseClient):
             self._client = None
             logger.info("Milvus connection closed")
 
-    async def _init_collections(self) -> None:
-        """初始化所有 collections."""
-        for collection_name in COLLECTIONS.values():
-            await self._create_collection_if_not_exists(collection_name)
+    async def _init_collection(self) -> None:
+        """初始化 collection."""
+        await self._create_collection_if_not_exists(COLLECTION_NAME)
 
     async def _create_collection_if_not_exists(self, collection_name: str) -> None:
         """如果不存在则创建 collection 并同步创建索引."""
@@ -79,7 +67,7 @@ class MilvusClient(VectorDatabaseClient):
             logger.info(f"Collection already exists: {collection_name}")
             return
 
-        # 定义字段
+        # 定义统一字段
         fields = [
             FieldSchema(
                 name="id",
@@ -108,57 +96,26 @@ class MilvusClient(VectorDatabaseClient):
                 max_length=64,
             ),
             FieldSchema(
+                name="type",
+                dtype=DataType.VARCHAR,
+                max_length=32,
+            ),
+            FieldSchema(
+                name="summary",
+                dtype=DataType.VARCHAR,
+                max_length=4096,
+            ),
+            FieldSchema(
                 name="embedding",
                 dtype=DataType.FLOAT_VECTOR,
                 dim=self._dimensions,
             ),
         ]
 
-        # 根据 collection 类型添加额外字段
-        if "summary" in collection_name:
-            fields.append(
-                FieldSchema(
-                    name="summary",
-                    dtype=DataType.VARCHAR,
-                    max_length=4096,
-                )
-            )
-
-        if "semantic" in collection_name:
-            fields.append(
-                FieldSchema(
-                    name="type",
-                    dtype=DataType.VARCHAR,
-                    max_length=32,
-                )
-            )
-            # semantic_summary_collection 包含 detail 字段
-            fields.append(
-                FieldSchema(
-                    name="detail",
-                    dtype=DataType.VARCHAR,
-                    max_length=8192,
-                )
-            )
-
-        if "code" in collection_name:
-            fields.extend([
-                FieldSchema(
-                    name="path",
-                    dtype=DataType.VARCHAR,
-                    max_length=512,
-                ),
-                FieldSchema(
-                    name="code",
-                    dtype=DataType.VARCHAR,
-                    max_length=65535,
-                ),
-            ])
-
         # 创建 schema 和 collection
         schema = CollectionSchema(
             fields=fields,
-            description=f"Collection for {collection_name}",
+            description="Unified collection for code vector records",
         )
 
         await self._client.create_collection(
@@ -298,10 +255,7 @@ class MilvusClient(VectorDatabaseClient):
         }
 
         try:
-            # 根据 collection 类型确定需要返回的字段
-            output_fields = ["id", "name", "node_id", "repo", "repo_id", "summary"]
-            if "semantic" in collection_name:
-                output_fields.extend(["type", "detail"])
+            output_fields = ["id", "name", "node_id", "repo", "repo_id", "type", "summary"]
 
             results = await self._client.search(
                 collection_name=collection_name,
@@ -317,20 +271,16 @@ class MilvusClient(VectorDatabaseClient):
             if results:
                 for hits in results:
                     for hit in hits:
-                        result = {
+                        formatted_results.append({
                             "id": hit.get("id"),
                             "name": hit.get("name"),
                             "node_id": hit.get("node_id"),
                             "repo": hit.get("repo"),
                             "repo_id": hit.get("repo_id"),
+                            "type": hit.get("type"),
                             "distance": hit.get("distance", 0),
                             "summary": hit.get("summary"),
-                        }
-                        # semantic collection 包含额外字段
-                        if "semantic" in collection_name:
-                            result["type"] = hit.get("type")
-                            result["detail"] = hit.get("detail")
-                        formatted_results.append(result)
+                        })
 
             return formatted_results
         except Exception as e:
@@ -394,19 +344,16 @@ class MilvusClient(VectorDatabaseClient):
             logger.error(f"Failed to delete from {collection_name}: {e}")
             raise
 
-    async def delete_repo_data(self, repo_id: str) -> Dict[str, int]:
+    async def delete_repo_data(self, repo_id: str) -> int:
         """删除指定仓库的所有数据.
 
         Args:
             repo_id: 仓库ID
 
         Returns:
-            各 collection 删除数量统计
+            删除的记录数量
         """
-        results = {}
-        for key, collection_name in COLLECTIONS.items():
-            results[key] = await self.delete_by_repo(collection_name, repo_id)
-        return results
+        return await self.delete_by_repo(COLLECTION_NAME, repo_id)
 
 
 # 全局客户端实例

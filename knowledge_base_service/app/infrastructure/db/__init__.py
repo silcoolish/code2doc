@@ -49,7 +49,7 @@ def get_graph_db_client() -> GraphDatabaseClient:
     Example:
         >>> from app.infrastructure.db import get_graph_db_client
         >>> neo4j = get_graph_db_client()
-        >>> result = await neo4j.execute_query("MATCH (n) RETURN n LIMIT 10")
+        >>> result = await neo4j._execute_query("MATCH (n) RETURN n LIMIT 10")
     """
     global _graph_db_client
     if _graph_db_client is None:

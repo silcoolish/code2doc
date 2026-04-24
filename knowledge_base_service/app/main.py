@@ -1,11 +1,16 @@
 """FastAPI 应用入口."""
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+# 获取项目根目录（基于当前文件位置）
+BASE_DIR = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from app.config import get_settings
 from app.infrastructure.db import get_graph_db_client, get_vector_db_client
@@ -164,6 +169,41 @@ def create_app() -> FastAPI:
     # MCP 路由 (HTTP 方式)
     app.include_router(mcp_router)
 
+    # 静态文件服务 - 提供data目录中的图片访问
+    # 使用基于项目根目录的绝对路径，避免工作目录问题
+    if settings.static_files_path.startswith("./"):
+        # 相对路径，基于项目根目录
+        relative_path = settings.static_files_path[2:]  # 移除 ./ 前缀
+        static_path = BASE_DIR / relative_path
+    elif settings.static_files_path.startswith("/"):
+        # 已经是绝对路径
+        static_path = Path(settings.static_files_path)
+    else:
+        # 相对路径但没有 ./ 前缀，基于项目根目录
+        static_path = BASE_DIR / settings.static_files_path
+
+    static_path.mkdir(parents=True, exist_ok=True)
+    static_dir = str(static_path.resolve())
+    static_url = settings.static_files_url
+
+    # 确保URL以/开头
+    if not static_url.startswith("/"):
+        static_url = "/" + static_url
+
+    logger.info(f"BASE_DIR: {BASE_DIR}")
+    logger.info(f"Static files configured: URL={static_url}, Directory={static_dir}")
+
+    # 验证测试文件是否存在
+    test_file = static_path / "repo_b087a727a064488f9078f5c0bbc00624/image/Hardware_usart3_usart3_c_Usart3_Init__L27.svg"
+    logger.info(f"Test file path: {test_file}")
+    logger.info(f"Test file exists: {test_file.exists()}")
+
+    app.mount(
+        static_url,
+        StaticFiles(directory=static_dir, check_dir=False),
+        name="static"
+    )
+
     # 测试路由
     app.include_router(
         test_structure_graph_build.router,
@@ -190,6 +230,35 @@ def create_app() -> FastAPI:
     async def health_check():
         """健康检查端点."""
         return {"status": "healthy", "version": settings.app_version}
+
+    # 临时测试路由：直接提供图片文件
+    @app.get("/test-image/{repo_id}/{filename:path}")
+    async def test_image(repo_id: str, filename: str):
+        """测试图片访问."""
+        from fastapi.responses import FileResponse
+        import os
+
+        # 使用与静态文件服务相同的路径逻辑
+        if settings.static_files_path.startswith("./"):
+            relative_path = settings.static_files_path[2:]
+            static_path = BASE_DIR / relative_path
+        elif settings.static_files_path.startswith("/"):
+            static_path = Path(settings.static_files_path)
+        else:
+            static_path = BASE_DIR / settings.static_files_path
+
+        # 构建文件路径
+        file_path = static_path / repo_id / "image" / filename
+        logger.info(f"Test image request: {file_path}")
+
+        if not file_path.exists():
+            logger.error(f"File not found: {file_path}")
+            return {"error": "File not found", "path": str(file_path)}
+
+        return FileResponse(
+            path=str(file_path),
+            media_type="image/svg+xml" if filename.endswith(".svg") else "image/png"
+        )
 
     return app
 

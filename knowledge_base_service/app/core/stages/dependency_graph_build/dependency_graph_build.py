@@ -95,7 +95,8 @@ class DependencyGraphBuildStage(PipelineStageHandler):
     async def _build_file_dependencies(self, repo_id: str) -> int:
         """构建文件间的 USE 依赖关系.
 
-        分析 File 节点的 import/include 语句，匹配到对应的文件。
+        分析 File 节点的 import/include 语句，匹配到对应的文件，
+        最后统一批量创建关系（减少网络往返）。
 
         Args:
             repo_id: 仓库ID
@@ -111,8 +112,8 @@ class DependencyGraphBuildStage(PipelineStageHandler):
         # 构建文件路径索引
         file_path_index = self._build_file_path_index(files)
 
-        created_count = 0
         seen_relations: Set[Tuple[str, str]] = set()
+        relations_to_create: List[Tuple[str, str]] = []
 
         for file_node in files:
             file_id = file_node.get("id")
@@ -138,16 +139,22 @@ class DependencyGraphBuildStage(PipelineStageHandler):
                     rel_key = (file_id, target_id)
                     if rel_key not in seen_relations:
                         seen_relations.add(rel_key)
-                        success = await self.graph_helper.create_use_relationship(file_id, target_id)
-                        if success:
-                            created_count += 1
+                        relations_to_create.append(rel_key)
 
-        return created_count
+        # 批量创建 USE 关系（单次 UNWIND 查询）
+        if relations_to_create:
+            created = await self.graph_helper.batch_create_use_relationships(
+                relations_to_create
+            )
+            logger.info(f"Batch created {created} USE relationships")
+            return created
+        return 0
 
     async def _build_method_calls(self, repo_id: str) -> int:
         """构建方法间的 CALL 调用关系.
 
-        分析 Method 节点的代码内容，提取方法调用。
+        分析 Method 节点的代码内容，提取方法调用，
+        最后统一批量创建关系（减少网络往返）。
 
         Args:
             repo_id: 仓库ID
@@ -163,8 +170,8 @@ class DependencyGraphBuildStage(PipelineStageHandler):
         # 构建方法名索引
         method_name_index = self._build_method_name_index(methods)
 
-        created_count = 0
         seen_relations: Set[Tuple[str, str]] = set()
+        relations_to_create: List[Tuple[str, str]] = []
 
         for method in methods:
             source_id = method.get("id")
@@ -204,11 +211,16 @@ class DependencyGraphBuildStage(PipelineStageHandler):
                         rel_key = (source_id, target_id)
                         if rel_key not in seen_relations:
                             seen_relations.add(rel_key)
-                            success = await self.graph_helper.create_call_relationship(source_id, target_id)
-                            if success:
-                                created_count += 1
+                            relations_to_create.append(rel_key)
 
-        return created_count
+        # 批量创建 CALL 关系（单次 UNWIND 查询）
+        if relations_to_create:
+            created = await self.graph_helper.batch_create_call_relationships(
+                relations_to_create
+            )
+            logger.info(f"Batch created {created} CALL relationships")
+            return created
+        return 0
 
     def _build_file_path_index(self, files: List[Dict]) -> Dict[str, str]:
         """构建文件路径索引.

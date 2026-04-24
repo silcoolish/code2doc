@@ -1,2 +1,5 @@
 repo_id,initial_status,repo_name,repo_path
-003,Completed,stm32Car,D:\orkSpace\stm32Car
+repo_75d0ff7759c44fc599d245f36dcbe7ae,Failed,local-repo,D:\demo\local-repo
+repo_cdbcdfda3c304e12b2d9390e4b2050f7,Failed,t-g,G:\_C\t-g
+repo_67cd90f3330c4ffebf25ccae22d75c79,Failed,local-repo,D:\demo\local-repo
+repo_b087a727a064488f9078f5c0bbc00624,Completed,stm32Car,D:\WorkSpace\stm32Car

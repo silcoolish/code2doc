@@ -28,6 +28,9 @@ from app.infrastructure.db import GraphDatabaseClient, get_graph_db_client
 
 logger = logging.getLogger(__name__)
 
+# 获取项目根目录（基于当前文件位置：app/core/stages/flowchart_generation/）
+BASE_DIR = Path(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
+
 
 class FlowchartGenerationStage(PipelineStageHandler):
     """流程图生成阶段处理器.
@@ -66,8 +69,18 @@ class FlowchartGenerationStage(PipelineStageHandler):
             repo_id = getattr(context, 'repo_id', context.repo_name)
 
             # 确保图片目录存在
-            image_dir = Path(self.settings.flowchart_image_dir) / repo_id / "image"
+            # 使用相对于项目根目录的路径
+            flowchart_dir = self.settings.flowchart_image_dir
+            if flowchart_dir.startswith("./"):
+                flowchart_dir = flowchart_dir[2:]
+            if flowchart_dir.startswith("/"):
+                image_base = Path(flowchart_dir)
+            else:
+                image_base = BASE_DIR / flowchart_dir
+
+            image_dir = image_base / repo_id / "image"
             image_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Flowchart image directory: {image_dir}")
 
             # 获取支持的语言
             supported_languages = self.settings.flowchart_supported_languages
@@ -130,9 +143,11 @@ class FlowchartGenerationStage(PipelineStageHandler):
                 for method in methods:
                     existing_image = method.get("image", "")
                     if existing_image:
-                        # 检查是否存在已生成的图片（多种可能的命名格式）
+                        # 检查是否存在已生成的图片（多种可能的命名格式，包括svg和png）
                         possible_paths = [
+                            image_dir / f"{existing_image}.svg",
                             image_dir / f"{existing_image}.png",
+                            image_dir / f"{path_slug}_{method.get('name', '')}__L{method.get('start_line', 0)}.svg",
                             image_dir / f"{path_slug}_{method.get('name', '')}__L{method.get('start_line', 0)}.png",
                         ]
                         if any(p.exists() for p in possible_paths):
@@ -427,18 +442,36 @@ class FlowchartGenerationStage(PipelineStageHandler):
                         batch_files,
                     )
 
+                    # 构建基础URL
+                    base_url = self.settings.public_base_url.rstrip('/')
+                    static_url = self.settings.static_files_url.strip('/')
+
                     # 验证文件实际存在后再更新数据库
                     for method_id, image_id in result_updates.items():
-                        image_path = image_dir / f"{image_id}.png"
-                        if image_path.exists():
+                        # 优先检查svg，然后检查png
+                        svg_path = image_dir / f"{image_id}.svg"
+                        png_path = image_dir / f"{image_id}.png"
+
+                        if svg_path.exists():
                             try:
-                                await self.graph_db.update_method_image(method_id, image_id)
+                                # 构建完整URL: {base_url}/{static_url}/{repo_id}/image/{image_id}.svg
+                                image_url = f"{base_url}/{static_url}/{repo_id}/image/{image_id}.svg"
+                                await self.graph_db.update_method_image(method_id, image_url)
+                                generated_count += 1
+                            except Exception as e:
+                                logger.error(f"Failed to update method {method_id} image: {e}")
+                                failed_count += 1
+                        elif png_path.exists():
+                            try:
+                                # 构建完整URL: {base_url}/{static_url}/{repo_id}/image/{image_id}.png
+                                image_url = f"{base_url}/{static_url}/{repo_id}/image/{image_id}.png"
+                                await self.graph_db.update_method_image(method_id, image_url)
                                 generated_count += 1
                             except Exception as e:
                                 logger.error(f"Failed to update method {method_id} image: {e}")
                                 failed_count += 1
                         else:
-                            logger.warning(f"Image file not found for method {method_id}: {image_path}")
+                            logger.warning(f"Image file not found for method {method_id}: {svg_path} or {png_path}")
                             failed_count += 1
 
                     # 记录差异
@@ -581,7 +614,8 @@ class FlowchartGenerationStage(PipelineStageHandler):
         """整理解压后的图片文件.
 
         将解压的子目录中的图片移动到主目录，并按function_id重命名.
-        支持多层目录结构，如：Libraries/STM32F10x_StdPeriph_Driver/src/stm32f10x_tim_c/TIM_DeInit__L1.flowchart.png
+        优先选择SVG格式，如果没有SVG则选择PNG格式.
+        支持多层目录结构，如：Libraries/STM32F10x_StdPeriph_Driver/src/stm32f10x_tim_c/TIM_DeInit__L1.flowchart.svg
 
         Args:
             temp_dir: 临时解压目录
@@ -596,65 +630,146 @@ class FlowchartGenerationStage(PipelineStageHandler):
 
         # 首先记录压缩包结构
         all_files = list(temp_dir.rglob("*"))
-        logger.info(f"Archive contains {len(all_files)} items, {len(list(temp_dir.rglob('*.png')))} png files")
+        svg_files = list(temp_dir.rglob("*.svg"))
+        png_files = list(temp_dir.rglob("*.png"))
+        logger.info(f"Archive contains {len(all_files)} items, {len(svg_files)} svg files, {len(png_files)} png files")
 
-        # 查找所有png文件
-        for png_file in temp_dir.rglob("*.png"):
-            # 跳过manifest.json
-            if png_file.name == "manifest.json":
+        # 优先使用SVG文件，收集每个方法对应的图片（避免重复）
+        processed_methods = set()
+
+        # 首先处理SVG文件
+        for image_file in svg_files:
+            if image_file.name == "manifest.json":
                 continue
 
-            try:
-                # 从路径解析出function_id
-                # 路径格式：temp_dir/{path_parts...}/{name}__L{line}.flowchart.png
-                relative_path = png_file.relative_to(temp_dir)
-                parts = relative_path.parts
-
-                if len(parts) >= 2:
-                    # 格式：{path_dir1}/{path_dir2}/.../{file_name}.flowchart.png
-                    # 将所有目录部分组合成path_slug
-                    path_dirs = parts[:-1]  # 所有目录部分
-                    file_name = parts[-1]   # 文件名
-
-                    # 将目录路径转换为slug（用_替换路径分隔符）
-                    # 使用as_posix()确保跨平台一致性（统一使用正斜杠）
-                    import os
-                    # 重新构建路径，然后使用as_posix()标准化
-                    reconstructed = "/".join(path_dirs)
-                    # 如果在Windows上，path_dirs中的元素可能包含反斜杠（来自压缩包路径）
-                    # 统一替换为下划线
-                    path_slug = reconstructed.replace("/", "_").replace("\\", "_")
-
-                    # 移除.flowchart.png后缀
-                    base_name = file_name.replace(".flowchart.png", "")
-
-                    # 生成新的文件名：{path_slug}_{base_name}.png
-                    new_name = f"{path_slug}_{base_name}.png"
-                elif len(parts) == 1:
-                    # 格式：{file_name}.flowchart.png（在根目录）
-                    file_name = parts[0]
-                    base_name = file_name.replace(".flowchart.png", "")
-                    new_name = f"{base_name}.png"
-                else:
-                    logger.warning(f"Unexpected path structure: {relative_path}")
-                    skipped_count += 1
-                    continue
-
-                dest_path = image_dir / new_name
-
-                # 复制文件
-                import shutil
-                shutil.copy2(png_file, dest_path)
+            result = self._process_image_file(image_file, temp_dir, image_dir, ".svg", processed_methods)
+            if result == "moved":
                 moved_count += 1
-                if moved_count <= 5 or moved_count % 50 == 0:
-                    logger.debug(f"Copied {png_file} to {dest_path}")
+            elif result == "skipped":
+                skipped_count += 1
+            else:
+                error_count += 1
 
-            except Exception as e:
-                logger.warning(f"Failed to process {png_file}: {e}")
+        # 然后处理PNG文件（只处理没有SVG对应的方法）
+        for image_file in png_files:
+            if image_file.name == "manifest.json":
+                continue
+
+            # 检查是否已经有SVG版本
+            method_key = self._get_method_key_from_image_path(image_file, temp_dir)
+            if method_key in processed_methods:
+                logger.debug(f"Skipping PNG for {method_key}, SVG already exists")
+                skipped_count += 1
+                continue
+
+            result = self._process_image_file(image_file, temp_dir, image_dir, ".png", processed_methods)
+            if result == "moved":
+                moved_count += 1
+            elif result == "skipped":
+                skipped_count += 1
+            else:
                 error_count += 1
 
         logger.info(f"Image organization complete: {moved_count} copied, {skipped_count} skipped, {error_count} errors")
         return moved_count
+
+    def _get_method_key_from_image_path(self, image_file: Path, temp_dir: Path) -> str:
+        """从图片路径提取方法标识符（用于去重）.
+
+        Args:
+            image_file: 图片文件路径
+            temp_dir: 临时解压目录
+
+        Returns:
+            方法标识符字符串
+        """
+        relative_path = image_file.relative_to(temp_dir)
+        parts = relative_path.parts
+
+        if len(parts) >= 2:
+            path_dirs = parts[:-1]
+            file_name = parts[-1]
+            reconstructed = "/".join(path_dirs)
+            path_slug = reconstructed.replace("/", "_").replace("\\", "_")
+            base_name = file_name.replace(".flowchart.svg", "").replace(".flowchart.png", "")
+            return f"{path_slug}_{base_name}"
+        elif len(parts) == 1:
+            file_name = parts[0]
+            base_name = file_name.replace(".flowchart.svg", "").replace(".flowchart.png", "")
+            return base_name
+        return ""
+
+    def _process_image_file(
+        self,
+        image_file: Path,
+        temp_dir: Path,
+        image_dir: Path,
+        extension: str,
+        processed_methods: set,
+    ) -> str:
+        """处理单个图片文件.
+
+        Args:
+            image_file: 图片文件路径
+            temp_dir: 临时解压目录
+            image_dir: 最终图片目录
+            extension: 文件扩展名（.svg 或 .png）
+            processed_methods: 已处理方法标识集合
+
+        Returns:
+            处理结果："moved", "skipped", "error"
+        """
+        try:
+            # 从路径解析出function_id
+            # 路径格式：temp_dir/{path_parts...}/{name}__L{line}.flowchart.{ext}
+            relative_path = image_file.relative_to(temp_dir)
+            parts = relative_path.parts
+
+            if len(parts) >= 2:
+                # 格式：{path_dir1}/{path_dir2}/.../{file_name}.flowchart.{ext}
+                # 将所有目录部分组合成path_slug
+                path_dirs = parts[:-1]  # 所有目录部分
+                file_name = parts[-1]   # 文件名
+
+                # 将目录路径转换为slug（用_替换路径分隔符）
+                reconstructed = "/".join(path_dirs)
+                # 如果在Windows上，path_dirs中的元素可能包含反斜杠（来自压缩包路径）
+                # 统一替换为下划线
+                path_slug = reconstructed.replace("/", "_").replace("\\", "_")
+
+                # 移除.flowchart.{ext}后缀
+                base_name = file_name.replace(f".flowchart{extension}", "")
+
+                # 生成新的文件名：{path_slug}_{base_name}.{ext}
+                new_name = f"{path_slug}_{base_name}{extension}"
+            elif len(parts) == 1:
+                # 格式：{file_name}.flowchart.{ext}（在根目录）
+                file_name = parts[0]
+                base_name = file_name.replace(f".flowchart{extension}", "")
+                new_name = f"{base_name}{extension}"
+            else:
+                logger.warning(f"Unexpected path structure: {relative_path}")
+                return "skipped"
+
+            dest_path = image_dir / new_name
+
+            # 复制文件
+            import shutil
+            shutil.copy2(image_file, dest_path)
+
+            # 记录已处理方法
+            method_key = self._get_method_key_from_image_path(image_file, temp_dir)
+            if method_key:
+                processed_methods.add(method_key)
+
+            if len(processed_methods) <= 5 or len(processed_methods) % 50 == 0:
+                logger.debug(f"Copied {image_file} to {dest_path}")
+
+            return "moved"
+
+        except Exception as e:
+            logger.warning(f"Failed to process {image_file}: {e}")
+            return "error"
 
     def _parse_batch_results(
         self,

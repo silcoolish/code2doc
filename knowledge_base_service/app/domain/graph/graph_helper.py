@@ -364,37 +364,6 @@ class GraphHelper:
             rel_type="USE",
         )
 
-    async def create_dependency_relationship(
-        self,
-        from_id: str,
-        to_id: str,
-        from_label: str,
-        to_label: str,
-        dep_type: str,
-    ) -> bool:
-        """创建通用的依赖关系.
-
-        Args:
-            from_id: 源节点ID
-            to_id: 目标节点ID
-            from_label: 源节点标签
-            to_label: 目标节点标签
-            dep_type: 依赖类型
-
-        Returns:
-            是否成功创建
-        """
-        return await self.graph_db.create_relationship(
-            from_label=from_label,
-            from_key="id",
-            from_value=from_id,
-            to_label=to_label,
-            to_key="id",
-            to_value=to_id,
-            rel_type="DEPENDS_ON",
-            properties={"type": dep_type},
-        )
-
     # ==================== 节点查询方法 ====================
 
     async def get_node_by_id(self, node_id: str) -> Optional[Dict[str, Any]]:
@@ -445,7 +414,7 @@ class GraphHelper:
         RETURN c.id as id, c.name as name, c.code as code,
                c.language as language, c.filePath as file_path
         """
-        return await self.graph_db.execute_query(
+        return await self.graph_db._execute_query(
             query, {"repo_id": repo_id}
         )
 
@@ -487,7 +456,7 @@ class GraphHelper:
         RETURN f.id as id, f.name as name, f.code as code,
                f.summary as summary, f.fileType as file_type
         """
-        result = await self.graph_db.execute_query(
+        result = await self.graph_db._execute_query(
             query, {"repo_id": repo_id, "path": file_path}
         )
         return result[0] if result else None
@@ -516,67 +485,174 @@ class GraphHelper:
 
     # ==================== 批量操作方法 ====================
 
-    async def batch_create_nodes(
+    async def batch_create_directories(
         self,
-        nodes: List[Tuple[str, str, Dict[str, Any]]],
+        directories: List[Directory],
+        parent_ids: List[str],
     ) -> int:
-        """批量创建节点.
+        """批量创建 Directory 节点和 CONTAIN 关系.
 
         Args:
-            nodes: 节点列表，每项为 (label, key_value, properties)
+            directories: 目录节点列表
+            parent_ids: 对应的父节点ID列表
 
         Returns:
             成功创建的节点数量
         """
-        count = 0
-        for label, key_value, properties in nodes:
-            try:
-                await self.graph_db.merge_node(
-                    label=label,
-                    key_property="id",
-                    key_value=key_value,
-                    properties=self._filter_properties(properties),
-                )
-                count += 1
-            except Exception as e:
-                logger.warning(f"Failed to create {label} node {key_value}: {e}")
-        return count
+        if not directories:
+            return 0
 
-    async def batch_create_relationships(
+        nodes = [
+            {"id": d.id, "properties": self._filter_properties(d.to_dict())}
+            for d in directories
+        ]
+        await self.graph_db.batch_merge_nodes("Directory", nodes)
+
+        rels = [
+            {"from_id": pid, "to_id": d.id}
+            for d, pid in zip(directories, parent_ids)
+        ]
+        await self.graph_db.batch_create_relationships("CONTAIN", rels)
+
+        logger.debug(f"Batch created {len(directories)} Directory nodes")
+        return len(directories)
+
+    async def batch_create_files(
         self,
-        relationships: List[Tuple[str, str, str, str, str, str]],
+        file_nodes: List[File],
+        parent_ids: List[str],
     ) -> int:
-        """批量创建关系.
+        """批量创建 File 节点和 CONTAIN 关系.
 
         Args:
-            relationships: 关系列表，每项为
-                (from_label, from_value, to_label, to_value, rel_type, from_key="id")
+            file_nodes: 文件节点列表（code 属性需已设置）
+            parent_ids: 对应的父节点ID列表
+
+        Returns:
+            成功创建的节点数量
+        """
+        if not file_nodes:
+            return 0
+
+        nodes = [
+            {"id": f.id, "properties": self._filter_properties(f.to_dict())}
+            for f in file_nodes
+        ]
+        await self.graph_db.batch_merge_nodes("File", nodes)
+
+        rels = [
+            {"from_id": pid, "to_id": f.id}
+            for f, pid in zip(file_nodes, parent_ids)
+        ]
+        await self.graph_db.batch_create_relationships("CONTAIN", rels)
+
+        logger.debug(f"Batch created {len(file_nodes)} File nodes")
+        return len(file_nodes)
+
+    async def batch_create_classes(
+        self,
+        class_nodes: List[Class],
+        file_ids: List[str],
+    ) -> int:
+        """批量创建 Class 节点和 CONTAIN 关系.
+
+        Args:
+            class_nodes: 类节点列表
+            file_ids: 对应的所属文件ID列表
+
+        Returns:
+            成功创建的节点数量
+        """
+        if not class_nodes:
+            return 0
+
+        nodes = [
+            {"id": c.id, "properties": self._filter_properties(c.to_dict())}
+            for c in class_nodes
+        ]
+        await self.graph_db.batch_merge_nodes("Class", nodes)
+
+        rels = [
+            {"from_id": fid, "to_id": c.id}
+            for c, fid in zip(class_nodes, file_ids)
+        ]
+        await self.graph_db.batch_create_relationships("CONTAIN", rels)
+
+        logger.debug(f"Batch created {len(class_nodes)} Class nodes")
+        return len(class_nodes)
+
+    async def batch_create_methods(
+        self,
+        method_nodes: List[Method],
+        parent_ids: List[str],
+    ) -> int:
+        """批量创建 Method 节点和 CONTAIN 关系.
+
+        Args:
+            method_nodes: 方法节点列表
+            parent_ids: 对应的父节点ID列表（Class 或 File）
+
+        Returns:
+            成功创建的节点数量
+        """
+        if not method_nodes:
+            return 0
+
+        nodes = [
+            {"id": m.id, "properties": self._filter_properties(m.to_dict())}
+            for m in method_nodes
+        ]
+        await self.graph_db.batch_merge_nodes("Method", nodes)
+
+        rels = [
+            {"from_id": pid, "to_id": m.id}
+            for m, pid in zip(method_nodes, parent_ids)
+        ]
+        await self.graph_db.batch_create_relationships("CONTAIN", rels)
+
+        logger.debug(f"Batch created {len(method_nodes)} Method nodes")
+        return len(method_nodes)
+
+    async def batch_create_use_relationships(
+        self,
+        relations: List[Tuple[str, str]],
+    ) -> int:
+        """批量创建文件间的 USE 关系.
+
+        Args:
+            relations: 关系列表，每项为 (from_file_id, to_file_id)
 
         Returns:
             成功创建的关系数量
         """
-        count = 0
-        for rel in relationships:
-            try:
-                if len(rel) == 5:
-                    from_label, from_value, to_label, to_value, rel_type = rel
-                    from_key = to_key = "id"
-                else:
-                    from_label, from_value, to_label, to_value, rel_type, from_key = rel
-                    to_key = "id"
+        if not relations:
+            return 0
+        rels = [{"from_id": f, "to_id": t} for f, t in relations]
+        count = await self.graph_db.batch_create_relationships(
+            "USE", rels, from_label="File", to_label="File"
+        )
+        logger.debug(f"Batch created {count} USE relationships")
+        return count
 
-                await self.graph_db.create_relationship(
-                    from_label=from_label,
-                    from_key=from_key,
-                    from_value=from_value,
-                    to_label=to_label,
-                    to_key=to_key,
-                    to_value=to_value,
-                    rel_type=rel_type,
-                )
-                count += 1
-            except Exception as e:
-                logger.warning(f"Failed to create relationship: {e}")
+    async def batch_create_call_relationships(
+        self,
+        relations: List[Tuple[str, str]],
+    ) -> int:
+        """批量创建方法间的 CALL 关系.
+
+        Args:
+            relations: 关系列表，每项为 (from_method_id, to_method_id)
+
+        Returns:
+            成功创建的关系数量
+        """
+        if not relations:
+            return 0
+        rels = [{"from_id": f, "to_id": t} for f, t in relations]
+        count = await self.graph_db.batch_create_relationships(
+            "CALL", rels, from_label="Method", to_label="Method"
+        )
+        logger.debug(f"Batch created {count} CALL relationships")
         return count
 
     # ==================== 节点更新方法 ====================
@@ -656,8 +732,8 @@ class GraphHelper:
     def _filter_properties(self, properties: Dict[str, Any]) -> Dict[str, Any]:
         """过滤属性，只保留基本类型.
 
-        Neo4j 只支持基本类型（字符串、数字、布尔值、日期）和这些类型的数组。
-        过滤掉字典、None 值和嵌套对象。
+        Neo4j 支持基本类型（字符串、数字、布尔值、日期）、这些类型的数组，
+        以及值为基本类型的字典（Map）。过滤掉嵌套对象和 None 值。
 
         Args:
             properties: 原始属性字典
@@ -669,8 +745,12 @@ class GraphHelper:
         for key, value in properties.items():
             if value is None:
                 continue
-            # 跳过所有字典类型（Neo4j不支持）
+            # 允许值为基本类型的字典（Neo4j Map）
             if isinstance(value, dict):
+                if value and all(
+                    isinstance(v, (str, int, float, bool)) for v in value.values()
+                ):
+                    filtered[key] = value
                 continue
             # 跳过所有列表类型（除非是纯基本类型列表）
             if isinstance(value, list):

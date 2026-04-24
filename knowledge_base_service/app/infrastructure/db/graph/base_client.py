@@ -24,25 +24,6 @@ class GraphDatabaseClient(ABC):
         pass
 
     @abstractmethod
-    async def execute_query(
-        self,
-        query: str,
-        parameters: Optional[Dict[str, Any]] = None,
-        database: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
-        """执行查询语句.
-
-        Args:
-            query: 查询语句
-            parameters: 查询参数
-            database: 目标数据库名称
-
-        Returns:
-            查询结果列表
-        """
-        pass
-
-    @abstractmethod
     async def create_node(
         self,
         label: str,
@@ -116,6 +97,48 @@ class GraphDatabaseClient(ABC):
         pass
 
     @abstractmethod
+    async def batch_merge_nodes(
+        self,
+        label: str,
+        nodes: List[Dict[str, Any]],
+        database: Optional[str] = None,
+    ) -> int:
+        """批量合并节点（使用UNWIND优化）.
+
+        Args:
+            label: 节点标签
+            nodes: 节点属性列表，每项必须包含 'id' 和 'properties' 字段
+            database: 目标数据库名称
+
+        Returns:
+            成功合并的节点数量
+        """
+        pass
+
+    @abstractmethod
+    async def batch_create_relationships(
+        self,
+        rel_type: str,
+        relationships: List[Dict[str, str]],
+        from_label: Optional[str] = None,
+        to_label: Optional[str] = None,
+        database: Optional[str] = None,
+    ) -> int:
+        """批量创建关系（使用UNWIND优化）.
+
+        Args:
+            rel_type: 关系类型
+            relationships: 关系列表，每项包含 'from_id' 和 'to_id'
+            from_label: 起始节点标签（可选，用于优化MATCH性能）
+            to_label: 目标节点标签（可选，用于优化MATCH性能）
+            database: 目标数据库名称
+
+        Returns:
+            成功创建的关系数量
+        """
+        pass
+
+    @abstractmethod
     async def delete_repo_data(self, repo_id: str, database: Optional[str] = None) -> int:
         """删除仓库相关数据.
 
@@ -178,15 +201,21 @@ class GraphDatabaseClient(ABC):
         pass
 
     @abstractmethod
-    async def get_all_methods(self, repo_id: str, database: Optional[str] = None) -> List[Dict[str, Any]]:
-        """获取指定仓库的所有 Method 节点.
+    async def get_all_nodes(
+        self,
+        repo_id: str,
+        node_types: List[str],
+        database: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """获取指定仓库的所有指定类型节点.
 
         Args:
             repo_id: 仓库ID
+            node_types: 节点类型列表，如 ["File", "Class", "Method"]
             database: 目标数据库名称
 
         Returns:
-            Method 节点列表，包含 id, name, code, language, file_path 等字段
+            节点列表，每项包含 id, name, type, file_path, summary, language, description 等字段
         """
         pass
 
@@ -422,19 +451,23 @@ class GraphDatabaseClient(ABC):
         pass
 
     @abstractmethod
-    async def get_module_workflows(
+    async def get_related_nodes(
         self,
-        module_id: str,
+        node_id: str,
+        rel_type: str,
+        direction: str = "out",
         database: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """获取 Module 对应的 Workflow 列表.
+        """获取与指定节点具有特定关系的所有节点.
 
         Args:
-            module_id: Module ID
+            node_id: 节点ID
+            rel_type: 关系类型，如 "BELONG_TO", "CONTAIN", "CALL"
+            direction: 关系方向 ("out":  outgoing, "in": incoming, "both": 双向)
             database: 目标数据库名称
 
         Returns:
-            Workflow 列表，每项包含 id, name, description, summary 字段
+            关联节点列表，每项包含 id, name, labels, summary, description 等字段
         """
         pass
 
@@ -617,5 +650,83 @@ class GraphDatabaseClient(ABC):
 
         Returns:
             文件路径到代码内容的映射
+        """
+        pass
+
+    @abstractmethod
+    async def search_nodes_by_name(
+        self,
+        repo_id: str,
+        name: str,
+        node_types: List[str],
+        fuzzy: bool = True,
+        top_k: int = 10,
+        database: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """根据节点名称搜索代码节点.
+
+        Args:
+            repo_id: 仓库ID
+            name: 节点名称关键字
+            node_types: 节点类型列表，如 ["File", "Class", "Method"]
+            fuzzy: 是否模糊匹配，True 使用 CONTAINS，False 使用精确匹配
+            top_k: 返回结果数量上限
+            database: 目标数据库名称
+
+        Returns:
+            节点列表，每项包含 id, name, types, file_path, summary, docstring 等字段
+        """
+        pass
+
+    @abstractmethod
+    async def batch_get_node_details(
+        self,
+        repo_id: str,
+        node_ids: List[str],
+        database: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """批量根据节点 ID 获取节点详情.
+
+        Args:
+            repo_id: 仓库ID
+            node_ids: 节点 ID 列表
+            database: 目标数据库名称
+
+        Returns:
+            节点详情列表，每项包含 id, name, types, file_path, code, summary, docstring, language, suffix 等字段
+        """
+        pass
+
+    @abstractmethod
+    async def get_repository_stats(
+        self,
+        repo_id: str,
+        database: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """获取仓库节点的统计信息.
+
+        Args:
+            repo_id: 仓库ID
+            database: 目标数据库名称
+
+        Returns:
+            包含 totalFiles, totalCodeFiles, totalLines, totalSize, languages, languageDistribution 等字段的字典，或 None
+        """
+        pass
+
+    @abstractmethod
+    async def get_repo_node_counts(
+        self,
+        repo_id: str,
+        database: Optional[str] = None,
+    ) -> Dict[str, int]:
+        """获取仓库中目录、类、方法的数量统计.
+
+        Args:
+            repo_id: 仓库ID
+            database: 目标数据库名称
+
+        Returns:
+            包含 directory_count, class_count, method_count 的字典
         """
         pass

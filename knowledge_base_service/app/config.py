@@ -110,8 +110,13 @@ class Settings(BaseSettings):
     flowchart_service_url: str = Field(default="http://localhost:18765")
     flowchart_service_timeout: int = Field(default=30)
     flowchart_supported_languages: List[str] = Field(default=["c", "cpp"])
-    flowchart_image_dir: str = Field(default="./data")
+    flowchart_image_dir: str = Field(default="data")  # 相对于项目根目录
     flowchart_batch_size: int = Field(default=50)  # 每批处理的方法数量
+
+    # Static Files Settings
+    public_base_url: str = Field(default="http://localhost:8000")  # 公共服务基础URL
+    static_files_path: str = Field(default="app/data")  # 相对于项目根目录，不要以./开头
+    static_files_url: str = Field(default="/static")  # 静态文件URL前缀
 
     # Module Detection Strategy Settings
     # Strategy: "simple" | "clustering"

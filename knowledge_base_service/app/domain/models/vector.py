@@ -28,56 +28,18 @@ class VectorRecord:
 
 
 @dataclass
-class FileSummaryRecord(VectorRecord):
-    """文件摘要向量记录."""
+class CodeVectorRecord(VectorRecord):
+    """统一代码向量记录.
 
-    summary: str = ""
-
-    def to_dict(self) -> Dict[str, Any]:
-        result = super().to_dict()
-        result["summary"] = self.summary
-        return result
-
-
-@dataclass
-class ClassSummaryRecord(VectorRecord):
-    """类摘要向量记录."""
-
-    summary: str = ""
-
-    def to_dict(self) -> Dict[str, Any]:
-        result = super().to_dict()
-        result["summary"] = self.summary
-        return result
-
-
-@dataclass
-class MethodSummaryRecord(VectorRecord):
-    """方法摘要向量记录."""
-
-    summary: str = ""
-
-    def to_dict(self) -> Dict[str, Any]:
-        result = super().to_dict()
-        result["summary"] = self.summary
-        return result
-
-
-@dataclass
-class SemanticSummaryRecord(VectorRecord):
-    """语义摘要向量记录（Module/Workflow）.
-
-    合并了 summary 和 detail，只使用 summary 做 embedding，
-    detail 作为额外字段存储和返回。
+    合并了 File/Class/Method/Module/Workflow 的向量记录，
+    通过 type 字段区分节点类型。
     """
 
-    type: str = ""  # Module / Workflow
+    type: str = ""  # File / Class / Method / Module / Workflow
     summary: str = ""  # 用于 embedding 的摘要
-    detail: str = ""  # 详细描述（不作为 embedding 输入）
 
     def to_dict(self) -> Dict[str, Any]:
         result = super().to_dict()
         result["type"] = self.type
         result["summary"] = self.summary
-        result["detail"] = self.detail
         return result

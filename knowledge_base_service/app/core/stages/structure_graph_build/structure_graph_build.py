@@ -15,7 +15,7 @@ import logging
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from app.config import get_settings
 from app.core.pipeline import PipelineContext, PipelineStageHandler
@@ -99,6 +99,34 @@ class FilterChain:
         return chain
 
 
+_EXTENSION_LANGUAGE_MAP = {
+    ".py": "python",
+    ".java": "java",
+    ".js": "javascript",
+    ".ts": "typescript",
+    ".go": "go",
+    ".rs": "rust",
+    ".cpp": "cpp",
+    ".c": "c",
+    ".h": "c",
+    ".hpp": "cpp",
+    ".cs": "csharp",
+    ".rb": "ruby",
+    ".php": "php",
+    ".swift": "swift",
+    ".kt": "kotlin",
+    ".scala": "scala",
+    ".r": "r",
+    ".m": "objective-c",
+    ".mm": "objective-c",
+    ".groovy": "groovy",
+    ".clj": "clojure",
+    ".erl": "erlang",
+    ".ex": "elixir",
+    ".exs": "elixir",
+}
+
+
 class StructureGraphBuildStage(PipelineStageHandler):
     """结构图构建阶段处理器.
 
@@ -143,7 +171,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
 
             # 1. 遍历仓库并直接创建结构节点
             context.stage_msg = "正在遍历仓库文件..."
-            repository, directories, files = await self._traverse_and_create_structure(
+            repository, directories, files, stats = await self._traverse_and_create_structure(
                 context.repo_path, context.repo_name, pipeline_repo_id
             )
 
@@ -180,6 +208,21 @@ class StructureGraphBuildStage(PipelineStageHandler):
             # 3. 保存节点ID到上下文（而非完整数据）
             context.data["node_ids"] = node_ids
 
+            # 4. 更新 Repository 节点的统计信息
+            repository.total_files = stats["total_files"]
+            repository.total_code_files = stats["total_code_files"]
+            repository.total_lines = stats["total_lines"]
+            repository.total_size = stats["total_size"]
+            repository.languages = sorted(list(stats["languages"]))
+            repository.language_distribution = stats["language_distribution"]
+            repository.updated_at = datetime.utcnow()
+            await self.graph_helper.create_repository(repository)
+            logger.info(
+                f"Updated Repository stats: {repository.total_files} files, "
+                f"{repository.total_code_files} code files, {repository.total_lines} lines, "
+                f"{repository.total_size} bytes, languages={repository.languages}"
+            )
+
             # 统计信息
             metadata = {
                 "repositories": 1,
@@ -211,7 +254,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
 
     async def _traverse_and_create_structure(
         self, repo_path: str, repo_name: str, pipeline_repo_id: str
-    ) -> tuple[Repository, List[Directory], List[File]]:
+    ) -> tuple[Repository, List[Directory], List[File], Dict[str, Any]]:
         """遍历仓库并直接创建结构节点.
 
         Args:
@@ -220,13 +263,13 @@ class StructureGraphBuildStage(PipelineStageHandler):
             pipeline_repo_id: 初始化请求传入的repo_id
 
         Returns:
-            (repository, directories, code_files)
+            (repository, directories, code_files, stats)
         """
         repo_root = Path(repo_path).resolve()
         if not repo_root.exists():
             raise FileNotFoundError(f"Repository path not found: {repo_path}")
 
-        # 创建 Repository 节点
+        # 创建 Repository 节点（基础信息，统计信息在遍历完成后更新）
         repository = Repository(
             id=f"repo_{repo_name}",
             name=repo_name,
@@ -242,9 +285,18 @@ class StructureGraphBuildStage(PipelineStageHandler):
         filter_chain = FilterChain.create_default_chain(repo_root)
 
         directories: List[Directory] = []
+        dir_parent_ids: List[str] = []
         code_files: List[File] = []
+        stats: Dict[str, Any] = {
+            "total_files": 0,
+            "total_code_files": 0,
+            "total_lines": 0,
+            "total_size": 0,
+            "languages": set(),
+            "language_distribution": {},
+        }
 
-        # 遍历目录
+        # 遍历目录（同步操作，大仓库可能阻塞事件循环）
         for path in repo_root.rglob("*"):
             try:
                 relative_path = path.relative_to(repo_root)
@@ -257,7 +309,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
                     continue
 
                 if path.is_dir():
-                    # 创建 Directory 节点
+                    # 收集 Directory 节点（稍后批量创建）
                     directory = Directory(
                         id=f"dir_{repo_name}_{str_path}",
                         name=path.name,
@@ -265,21 +317,40 @@ class StructureGraphBuildStage(PipelineStageHandler):
                         repo_id=pipeline_repo_id,
                         path=str_path,
                     )
-                    # 创建 CONTAIN 关系所需的父节点ID
                     parent_id = self._get_parent_id(directory.path, repository.id)
-                    # 如果 parent_id 为 None，使用 repo_id 作为父节点
                     effective_parent_id = parent_id if parent_id else repository.id
-                    await self.graph_helper.create_directory(
-                        directory, effective_parent_id
-                    )
                     directories.append(directory)
+                    dir_parent_ids.append(effective_parent_id)
 
                 elif path.is_file():
                     # 确定文件类型
                     file_type = self._determine_file_type(path)
                     suffix = path.suffix
 
-                    # 创建 File 节点
+                    # 累加全局统计
+                    stats["total_files"] += 1
+                    try:
+                        stats["total_size"] += path.stat().st_size
+                    except Exception as e:
+                        logger.warning(f"Failed to get file size for {path}: {e}")
+
+                    # 代码文件额外统计行数和语言分布
+                    if file_type == "code":
+                        stats["total_code_files"] += 1
+                        try:
+                            content = path.read_text(encoding="utf-8", errors="ignore")
+                            stats["total_lines"] += len(content.splitlines())
+                            lang = _EXTENSION_LANGUAGE_MAP.get(
+                                suffix.lower(), suffix.lower().lstrip(".")
+                            )
+                            stats["languages"].add(lang)
+                            stats["language_distribution"][lang] = (
+                                stats["language_distribution"].get(lang, 0) + 1
+                            )
+                        except Exception as e:
+                            logger.warning(f"Failed to read code file {path}: {e}")
+
+                    # 收集 File 节点（稍后批量创建）
                     file_node = File(
                         id=f"file_{repo_name}_{str_path}",
                         name=path.name,
@@ -297,7 +368,12 @@ class StructureGraphBuildStage(PipelineStageHandler):
                 logger.warning(f"Error processing path {path}: {e}")
                 continue
 
-        return repository, directories, code_files
+        # 批量创建 Directory 节点和关系（单次UNWIND查询）
+        if directories:
+            await self.graph_helper.batch_create_directories(directories, dir_parent_ids)
+            logger.info(f"Batch created {len(directories)} Directory nodes")
+
+        return repository, directories, code_files, stats
 
     def _determine_file_type(self, path: Path) -> str:
         """确定文件类型.
@@ -381,7 +457,12 @@ class StructureGraphBuildStage(PipelineStageHandler):
         context: PipelineContext,
         pipeline_repo_id: str = "",
     ) -> tuple[List[str], List[str], List[str]]:
-        """处理代码文件：解析并创建节点.
+        """处理代码文件：批量解析并批量创建节点.
+
+        优化策略：
+        1. 先并发解析所有文件（纯CPU/IO，不涉及数据库）
+        2. 收集所有 File/Class/Method 节点
+        3. 使用UNWIND批量写入Neo4j（减少网络往返）
 
         Args:
             code_files: 代码文件列表（已过滤的代码类型文件）
@@ -410,30 +491,58 @@ class StructureGraphBuildStage(PipelineStageHandler):
         for i in range(0, total_files, batch_size):
             batch = code_files[i : i + batch_size]
 
-            # 并发处理
+            # 并发解析（不涉及数据库写入）
             tasks = [
-                self._parse_and_store_file(
+                self._parse_file(
                     f, directories, repo_id, repo_name, repo_path, pipeline_repo_id
                 )
                 for f in batch
             ]
             batch_results = await asyncio.gather(*tasks, return_exceptions=True)
 
+            # 收集待创建的节点
+            files_to_create: List[File] = []
+            file_parents: List[str] = []
+            classes_to_create: List[Class] = []
+            class_parents: List[str] = []
+            methods_to_create: List[Method] = []
+            method_parents: List[str] = []
+
             for file_node, result in zip(batch, batch_results):
                 if isinstance(result, Exception):
-                    logger.warning(f"Failed to process {file_node.path}: {result}")
-                else:
-                    f_ids, c_ids, m_ids = result
-                    file_ids.extend(f_ids)
-                    class_ids.extend(c_ids)
-                    method_ids.extend(m_ids)
+                    logger.warning(f"Failed to parse {file_node.path}: {result}")
+                    continue
+
+                file_parent_id, classes, methods = result
+                file_ids.append(file_node.id)
+                files_to_create.append(file_node)
+                file_parents.append(file_parent_id)
+
+                for cls, cls_parent in classes:
+                    class_ids.append(cls.id)
+                    classes_to_create.append(cls)
+                    class_parents.append(cls_parent)
+
+                for method, method_parent in methods:
+                    method_ids.append(method.id)
+                    methods_to_create.append(method)
+                    method_parents.append(method_parent)
+
+            # 批量创建节点和关系（单次UNWIND查询）
+            if files_to_create:
+                await self.graph_helper.batch_create_files(files_to_create, file_parents)
+            if classes_to_create:
+                await self.graph_helper.batch_create_classes(classes_to_create, class_parents)
+            if methods_to_create:
+                await self.graph_helper.batch_create_methods(methods_to_create, method_parents)
 
             progress = min(100, int((i + len(batch)) / total_files * 100))
             context.stage_msg = (
                 f"正在解析代码文件: {i + len(batch)}/{total_files} ({progress}%)"
             )
             logger.info(
-                f"Processing progress: {progress}% ({i + len(batch)}/{total_files})"
+                f"Processing progress: {progress}% ({i + len(batch)}/{total_files}), "
+                f"batch: {len(files_to_create)} files, {len(classes_to_create)} classes, {len(methods_to_create)} methods"
             )
 
         context.stage_msg = f"已创建 {len(file_ids)} 个File节点, {len(class_ids)} 个Class节点, {len(method_ids)} 个Method节点"
@@ -442,7 +551,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
 
         return file_ids, class_ids, method_ids
 
-    async def _parse_and_store_file(
+    async def _parse_file(
         self,
         file_node: File,
         directories: List[Directory],
@@ -450,8 +559,8 @@ class StructureGraphBuildStage(PipelineStageHandler):
         repo_name: str,
         repo_path: str,
         pipeline_repo_id: str = "",
-    ) -> tuple[List[str], List[str], List[str]]:
-        """解析单个文件并存储到图数据库.
+    ) -> tuple[str, list[tuple[Class, str]], list[tuple[Method, str]]]:
+        """解析单个文件，返回待创建的节点数据（不写入数据库）.
 
         Args:
             file_node: 文件节点
@@ -462,63 +571,51 @@ class StructureGraphBuildStage(PipelineStageHandler):
             pipeline_repo_id: 初始化请求传入的repo_id
 
         Returns:
-            (file_ids, class_ids, method_ids)
+            (file_parent_id, classes_with_parent_file_id, methods_with_parent_id)
         """
-        file_ids: List[str] = []
-        class_ids: List[str] = []
-        method_ids: List[str] = []
-
         # 获取父目录ID
         parent_id = self._get_parent_directory_id(file_node.path, directories, repo_id)
 
-        # 创建 File 节点
-        await self.graph_helper.create_file(file_node, parent_id, repo_path)
-        file_ids.append(file_node.id)
-
-        # 解析文件
+        # 读取文件内容（设置到 file_node.code 上，供批量创建使用）
         file_path = Path(repo_path) / file_node.path
-
         try:
             content = file_path.read_text(encoding="utf-8", errors="ignore")
+            file_node.code = content
         except Exception as e:
             logger.warning(f"Failed to read file {file_node.path}: {e}")
-            return file_ids, class_ids, method_ids
+            return parent_id, [], []
 
         analyzer = get_analyzer_for_file(file_node.path)
         if not analyzer:
-            return file_ids, class_ids, method_ids
+            return parent_id, [], []
 
         parse_result = analyzer.parse_for_structure(file_node.path, content)
         if not parse_result.success:
             logger.warning(f"Failed to parse {file_node.path}: {parse_result.error}")
-            return file_ids, class_ids, method_ids
+            return parent_id, [], []
 
         file_id = file_node.id
 
-        # 创建 Class/Struct/Interface/Enum/Trait 节点，并建立类名到ID的映射
-        class_name_to_id: dict = {}
+        # 构建 Class 节点对象
+        classes: list[tuple[Class, str]] = []
+        class_name_to_id: dict[str, str] = {}
         for class_symbol in parse_result.classes:
-            class_node_id = await self._create_class_from_symbol(
-                class_symbol,
-                file_id,
-                file_node.path,
-                parse_result.language,
-                repo_name,
-                pipeline_repo_id,
+            class_node = self._build_class_node(
+                class_symbol, file_node.path, parse_result.language, repo_name, pipeline_repo_id
             )
-            class_ids.append(class_node_id)
-            class_name_to_id[class_symbol.name] = class_node_id
+            classes.append((class_node, file_id))
+            class_name_to_id[class_symbol.name] = class_node.id
 
-        # 创建 Method 节点
+        # 构建 Method 节点对象
+        methods: list[tuple[Method, str]] = []
         for method_symbol in parse_result.methods:
-            # 根据 parent_name 判断是类方法还是独立函数
             if (
                 method_symbol.parent_name
                 and method_symbol.parent_name in class_name_to_id
             ):
                 # 类方法
                 class_node_id = class_name_to_id[method_symbol.parent_name]
-                method_node_id = await self._create_method_from_symbol(
+                method_node = self._build_method_node(
                     method_symbol,
                     class_node_id,
                     file_node.path,
@@ -527,9 +624,10 @@ class StructureGraphBuildStage(PipelineStageHandler):
                     pipeline_repo_id,
                     class_name=method_symbol.parent_name,
                 )
+                methods.append((method_node, class_node_id))
             else:
                 # 独立函数
-                method_node_id = await self._create_method_from_symbol(
+                method_node = self._build_method_node(
                     method_symbol,
                     file_id,
                     file_node.path,
@@ -537,35 +635,37 @@ class StructureGraphBuildStage(PipelineStageHandler):
                     repo_name,
                     pipeline_repo_id,
                 )
-            method_ids.append(method_node_id)
+                methods.append((method_node, file_id))
 
-        return file_ids, class_ids, method_ids
+        return parent_id, classes, methods
 
-    async def _create_class_from_symbol(
+    def _build_class_node(
         self,
         class_symbol: ParsedSymbol,
-        file_id: str,
         file_path: str,
         language: str,
         repo_name: str,
         pipeline_repo_id: str = "",
-    ) -> str:
-        """从 ParsedSymbol 创建 Class 节点.
+    ) -> Class:
+        """从 ParsedSymbol 构建 Class 节点对象（不涉及数据库操作）.
 
         Args:
+            class_symbol: 解析出的类符号
+            file_path: 文件路径
+            language: 编程语言
+            repo_name: 仓库名称
             pipeline_repo_id: 初始化请求传入的repo_id
 
         Returns:
-            创建的 Class 节点ID
+            Class 节点对象
         """
         class_node_id = f"class_{repo_name}_{file_path}_{class_symbol.name}"
 
-        # 真实类型映射（首字母大写）
         real_type = "Class"
         if class_symbol.symbol_type:
             real_type = class_symbol.symbol_type.capitalize()
 
-        class_node = Class(
+        return Class(
             id=class_node_id,
             name=class_symbol.name,
             type="Class",
@@ -579,11 +679,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
             real_type=real_type,
         )
 
-        await self.graph_helper.create_class(class_node, file_id)
-
-        return class_node_id
-
-    async def _create_method_from_symbol(
+    def _build_method_node(
         self,
         method_symbol: ParsedSymbol,
         parent_id: str,
@@ -592,14 +688,20 @@ class StructureGraphBuildStage(PipelineStageHandler):
         repo_name: str,
         pipeline_repo_id: str = "",
         class_name: str = "",
-    ) -> str:
-        """从 ParsedSymbol 创建 Method 节点.
+    ) -> Method:
+        """从 ParsedSymbol 构建 Method 节点对象（不涉及数据库操作）.
 
         Args:
+            method_symbol: 解析出的方法符号
+            parent_id: 父节点ID（Class 或 File）
+            file_path: 文件路径
+            language: 编程语言
+            repo_name: 仓库名称
             pipeline_repo_id: 初始化请求传入的repo_id
+            class_name: 所属类名（如果有）
 
         Returns:
-            创建的 Method 节点ID
+            Method 节点对象
         """
         if class_name:
             method_node_id = (
@@ -608,7 +710,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
         else:
             method_node_id = f"method_{repo_name}_{file_path}_{method_symbol.name}"
 
-        method_node = Method(
+        return Method(
             id=method_node_id,
             name=method_symbol.name,
             type="Method",
@@ -621,10 +723,6 @@ class StructureGraphBuildStage(PipelineStageHandler):
             docstring=method_symbol.docstring,
             class_id=parent_id if "class_" in parent_id else None,
         )
-
-        await self.graph_helper.create_method(method_node, parent_id)
-
-        return method_node_id
 
     def _is_supported_language(self, suffix: str) -> bool:
         """检查是否支持该语言."""

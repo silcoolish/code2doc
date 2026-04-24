@@ -19,6 +19,7 @@ from app.infrastructure.csv_storage import (
     get_repo_status_storage,
     InitializationStatus,
 )
+from app.infrastructure.db import get_graph_db_client
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +141,15 @@ class PipelineOrchestrator:
             repo_name=repo_name,
             config=config or {},
         )
+
+        # 清理该仓库的旧图数据，避免重复节点和关系
+        try:
+            graph_db = get_graph_db_client()
+            deleted = await graph_db.delete_repo_data(repo_id)
+            if deleted > 0:
+                logger.info(f"Cleaned up {deleted} old nodes for repo: {repo_id}")
+        except Exception as e:
+            logger.warning(f"Failed to clean up old data for repo {repo_id}: {e}")
 
         # 为新流水线准备日志目录（会归档旧日志）
         self._log_manager.prepare_new_pipeline(repo_id)
