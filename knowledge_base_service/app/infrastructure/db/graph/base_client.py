@@ -201,6 +201,23 @@ class GraphDatabaseClient(ABC):
         pass
 
     @abstractmethod
+    async def get_all_methods(
+        self,
+        repo_id: str,
+        database: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """获取指定仓库的所有 Method 节点.
+
+        Args:
+            repo_id: 仓库ID
+            database: 目标数据库名称
+
+        Returns:
+            Method 节点列表，包含 id, name, code, language, file_path 等字段
+        """
+        pass
+
+    @abstractmethod
     async def get_all_nodes(
         self,
         repo_id: str,

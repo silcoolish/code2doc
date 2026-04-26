@@ -5,7 +5,7 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.infrastructure.db import get_graph_db_client, get_vector_db_client
 from app.mcp.tools import KnowledgeBaseTools
@@ -13,6 +13,32 @@ from app.mcp.tools import KnowledgeBaseTools
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/mcp", tags=["mcp"])
+
+
+def _parse_string_to_list(value: Any) -> Any:
+    """将字符串形式的列表解析为真正的列表，兼容 LLM 工具调用格式.
+
+    LLM 有时会把数组参数输出为字符串（如 "\\n[File, Class, Method]\\n"），
+    此函数在 Pydantic 校验前将其转换为真正的列表。
+    """
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            try:
+                parsed = json.loads(stripped)
+                if isinstance(parsed, list):
+                    return parsed
+            except json.JSONDecodeError:
+                # 尝试按逗号分割（处理非标准 JSON 如 "[File, Class, Method]"）
+                inner = stripped[1:-1].strip()
+                if inner:
+                    return [item.strip().strip('"').strip("'") for item in inner.split(",")]
+                return []
+        # 单个字符串值包装为列表
+        return [stripped] if stripped else []
+    return value
 
 
 async def get_tools() -> KnowledgeBaseTools:
@@ -48,6 +74,11 @@ class NodeSearchQuery(BaseModel):
         default=None,
         description="指定返回字段列表，如 ['node_id', 'name', 'summary']。默认返回: node_id, name, node_type, summary, file_path, distance",
     )
+
+    @field_validator("node_types", "returns", mode="before")
+    @classmethod
+    def _parse_list_fields(cls, v: Any) -> Any:
+        return _parse_string_to_list(v)
 
 
 class SearchNodesRequest(BaseModel):
@@ -100,10 +131,20 @@ class GetAllNodesRequest(BaseModel):
         description="指定返回字段列表，如 ['node_id', 'name', 'summary']。默认返回: node_id, name, node_type, file_path, summary",
     )
 
+    @field_validator("node_types", "returns", mode="before")
+    @classmethod
+    def _parse_list_fields(cls, v: Any) -> Any:
+        return _parse_string_to_list(v)
+
 
 class BatchGetImageUrlsRequest(BaseModel):
     repo_id: str = Field(..., description="仓库ID")
     node_ids: list[str] = Field(..., description="节点ID列表")
+
+    @field_validator("node_ids", mode="before")
+    @classmethod
+    def _parse_list_fields(cls, v: Any) -> Any:
+        return _parse_string_to_list(v)
 
 
 class BatchGetNodeDetailsRequest(BaseModel):
@@ -113,6 +154,11 @@ class BatchGetNodeDetailsRequest(BaseModel):
         default=None,
         description="指定返回字段列表，如 ['node_id', 'name', 'summary', 'code']。默认返回: node_id, name, node_type, file_path, code, summary, docstring, language, suffix",
     )
+
+    @field_validator("node_ids", "returns", mode="before")
+    @classmethod
+    def _parse_list_fields(cls, v: Any) -> Any:
+        return _parse_string_to_list(v)
 
 
 # ========== 响应模型 ==========

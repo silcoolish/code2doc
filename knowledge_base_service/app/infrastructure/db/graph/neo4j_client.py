@@ -414,6 +414,29 @@ class Neo4jClient(GraphDatabaseClient):
 
         return result
 
+    async def get_all_methods(
+        self,
+        repo_id: str,
+        database: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """获取指定仓库的所有 Method 节点.
+
+        Args:
+            repo_id: 仓库ID
+            database: 目标数据库名称
+
+        Returns:
+            Method 节点列表，包含 id, name, code, language, file_path 等字段
+        """
+        query = """
+        MATCH (m:Method)
+        WHERE m.repoId = $repo_id
+        RETURN m.id as id, m.name as name, m.code as code,
+               m.language as language, m.filePath as file_path
+        ORDER BY m.name
+        """
+        return await self._execute_query(query, {"repo_id": repo_id}, database)
+
     async def get_all_nodes(
         self,
         repo_id: str,
