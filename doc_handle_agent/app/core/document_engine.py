@@ -151,6 +151,7 @@ class DocumentEngine:
                     mcp_client=mcp_client,
                     llm_client=llm_client,
                 )
+                await content_generator.initialize()
 
                 # 创建workspace适配器
                 workspace_adapter = WorkspaceServiceAdapter()

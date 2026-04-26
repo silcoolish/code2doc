@@ -108,7 +108,18 @@ class GenerationStrategy(ABC):
             if end > start:
                 return raw_content[start:end].strip()
 
-        # 尝试查找JSON对象边界
+        # 尝试直接提取（如果内容以 [ 或 { 开头）
+        stripped = raw_content.strip()
+        if stripped.startswith("["):
+            end = stripped.rfind("]")
+            if end > 0:
+                return stripped[: end + 1]
+        elif stripped.startswith("{"):
+            end = stripped.rfind("}")
+            if end > 0:
+                return stripped[: end + 1]
+
+        # 回退：查找JSON对象边界
         json_start = raw_content.find("{")
         json_end = raw_content.rfind("}")
         if json_start >= 0 and json_end > json_start:
@@ -165,6 +176,7 @@ class GenerationStrategy(ABC):
     ) -> List[Dict[str, Any]]:
         """将block列表序列化为LLM所需的精简格式.
 
+        严格遵循 block_format_guide.md 的字段要求，
         过滤掉blockStyle、inlineStyles、sourceRefs等LLM不需要的字段，
         只保留与内容生成相关的核心属性。
 
@@ -181,8 +193,7 @@ class GenerationStrategy(ABC):
                 "block_type": block.block_type,
                 "heading_level": block.heading_level,
                 "content_text": block.content_text,
-                "template": block.template,
-                "content_type": block.content_type,
+                "template": "template" if block.is_template else "static",
             }
             if block.is_template:
                 if block.prompt:
@@ -232,6 +243,129 @@ class GenerationStrategy(ABC):
             "```",
         ]
         return "\n".join(parts)
+
+
+    def _parse_blocks_from_response(
+        self,
+        raw_content: str,
+        blocks: List[TemplateBlock],
+    ) -> Dict[str, List[DocumentBlock]]:
+        """从响应中解析block列表（统一处理新旧两种JSON格式）.
+
+        支持格式：
+        - 新格式: [{"id": "...", "block_type": "paragraph", "content_text": "..."}, ...]
+        - 旧格式: {"paragraphs": [{"paragraph_id": "...", "content": "...", "is_heading": false}, ...]}
+
+        Args:
+            raw_content: 原始响应内容
+            blocks: 原始block列表（用于id匹配和属性回退）
+
+        Returns:
+            {block ID: [DocumentBlock]} 解析结果映射
+        """
+        results: Dict[str, List[DocumentBlock]] = {}
+
+        json_content = self._extract_json_from_response(raw_content)
+        if not json_content:
+            return results
+
+        try:
+            data = json.loads(json_content)
+
+            # 统一处理两种格式：列表格式和字典格式
+            if isinstance(data, list):
+                paragraph_list = data
+            elif isinstance(data, dict):
+                paragraph_list = data.get("paragraphs", [])
+            else:
+                paragraph_list = []
+
+            block_map = {b.id: b for b in blocks}
+
+            for idx, item in enumerate(paragraph_list):
+                if not isinstance(item, dict):
+                    continue
+
+                # 获取block_id（新格式用id，旧格式用paragraph_id）
+                block_id = item.get("id") or item.get("paragraph_id")
+
+                # 如果id为空，尝试按索引顺序匹配
+                if not block_id and idx < len(blocks):
+                    block_id = blocks[idx].id
+
+                if not block_id or block_id not in block_map:
+                    continue
+
+                block = block_map[block_id]
+
+                content = item.get("content_text")
+                block_type = item.get("block_type")
+                heading_level = item.get("heading_level")
+
+                # 处理图片类型的block
+                if block.is_image_block:
+                    image_url = content.strip()
+                    if image_url:
+                        results[block_id] = [
+                            DocumentBlock(
+                                block_type=block_type,
+                                text_content=f"![{block.content_text}]({image_url})",
+                                heading_level=0,
+                                source_refs=block.source_refs,
+                                source_node_ids=block.source_node_ids,
+                                imgs=[image_url],
+                            )
+                        ]
+                        logger.info(
+                            "image_block_parsed",
+                            block_id=block_id,
+                            image_url=image_url,
+                        )
+                    else:
+                        results[block_id] = [
+                            DocumentBlock(
+                                block_type=block_type,
+                                text_content=f"[图片获取失败: {block.content_text}]",
+                                heading_level=0,
+                                source_refs=block.source_refs,
+                                source_node_ids=block.source_node_ids,
+                                imgs=[],
+                            )
+                        ]
+                    continue
+
+                # 应用长度限制
+                content = self._apply_length_constraints(
+                    content,
+                    block.min_length,
+                    block.max_length,
+                )
+
+                results[block_id] = [
+                    DocumentBlock(
+                        block_type=block_type,
+                        text_content=content,
+                        heading_level=heading_level,
+                        source_refs=block.source_refs,
+                        source_node_ids=block.source_node_ids,
+                        imgs=[],
+                    )
+                ]
+
+                logger.info(
+                    "block_parsed",
+                    block_id=block_id,
+                    content_length=len(content),
+                )
+
+        except json.JSONDecodeError as e:
+            logger.error(
+                "response_json_parse_failed",
+                error=str(e),
+                exc_info=True,
+            )
+
+        return results
 
 
 class FullContextStrategy(GenerationStrategy):
@@ -306,89 +440,8 @@ class FullContextStrategy(GenerationStrategy):
         Args:
             raw_content: 原始响应内容
             blocks: 原始block列表
-
         """
-
-        results: Dict[str, List[DocumentBlock]] = {}
-
-        json_content = self._extract_json_from_response(raw_content)
-
-        if json_content:
-            try:
-                data = json.loads(json_content)
-                paragraph_list = data.get("paragraphs", [])
-                block_map = {b.id: b for b in blocks}
-
-                for item in paragraph_list:
-                    block_id = item.get("paragraph_id")
-                    content = item.get("content", "")
-                    is_heading = item.get("is_heading", False)
-                    is_image = item.get("is_image", False)
-
-                    if block_id and block_id in block_map:
-                        block = block_map[block_id]
-
-                        # 判断是否为图片类型的block
-                        if is_image or block.is_image_block:
-                            # 图片类型的block：content是单个图片URL
-                            image_url = content.strip()
-                            if image_url:
-                                results[block_id] = [
-                                    DocumentBlock(
-                                        block_type="paragraph",
-                                        text_content=f"![{block.content_text}]({image_url})",
-                                        heading_level=0,
-                                        source_refs=block.source_refs,
-                                        source_node_ids=block.source_node_ids,
-                                        imgs=[image_url],
-                                    )
-                                ]
-                                logger.info(
-                                    "image_block_parsed",
-                                    block_id=block_id,
-                                    image_url=image_url,
-                                )
-                            else:
-                                results[block_id] = [
-                                    DocumentBlock(
-                                        block_type="paragraph",
-                                        text_content=f"[图片获取失败: {block.content_text}]",
-                                        heading_level=0,
-                                        source_refs=block.source_refs,
-                                        source_node_ids=block.source_node_ids,
-                                        imgs=[],
-                                    )
-                                ]
-                        else:
-                            content = self._apply_length_constraints(
-                                content,
-                                block.min_length,
-                                block.max_length,
-                            )
-
-                            results[block_id] = [
-                                DocumentBlock(
-                                    block_type="heading" if is_heading else "paragraph",
-                                    text_content=content,
-                                    heading_level=block.heading_level if is_heading else 0,
-                                    source_refs=block.source_refs,
-                                    source_node_ids=block.source_node_ids,
-                                    imgs=[],
-                                )
-                            ]
-
-                            logger.info(
-                                "block_parsed",
-                                block_id=block_id,
-                                content_length=len(content),
-                            )
-
-            except json.JSONDecodeError as e:
-                logger.error(
-                    "response_json_parse_failed",
-                    error=str(e),
-                    exc_info=True,
-                )
+        results = self._parse_blocks_from_response(raw_content, blocks)
 
         # 为未解析到的block创建默认结果
         for block in blocks:
@@ -519,85 +572,7 @@ class FilteredContextStrategy(GenerationStrategy):
             raw_content: 原始响应内容
             template_blocks: 模板block列表
         """
-
-        results: Dict[str, List[DocumentBlock]] = {}
-
-        json_content = self._extract_json_from_response(raw_content)
-
-        if json_content:
-            try:
-                data = json.loads(json_content)
-                paragraph_list = data.get("paragraphs", [])
-                block_map = {b.id: b for b in template_blocks}
-
-                for item in paragraph_list:
-                    block_id = item.get("paragraph_id")
-                    content = item.get("content", "")
-                    is_heading = item.get("is_heading", False)
-
-                    if block_id and block_id in block_map:
-                        block = block_map[block_id]
-
-                        if block.is_image_block:
-                            image_url = content.strip()
-                            if image_url:
-                                results[block_id] = [
-                                    DocumentBlock(
-                                        block_type="paragraph",
-                                        text_content=f"![{block.content_text}]({image_url})",
-                                        heading_level=0,
-                                        source_refs=block.source_refs,
-                                        source_node_ids=block.source_node_ids,
-                                        imgs=[image_url],
-                                    )
-                                ]
-                                logger.info(
-                                    "image_block_parsed",
-                                    block_id=block_id,
-                                    image_url=image_url,
-                                )
-                            else:
-                                results[block_id] = [
-                                    DocumentBlock(
-                                        block_type="paragraph",
-                                        text_content=f"[图片获取失败: {block.content_text}]",
-                                        heading_level=0,
-                                        source_refs=block.source_refs,
-                                        source_node_ids=block.source_node_ids,
-                                        imgs=[],
-                                    )
-                                ]
-                            continue
-
-                        content = self._apply_length_constraints(
-                            content,
-                            block.min_length,
-                            block.max_length,
-                        )
-
-                        results[block_id] = [
-                            DocumentBlock(
-                                block_type="heading" if is_heading else "paragraph",
-                                text_content=content,
-                                heading_level=block.heading_level if is_heading else 0,
-                                source_refs=block.source_refs,
-                                source_node_ids=block.source_node_ids,
-                                imgs=[],
-                            )
-                        ]
-
-                        logger.info(
-                            "block_parsed",
-                            block_id=block_id,
-                            content_length=len(content),
-                        )
-
-            except json.JSONDecodeError as e:
-                logger.error(
-                    "response_json_parse_failed",
-                    error=str(e),
-                    exc_info=True,
-                )
+        results = self._parse_blocks_from_response(raw_content, template_blocks)
 
         # 为未解析到的block创建默认结果
         for block in template_blocks:
@@ -635,6 +610,9 @@ class BatchedGenerationStrategy(GenerationStrategy):
 
     # 最大每批block数量
     MAX_BATCH_SIZE = 20
+
+    # 最大并发批次数量 - 防止同时发起过多LLM调用压垮API
+    MAX_CONCURRENCY = 3
 
     @property
     def name(self) -> str:
@@ -677,7 +655,17 @@ class BatchedGenerationStrategy(GenerationStrategy):
             total_batches=total_batches,
         )
 
-        # 分批处理（各批次之间无依赖，并行执行）
+        # 分批处理（各批次之间无依赖，限制并发避免压垮LLM API）
+        semaphore = asyncio.Semaphore(self.MAX_CONCURRENCY)
+
+        async def _process_batch_limited(
+            batch: List[TemplateBlock],
+            repo_id: str,
+            batch_num: int,
+        ) -> Dict[str, List[DocumentBlock]]:
+            async with semaphore:
+                return await self._process_batch(batch, repo_id, batch_num)
+
         tasks = []
         for i in range(0, len(template_blocks), batch_size):
             batch = template_blocks[i : i + batch_size]
@@ -690,9 +678,9 @@ class BatchedGenerationStrategy(GenerationStrategy):
                 batch_size=len(batch),
             )
 
-            tasks.append(self._process_batch(batch, repo_id, batch_num))
+            tasks.append(_process_batch_limited(batch, repo_id, batch_num))
 
-        # 并行执行所有批次
+        # 并行执行所有批次（受semaphore限制最大并发数）
         batch_results_list = await asyncio.gather(*tasks, return_exceptions=True)
 
         all_template_results: Dict[str, List[DocumentBlock]] = {}
@@ -821,81 +809,13 @@ class BatchedGenerationStrategy(GenerationStrategy):
         """解析批次响应.
 
         Args:
+            raw_content: 原始响应内容
+            batch: 批次block列表
+
+        Returns:
             生成结果映射
         """
-
-        results: Dict[str, List[DocumentBlock]] = {}
-
-        json_content = self._extract_json_from_response(raw_content)
-
-        if json_content:
-            try:
-                data = json.loads(json_content)
-                paragraph_list = data.get("paragraphs", [])
-                block_map = {b.id: b for b in batch}
-
-                for item in paragraph_list:
-                    block_id = item.get("paragraph_id")
-                    content = item.get("content", "")
-                    is_heading = item.get("is_heading", False)
-
-                    if block_id and block_id in block_map:
-                        block = block_map[block_id]
-
-                        if block.is_image_block:
-                            image_url = content.strip()
-                            if image_url:
-                                results[block_id] = [
-                                    DocumentBlock(
-                                        block_type="paragraph",
-                                        text_content=f"![{block.content_text}]({image_url})",
-                                        heading_level=0,
-                                        source_refs=block.source_refs,
-                                        source_node_ids=block.source_node_ids,
-                                        imgs=[image_url],
-                                    )
-                                ]
-                                logger.info(
-                                    "image_block_parsed",
-                                    block_id=block_id,
-                                    image_url=image_url,
-                                )
-                            else:
-                                results[block_id] = [
-                                    DocumentBlock(
-                                        block_type="paragraph",
-                                        text_content=f"[图片获取失败: {block.content_text}]",
-                                        heading_level=0,
-                                        source_refs=block.source_refs,
-                                        source_node_ids=block.source_node_ids,
-                                        imgs=[],
-                                    )
-                                ]
-                            continue
-
-                        content = self._apply_length_constraints(
-                            content,
-                            block.min_length,
-                            block.max_length,
-                        )
-
-                        results[block_id] = [
-                            DocumentBlock(
-                                block_type="heading" if is_heading else "paragraph",
-                                text_content=content,
-                                heading_level=block.heading_level if is_heading else 0,
-                                source_refs=block.source_refs,
-                                source_node_ids=block.source_node_ids,
-                                imgs=[],
-                            )
-                        ]
-
-            except json.JSONDecodeError as e:
-                logger.error(
-                    "batch_response_json_parse_failed",
-                    error=str(e),
-                    exc_info=True,
-                )
+        results = self._parse_blocks_from_response(raw_content, batch)
 
         # 为未解析到的block创建默认结果
         for block in batch:

@@ -1,6 +1,6 @@
 """Agent状态定义."""
 
-from typing import Dict, List, Optional, TypedDict
+from typing import Any, Dict, List, Optional, TypedDict
 
 from app.domain.model import (
     DocumentBlock,
@@ -55,6 +55,9 @@ class AgentState(TypedDict):
     selected_strategy: Optional[str]  # 选中的策略名称
     estimated_tokens: int  # 预估token数
 
+    # 构建后的文档blocks（用于保存到workspace）
+    doc_blocks: List[Dict[str, Any]]
+
     # 向后兼容的字段
     template_path: str
     output_path: str
@@ -87,6 +90,7 @@ def create_initial_state(
         "output_path": output_path,
         "blocks": [],
         "paragraphs": [],
+        "doc_blocks": [],
         "generated_contents": {},
         "generated_images": {},
         "current_block_index": 0,

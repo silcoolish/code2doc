@@ -32,6 +32,28 @@ class StoreBlockListNode(WorkflowNode):
     def name(self) -> str:
         return "store_block_list"
 
+    def _extract_title(self, state: AgentState) -> str:
+        """从生成的blocks中提取文档标题.
+
+        优先使用第一个一级标题(heading_level=1)的content_text，
+        其次使用任意heading类型block，最后返回默认标题。
+        """
+        blocks = state.get("blocks", [])
+        if not blocks:
+            return "项目文档"
+
+        # 优先找一级标题
+        for block in blocks:
+            if block.block_type == "heading" and block.heading_level == 1:
+                return block.content_text or "项目文档"
+
+        # 其次找任意heading
+        for block in blocks:
+            if block.block_type == "heading":
+                return block.content_text or "项目文档"
+
+        return "项目文档"
+
     async def execute(self, state: AgentState) -> AgentState:
         """构建文档.
 
@@ -53,11 +75,16 @@ class StoreBlockListNode(WorkflowNode):
             if not doc_blocks:
                 logger.warning("no_doc_blocks_in_state")
 
+            # 清空 block id，交由 workspace 服务生成
+            for block in doc_blocks:
+                block["id"] = ""
+
+            title = self._extract_title(state)
             save_request = SaveDocumentRequest(
                 repo_id=state["repo_id"],
                 doc_type="project",
                 target_key="__project__",
-                title="",
+                title=title,
                 blocks=doc_blocks,
             )
 
@@ -69,10 +96,13 @@ class StoreBlockListNode(WorkflowNode):
 
             document_id = save_response.document_id
             state["document_id"] = document_id
+            state["status"] = GenerationStatus.COMPLETED.value
+            state["message"] = "文档生成完成"
 
             logger.info(
                 "store_block_list_success",
                 document_id=document_id,
+                title=title,
                 block_count=len(doc_blocks),
                 total_blocks=state["total_blocks"],
             )

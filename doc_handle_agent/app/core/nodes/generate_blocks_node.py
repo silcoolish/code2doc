@@ -107,7 +107,7 @@ class GenerateBlocksNode(WorkflowNode):
 
         for block in blocks:
             block_data = {
-                "id": "",
+                "id": block.id,
                 "parentBlockId": block.parent_block_id,
                 "blockType": block.block_type,
                 "headingLevel": block.heading_level,

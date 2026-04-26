@@ -43,8 +43,10 @@ BATCH_CONTENT_GENERATION_SYSTEM_PROMPT: str = (
     _load_prompt("batch_content_generation") + "\n\n" + _KNOWLEDGE_BASE_MODEL_PROMPT
 )
 
-# 列表生成系统提示词
-LIST_GENERATION_SYSTEM_PROMPT: str = _load_prompt("list_generation")
+# 大纲确认系统提示词
+OUTLINE_CONFIRMATION_PROMPT: str = (
+    _load_prompt("outline_confirmation") + "\n\n" + _KNOWLEDGE_BASE_MODEL_PROMPT
+)
 
 # 完整上下文策略系统提示词
 FULL_CONTEXT_STRATEGY_PROMPT: str = (
@@ -66,7 +68,7 @@ FILTERED_CONTEXT_STRATEGY_PROMPT: str = (
 
 __all__ = [
     "BATCH_CONTENT_GENERATION_SYSTEM_PROMPT",
-    "LIST_GENERATION_SYSTEM_PROMPT",
+    "OUTLINE_CONFIRMATION_PROMPT",
     "FULL_CONTEXT_STRATEGY_PROMPT",
     "FILTERED_CONTEXT_STRATEGY_PROMPT",
 ]

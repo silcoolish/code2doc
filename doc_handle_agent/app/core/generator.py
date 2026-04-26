@@ -8,8 +8,8 @@ from app.domain.content_generator import ContentGenerator
 from app.core.nodes import (
     GenerateBlocksNode,
     ListTemplateBlockNode,
+    OutlineConfirmationNode,
     ProcessImageBlocksNode,
-    ProcessListBlocksNode,
     SelectStrategyNode,
     StoreBlockListNode,
 )
@@ -45,7 +45,7 @@ class DocumentGenerator:
     def _build_workflow(self) -> StateGraph:
         """构建工作流.
 
-        流程：获取模板 -> 处理列表块 -> 选择策略 -> 生成内容 -> 处理图片块 -> 存储文档
+        流程：获取模板 -> 大纲确认 -> 选择策略 -> 生成内容 -> 处理图片块 -> 存储文档
 
         Returns:
             LangGraph工作流
@@ -55,7 +55,7 @@ class DocumentGenerator:
         # 创建节点实例
         nodes = [
             ListTemplateBlockNode(self.workspace_adapter),
-            ProcessListBlocksNode(self.content_generator),
+            OutlineConfirmationNode(self.content_generator),
             SelectStrategyNode(self.content_generator),
             GenerateBlocksNode(self.content_generator),
             ProcessImageBlocksNode(self.workspace_adapter),
@@ -70,8 +70,8 @@ class DocumentGenerator:
         workflow.set_entry_point("list_template_block")
 
         # 线性流程
-        workflow.add_edge("list_template_block", "process_list_blocks")
-        workflow.add_edge("process_list_blocks", "select_strategy")
+        workflow.add_edge("list_template_block", "outline_confirmation")
+        workflow.add_edge("outline_confirmation", "select_strategy")
         workflow.add_edge("select_strategy", "generate_blocks")
         workflow.add_edge("generate_blocks", "process_image_blocks")
         workflow.add_edge("process_image_blocks", "store_block_list")

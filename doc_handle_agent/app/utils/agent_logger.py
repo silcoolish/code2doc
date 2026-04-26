@@ -4,6 +4,8 @@
 - 每次对 agent 请求的完整提示词
 - agent 每次调用 tool 的参数以及响应
 - 每次调用 LLM 的完整提示词以及响应
+
+每个会话生成独立的 .jsonl 日志文件，避免单文件膨胀，且不影响系统日志/控制台输出。
 """
 
 import json
@@ -17,41 +19,66 @@ import structlog
 
 from app.config import get_settings
 
+# 最多保留的 agent 会话日志文件数量
+MAX_AGENT_LOG_FILES = 20
+
 
 class AgentLogger:
     """Agent 调用专用日志记录器."""
 
-    def __init__(self, log_dir: Optional[Path] = None):
+    def __init__(
+        self,
+        session_id: Optional[str] = None,
+        log_dir: Optional[Path] = None,
+    ):
         """初始化 Agent 日志记录器.
 
         Args:
-            log_dir: 日志目录，默认从配置读取
+            session_id: 会话唯一标识，用于生成独立日志文件名；为空则自动生成。
+            log_dir: 日志目录，默认从配置读取并在其下创建 agent_sessions 子目录。
         """
         settings = get_settings()
-        self.log_dir = log_dir or settings.log_path
+        self.log_dir = log_dir or settings.log_path / "agent_sessions"
         self.log_dir.mkdir(parents=True, exist_ok=True)
 
-        # 创建独立的日志文件
-        self.log_file = self.log_dir / "agent_calls.log"
+        # 生成或复用 session_id
+        self.session_id = session_id or str(uuid.uuid4())
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.log_file = self.log_dir / f"agent_{self.session_id}_{timestamp}.jsonl"
 
-        # 配置专用 logger
-        self.logger = logging.getLogger("agent_calls")
+        # 配置专用 logger，阻止向 root logger 传播（避免进入系统日志和控制台）
+        self.logger = logging.getLogger(f"agent_calls.{self.session_id}")
         self.logger.setLevel(logging.DEBUG)
+        self.logger.propagate = False
 
-        # 避免重复添加 handler
-        if not self.logger.handlers:
-            # 文件处理器
-            file_handler = logging.FileHandler(
-                self.log_file,
-                encoding="utf-8",
+        # 文件处理器（每次新建实例都添加，因为 logger 名称含 session_id 不会重复）
+        file_handler = logging.FileHandler(
+            self.log_file,
+            encoding="utf-8",
+        )
+        file_handler.setLevel(logging.DEBUG)
+
+        # JSON Lines 格式，每行一条 JSON
+        formatter = logging.Formatter("%(message)s")
+        file_handler.setFormatter(formatter)
+
+        self.logger.addHandler(file_handler)
+
+        # 清理旧日志文件
+        self._cleanup_old_logs()
+
+    def _cleanup_old_logs(self) -> None:
+        """按修改时间保留最新的 MAX_AGENT_LOG_FILES 个日志文件，删除其余旧文件."""
+        try:
+            log_files = sorted(
+                self.log_dir.glob("agent_*.jsonl"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
             )
-            file_handler.setLevel(logging.DEBUG)
-
-            # 简单格式，内容使用 JSON
-            formatter = logging.Formatter("%(message)s")
-            file_handler.setFormatter(formatter)
-
-            self.logger.addHandler(file_handler)
+            for old_file in log_files[MAX_AGENT_LOG_FILES:]:
+                old_file.unlink(missing_ok=True)
+        except Exception:
+            pass
 
     def _current_trace_id(self) -> Optional[str]:
         """获取当前日志上下文中的 trace_id."""
@@ -73,7 +100,7 @@ class AgentLogger:
         if trace_id:
             entry["trace_id"] = trace_id
 
-        # 写入 JSON 格式的日志
+        # 写入 JSON Lines 格式的日志（每行一条 JSON）
         self.logger.debug(json.dumps(entry, ensure_ascii=False, default=str))
 
     def log_agent_request(
@@ -185,12 +212,15 @@ class AgentLogger:
         })
 
 
-def get_agent_logger() -> AgentLogger:
+def get_agent_logger(session_id: Optional[str] = None) -> AgentLogger:
     """获取 AgentLogger 实例.
 
+    每次调用均创建新实例，对应独立的会话日志文件。
+
+    Args:
+        session_id: 可选的会话唯一标识，为空则自动生成 UUID。
+
     Returns:
-        AgentLogger 实例（单例）
+        AgentLogger 新实例。
     """
-    if not hasattr(get_agent_logger, "_instance"):
-        get_agent_logger._instance = AgentLogger()
-    return get_agent_logger._instance
+    return AgentLogger(session_id=session_id)

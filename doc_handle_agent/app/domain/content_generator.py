@@ -10,7 +10,6 @@ from app.domain.generation_strategies import (
     FullContextStrategy,
     StrategySelector,
 )
-from app.domain.prompts import LIST_GENERATION_SYSTEM_PROMPT
 from app.domain.model import (
     DocumentBlock,
     TemplateBlock,
@@ -50,6 +49,14 @@ class ContentGenerator:
         self.strategy_selector = StrategySelector(self.agent)
         self.static_list_provider = StaticListProvider(mcp_client)
         logger.info("content_generator_initialized")
+
+    async def initialize(self) -> None:
+        """异步初始化内容生成器.
+
+        代理调用底层Agent的异步初始化，获取真实的模型上下文限制。
+        应在异步环境中创建后立即调用。
+        """
+        await self.agent.ainitialize()
 
     def select_strategy(
         self,

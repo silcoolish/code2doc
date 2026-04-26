@@ -2,7 +2,7 @@
 
 import json
 import uuid
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
@@ -13,7 +13,6 @@ from app.utils.agent_logger import get_agent_logger
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
-agent_logger = get_agent_logger()
 
 
 class ContentGeneratorAgent:
@@ -56,23 +55,50 @@ class ContentGeneratorAgent:
                 model=settings.llm_model,
             )
 
-        # 初始化时获取模型上下文限制
-        self._context_limit = self._init_context_limit()
-        logger.info(
-            "context_limit_initialized",
-            model=self.model_name,
-            context_limit=self._context_limit,
-        )
+        # 延迟初始化：避免在 __init__ 中进行同步网络请求阻塞事件循环
+        # 真实的上下文限制通过 ainitialize() 异步获取
+        self._context_limit: Optional[int] = None
 
         # 工具结果缓存，避免同一会话中重复查询
         self._tool_result_cache: Dict[str, str] = {}
         self._cache_hits = 0
         self._cache_misses = 0
 
+        # 当前文档生成流程的专属 agent 日志记录器，在 generate_with_tools 中绑定
+        self._agent_logger = None
+
     @property
     def context_limit(self) -> int:
-        """获取模型上下文限制(token数)."""
-        return self._context_limit
+        """获取模型上下文限制(token数).
+
+        如果尚未异步初始化，返回基于模型名称的保守默认值。
+        """
+        if self._context_limit is not None:
+            return self._context_limit
+        return self._get_default_context_limit(self.model_name)
+
+    async def ainitialize(self) -> None:
+        """异步初始化模型上下文限制.
+
+        应在异步环境中创建 Agent 后立即调用，以获取真实的模型上下文限制。
+        如果获取失败，则回退到默认值。
+        """
+        try:
+            self._context_limit = await self._fetch_model_context_limit()
+            logger.info(
+                "context_limit_initialized",
+                model=self.model_name,
+                context_limit=self._context_limit,
+            )
+        except Exception as e:
+            default_limit = self._get_default_context_limit(self.model_name)
+            self._context_limit = default_limit
+            logger.warning(
+                "context_limit_fetch_failed",
+                model=self.model_name,
+                default_limit=default_limit,
+                error=str(e),
+            )
 
     def _get_model_name_from_client(self, llm_client: Any) -> str:
         """从LLM客户端获取模型名称."""
@@ -82,35 +108,8 @@ class ContentGeneratorAgent:
             return llm_client.model
         return "unknown"
 
-    def _init_context_limit(self) -> int:
-        """初始化模型上下文限制.
-
-        同步获取模型上下文限制，在初始化时调用。
-        由于可能在异步环境中使用，这里使用同步HTTP请求。
-
-        Returns:
-            模型上下文限制的token数量
-        """
-        try:
-            context_limit = self._fetch_model_context_limit_sync()
-            logger.info(
-                "context_limit_fetched",
-                model=self.model_name,
-                context_limit=context_limit,
-            )
-            return context_limit
-        except Exception as e:
-            default_limit = self._get_default_context_limit(self.model_name)
-            logger.warning(
-                "context_limit_fetch_failed",
-                model=self.model_name,
-                default_limit=default_limit,
-                error=str(e),
-            )
-            return default_limit
-
-    def _fetch_model_context_limit_sync(self) -> int:
-        """同步获取模型上下文限制.
+    async def _fetch_model_context_limit(self) -> int:
+        """异步获取模型上下文限制.
 
         Returns:
             上下文限制的token数量
@@ -124,16 +123,16 @@ class ContentGeneratorAgent:
 
         # 根据模型名称判断使用哪个API
         if "qwen" in self.model_name.lower() or settings.llm_provider == "qwen":
-            return self._fetch_dashscope_context_limit_sync()
+            return await self._fetch_dashscope_context_limit()
         elif "claude" in self.model_name.lower():
-            return self._fetch_anthropic_context_limit_sync()
+            return await self._fetch_anthropic_context_limit()
         elif "gpt" in self.model_name.lower() or "openai" in self.model_name.lower():
-            return self._fetch_openai_context_limit_sync()
+            return await self._fetch_openai_context_limit()
         else:
             raise RuntimeError(f"Unsupported model: {self.model_name}")
 
-    def _fetch_dashscope_context_limit_sync(self) -> int:
-        """同步从DashScope API获取上下文限制."""
+    async def _fetch_dashscope_context_limit(self) -> int:
+        """异步从DashScope API获取上下文限制."""
         import httpx
 
         settings = get_settings()
@@ -148,8 +147,8 @@ class ContentGeneratorAgent:
             "Content-Type": "application/json",
         }
 
-        with httpx.Client(timeout=10.0) as client:
-            response = client.get(url, headers=headers)
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(url, headers=headers)
             response.raise_for_status()
             data = response.json()
 
@@ -160,11 +159,10 @@ class ContentGeneratorAgent:
                     if context_limit:
                         return int(context_limit)
 
-            # 找不到具体模型，返回默认值
             return self._get_default_context_limit(self.model_name)
 
-    def _fetch_anthropic_context_limit_sync(self) -> int:
-        """同步从Anthropic API获取上下文限制."""
+    async def _fetch_anthropic_context_limit(self) -> int:
+        """异步从Anthropic API获取上下文限制."""
         import httpx
 
         settings = get_settings()
@@ -179,8 +177,8 @@ class ContentGeneratorAgent:
             "anthropic-version": "2023-06-01",
         }
 
-        with httpx.Client(timeout=10.0) as client:
-            response = client.get(url, headers=headers)
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(url, headers=headers)
             response.raise_for_status()
             data = response.json()
 
@@ -193,8 +191,8 @@ class ContentGeneratorAgent:
 
             return 200000  # Claude默认
 
-    def _fetch_openai_context_limit_sync(self) -> int:
-        """同步从OpenAI API获取上下文限制."""
+    async def _fetch_openai_context_limit(self) -> int:
+        """异步从OpenAI API获取上下文限制."""
         import httpx
 
         settings = get_settings()
@@ -207,8 +205,8 @@ class ContentGeneratorAgent:
         url = f"{base_url}/models"
         headers = {"Authorization": f"Bearer {api_key}"}
 
-        with httpx.Client(timeout=10.0) as client:
-            response = client.get(url, headers=headers)
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(url, headers=headers)
             response.raise_for_status()
             data = response.json()
 
@@ -337,124 +335,179 @@ class ContentGeneratorAgent:
         Returns:
             生成的原始内容字符串
         """
-        # 生成会话唯一标识
+        # 生成会话唯一标识并创建专属日志记录器，绑定到当前流程
         session_id = str(uuid.uuid4())
+        self._agent_logger = get_agent_logger(session_id=session_id)
 
-        # 记录 agent 请求开始
-        agent_logger.log_agent_request(
-            session_id=session_id,
-            system_prompt=system_prompt,
-            task_message=task_message,
-            repo_id=repo_id,
-            max_iterations=max_iterations,
-        )
-
-        tools = await self._load_langchain_tools()
-        llm_with_tools = self.llm.bind_tools(tools)
-
-        messages = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=task_message),
-        ]
-
-        final_iteration = 0
-        end_reason = "completed"
-
-        for i in range(max_iterations):
-            final_iteration = i + 1
-
-            # 记录 LLM 调用请求
-            agent_logger.log_llm_call(
+        try:
+            # 记录 agent 请求开始
+            self._agent_logger.log_agent_request(
                 session_id=session_id,
-                iteration=final_iteration,
-                messages=self._serialize_messages(messages),
-                model_name=self.model_name,
+                system_prompt=system_prompt,
+                task_message=task_message,
+                repo_id=repo_id,
+                max_iterations=max_iterations,
             )
 
-            response = await llm_with_tools.ainvoke(messages)
-            messages.append(response)
+            tools = await self._load_langchain_tools()
+            llm_with_tools = self.llm.bind_tools(tools)
 
-            # 提取响应内容
-            response_content = response.content if hasattr(response, "content") else str(response)
+            messages = [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=task_message),
+            ]
 
-            # 提取工具调用信息
-            tool_calls_data = None
-            if hasattr(response, "tool_calls") and response.tool_calls:
-                tool_calls_data = [
-                    {
-                        "id": tc.get("id", ""),
-                        "name": tc.get("name", ""),
-                        "args": tc.get("args", {}),
-                    }
-                    for tc in response.tool_calls
-                ]
+            final_iteration = 0
+            end_reason = "completed"
 
-            # 记录 LLM 响应
-            agent_logger.log_llm_response(
-                session_id=session_id,
-                iteration=final_iteration,
-                response_content=response_content,
-                tool_calls=tool_calls_data,
-                model_name=self.model_name,
-            )
+            for i in range(max_iterations):
+                final_iteration = i + 1
 
-            if hasattr(response, "tool_calls") and response.tool_calls:
-                for tool_call in response.tool_calls:
-                    tool_name = tool_call.get("name", "")
-                    tool_args = tool_call.get("args", {})
+                # 记录 LLM 调用请求
+                self._agent_logger.log_llm_call(
+                    session_id=session_id,
+                    iteration=final_iteration,
+                    messages=self._serialize_messages(messages),
+                    model_name=self.model_name,
+                )
 
-                    if "repo_id" not in tool_args:
-                        tool_args["repo_id"] = repo_id
+                response = await llm_with_tools.ainvoke(messages)
+                messages.append(response)
 
-                    # 记录工具调用请求
-                    agent_logger.log_tool_call(
-                        session_id=session_id,
-                        iteration=final_iteration,
-                        tool_name=tool_name,
-                        arguments=tool_args,
-                    )
+                # 提取响应内容
+                response_content = response.content if hasattr(response, "content") else str(response)
 
-                    try:
-                        result = await self.call_tool(tool_name, tool_args)
+                # 提取工具调用信息
+                tool_calls_data = None
+                if hasattr(response, "tool_calls") and response.tool_calls:
+                    tool_calls_data = [
+                        {
+                            "id": tc.get("id", ""),
+                            "name": tc.get("name", ""),
+                            "args": tc.get("args", {}),
+                        }
+                        for tc in response.tool_calls
+                    ]
 
-                        # 记录工具调用成功响应 (仅在非缓存命中时记录，避免重复)
-                        # call_tool 内部已记录，这里省略避免重复
-                    except Exception as e:
-                        result = f"工具调用失败: {str(e)}"
+                # 记录 LLM 响应
+                self._agent_logger.log_llm_response(
+                    session_id=session_id,
+                    iteration=final_iteration,
+                    response_content=response_content,
+                    tool_calls=tool_calls_data,
+                    model_name=self.model_name,
+                )
 
-                        # 记录工具调用失败响应
-                        agent_logger.log_tool_response(
+                if hasattr(response, "tool_calls") and response.tool_calls:
+                    for tool_call in response.tool_calls:
+                        tool_name = tool_call.get("name", "")
+                        tool_args = tool_call.get("args", {})
+
+                        if "repo_id" not in tool_args:
+                            tool_args["repo_id"] = repo_id
+
+                        # 记录工具调用请求
+                        self._agent_logger.log_tool_call(
                             session_id=session_id,
                             iteration=final_iteration,
                             tool_name=tool_name,
-                            response=result,
-                            success=False,
-                            error=str(e),
+                            arguments=tool_args,
                         )
 
-                    messages.append(ToolMessage(
-                        content=result,
-                        tool_call_id=tool_call.get("id", ""),
-                        name=tool_name,
-                    ))
+                        try:
+                            result = await self.call_tool(tool_name, tool_args)
+                        except Exception as e:
+                            result = f"工具调用失败: {str(e)}"
+
+                            # 记录工具调用失败响应
+                            self._agent_logger.log_tool_response(
+                                session_id=session_id,
+                                iteration=final_iteration,
+                                tool_name=tool_name,
+                                response=result,
+                                success=False,
+                                error=str(e),
+                            )
+
+                        messages.append(ToolMessage(
+                            content=result,
+                            tool_call_id=tool_call.get("id", ""),
+                            name=tool_name,
+                        ))
+                else:
+                    break
             else:
-                break
-        else:
-            # 达到最大迭代次数
-            end_reason = "max_iterations_reached"
+                # 达到最大迭代次数
+                end_reason = "max_iterations_reached"
 
-        final_response = messages[-1]
-        final_content = final_response.content if hasattr(final_response, "content") else str(final_response)
+            final_response = messages[-1]
+            final_content = final_response.content if hasattr(final_response, "content") else str(final_response)
 
-        # 记录 agent 请求完成
-        agent_logger.log_agent_completion(
-            session_id=session_id,
-            total_iterations=final_iteration,
-            final_content=final_content,
-            reason=end_reason,
-        )
+            # 记录 agent 请求完成
+            self._agent_logger.log_agent_completion(
+                session_id=session_id,
+                total_iterations=final_iteration,
+                final_content=final_content,
+                reason=end_reason,
+            )
 
-        return final_content
+            return final_content
+        finally:
+            # 流程结束，解绑日志记录器
+            self._agent_logger = None
+
+    @staticmethod
+    def _sanitize_tool_args(tool_args: Dict[str, Any]) -> Dict[str, Any]:
+        """清洗工具参数，修复 LLM 常见的格式错误.
+
+        部分模型会把数组参数输出为字符串（如 "\\n[File, Class, Method]\\n"），
+        此函数在调用工具前将其转换为正确的类型。
+        """
+        sanitized: Dict[str, Any] = {}
+        for key, value in tool_args.items():
+            if isinstance(value, str):
+                stripped = value.strip()
+                # 检测字符串形式的列表: "[...]"
+                if stripped.startswith("[") and stripped.endswith("]"):
+                    try:
+                        import json
+                        parsed = json.loads(stripped)
+                        if isinstance(parsed, list):
+                            sanitized[key] = parsed
+                            continue
+                    except json.JSONDecodeError:
+                        # 尝试按逗号分割
+                        inner = stripped[1:-1].strip()
+                        if inner:
+                            sanitized[key] = [item.strip().strip('"').strip("'") for item in inner.split(",")]
+                            continue
+                        sanitized[key] = []
+                        continue
+            sanitized[key] = value
+        return sanitized
+
+    @staticmethod
+    def _normalize_tool_args(tool_name: str, tool_args: Dict[str, Any]) -> Dict[str, Any]:
+        """规范化工具参数，将 LLM 扁平调用转换为服务端期望的嵌套结构.
+
+        部分工具（如 get_related_nodes、search_nodes）服务端期望 `queries` 数组包装，
+        但 LLM 按提示词习惯以扁平参数调用。此函数在发送前做结构转换。
+        """
+        args = dict(tool_args)
+
+        if tool_name in ("get_related_nodes", "search_nodes"):
+            if "queries" not in args:
+                repo_id = args.pop("repo_id", None)
+                query = {k: v for k, v in args.items()}
+                args = {"repo_id": repo_id, "queries": [query]}
+
+        elif tool_name == "get_node_dependencies":
+            if "queries" not in args:
+                args.pop("repo_id", None)
+                query = {k: v for k, v in args.items()}
+                args = {"queries": [query]}
+
+        return args
 
     async def call_tool(self, tool_name: str, tool_args: Dict[str, Any]) -> str:
         """调用MCP工具（带缓存）.
@@ -468,6 +521,12 @@ class ContentGeneratorAgent:
         Returns:
             工具调用结果
         """
+        # 清洗参数，修复 LLM 常见的格式错误
+        tool_args = self._sanitize_tool_args(tool_args)
+
+        # 规范化工具参数结构
+        tool_args = self._normalize_tool_args(tool_name, tool_args)
+
         # 构造缓存键（基于工具名和排序后的参数）
         cache_key = self._build_tool_cache_key(tool_name, tool_args)
 
@@ -483,12 +542,14 @@ class ContentGeneratorAgent:
 
         self._cache_misses += 1
 
-        # 生成会话唯一标识（独立调用）
-        session_id = str(uuid.uuid4())
+        # 复用当前流程的 agent_logger（若存在），否则创建新的独立日志
+        agent_logger = self._agent_logger
+        if agent_logger is None:
+            agent_logger = get_agent_logger()
 
         # 记录工具调用请求
         agent_logger.log_tool_call(
-            session_id=session_id,
+            session_id=getattr(agent_logger, "session_id", str(uuid.uuid4())),
             iteration=1,
             tool_name=tool_name,
             arguments=tool_args,
@@ -499,7 +560,7 @@ class ContentGeneratorAgent:
 
             # 记录工具调用成功响应
             agent_logger.log_tool_response(
-                session_id=session_id,
+                session_id=getattr(agent_logger, "session_id", ""),
                 iteration=1,
                 tool_name=tool_name,
                 response=result,
@@ -514,7 +575,7 @@ class ContentGeneratorAgent:
 
             # 记录工具调用失败响应
             agent_logger.log_tool_response(
-                session_id=session_id,
+                session_id=getattr(agent_logger, "session_id", ""),
                 iteration=1,
                 tool_name=tool_name,
                 response=error_msg,

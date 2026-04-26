@@ -35,7 +35,10 @@
       "Bash(python3 -c \"import httpx; help\\(httpx.AsyncHTTPTransport.__init__\\)\")",
       "Bash(netsh winhttp:*)",
       "Bash(find:*)",
-      "Bash(python3 -c ':*)"
+      "Bash(python3 -c ':*)",
+      "Bash(xargs grep *)",
+      "Bash(.venv/Scripts/python -c \"import app.mcp.router; print\\('OK'\\)\")",
+      "Bash(.venv/Scripts/python -c \"import app.domain.content_generator_agent; print\\('OK'\\)\")"
     ]
   }
 }

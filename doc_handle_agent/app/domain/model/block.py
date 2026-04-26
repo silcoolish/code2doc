@@ -19,13 +19,6 @@ class TemplateType(str, Enum):
     TEMPLATE = "template"  # 模板内容
 
 
-class ContentType(str, Enum):
-    """内容类型."""
-
-    TEXT = "text"  # 文本内容
-    IMAGE = "img"  # 图片内容
-
-
 class GenerationStatus(str, Enum):
     """生成状态."""
 
@@ -51,7 +44,6 @@ class TemplateBlock:
     heading_level: int  # 标题层级
     order_no: int  # 排序号
     content_text: str  # 纯文本内容（对应 workspace contentText）
-    template: str  # "static" | "template"（内部使用，保存时不传递）
     attrs: Dict[str, Any] = field(default_factory=dict)  # 模板属性
     source_refs: List[Dict[str, Any]] = field(default_factory=list)  # 源码来源引用（对应 workspace sourceRefs）
     source_node_ids: List[str] = field(default_factory=list)  # 内容生成依据节点ID（内部使用）
@@ -61,8 +53,11 @@ class TemplateBlock:
 
     @property
     def is_template(self) -> bool:
-        """是否为模板内容块."""
-        return self.template == "template"
+        """是否为模板内容块.
+
+        由 attrs 中的 templateType 决定，值为 "template" 表示模板内容。
+        """
+        return self.attrs.get("templateType") == "template"
 
     @property
     def is_heading(self) -> bool:
@@ -72,7 +67,7 @@ class TemplateBlock:
     @property
     def is_list(self) -> bool:
         """是否生成列表."""
-        return self.attrs.get("list", False)
+        return self.attrs.get("isList", False)
 
     @property
     def prompt(self) -> Optional[str]:
@@ -97,17 +92,12 @@ class TemplateBlock:
         return self.attrs.get("example")
 
     @property
-    def content_type(self) -> str:
-        """获取内容类型 (text|img).
-
-        默认为 text，如果 attrs 中有 type 则使用 type 值。
-        """
-        return self.attrs.get("type", "text")
-
-    @property
     def is_image_block(self) -> bool:
-        """是否为图片类型内容块."""
-        return self.content_type == "img"
+        """是否为图片类型内容块.
+
+        由 block_type 决定，不再依赖 attrs.type。
+        """
+        return self.block_type == "image"
 
     @property
     def image_id(self) -> Optional[str]:
@@ -143,7 +133,6 @@ class TemplateBlock:
             "heading_level": self.heading_level,
             "order_no": self.order_no,
             "content_text": self.content_text,
-            "template": self.template,
             "attrs": self.attrs,
             "source_refs": self.source_refs,
             "source_node_ids": self.source_node_ids,

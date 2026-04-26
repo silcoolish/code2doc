@@ -181,6 +181,7 @@ class WorkspaceServiceAdapter:
             blocks = []
 
             for item in data:
+                attrs = item.get("attrs", {})
                 block = TemplateBlock(
                     id=item.get("id", ""),
                     parent_block_id=item.get("parentBlockId"),
@@ -188,8 +189,7 @@ class WorkspaceServiceAdapter:
                     heading_level=item.get("headingLevel", 0),
                     order_no=item.get("orderNo", 0),
                     content_text=item.get("contentText", ""),
-                    template=item.get("templateType", "static"),
-                    attrs=item.get("attrs", {}),
+                    attrs=attrs,
                     source_refs=item.get("sourceRefs", []),
                     block_style=item.get("blockStyle", {}),
                     inline_styles=item.get("inlineStyles", []),
