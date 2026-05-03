@@ -10,6 +10,7 @@
 
 import json
 import logging
+import re
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -22,19 +23,35 @@ from app.config import get_settings
 # 最多保留的 agent 会话日志文件数量
 MAX_AGENT_LOG_FILES = 20
 
+# Windows / 通用文件系统非法字符
+_ILLEGAL_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|]')
+
+
+def _sanitize_filename(value: str, max_len: int = 50) -> str:
+    """清理字符串，使其适合作为文件名的一部分."""
+    cleaned = _ILLEGAL_FILENAME_CHARS.sub("_", value)
+    cleaned = cleaned.strip(". ")
+    if len(cleaned) > max_len:
+        cleaned = cleaned[:max_len]
+    return cleaned or "unknown"
+
 
 class AgentLogger:
     """Agent 调用专用日志记录器."""
 
     def __init__(
         self,
+        repo_id: str,
+        task_name: str,
         session_id: Optional[str] = None,
         log_dir: Optional[Path] = None,
     ):
         """初始化 Agent 日志记录器.
 
         Args:
-            session_id: 会话唯一标识，用于生成独立日志文件名；为空则自动生成。
+            repo_id: 仓库唯一标识，用于日志文件名。
+            task_name: 任务名称，用于日志文件名。
+            session_id: 会话唯一标识；为空则自动生成。
             log_dir: 日志目录，默认从配置读取并在其下创建 agent_sessions 子目录。
         """
         settings = get_settings()
@@ -44,7 +61,10 @@ class AgentLogger:
         # 生成或复用 session_id
         self.session_id = session_id or str(uuid.uuid4())
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.log_file = self.log_dir / f"agent_{self.session_id}_{timestamp}.jsonl"
+
+        safe_repo = _sanitize_filename(repo_id, max_len=30)
+        safe_task = _sanitize_filename(task_name, max_len=30)
+        self.log_file = self.log_dir / f"{safe_repo}_{safe_task}_{timestamp}.jsonl"
 
         # 配置专用 logger，阻止向 root logger 传播（避免进入系统日志和控制台）
         self.logger = logging.getLogger(f"agent_calls.{self.session_id}")
@@ -71,7 +91,7 @@ class AgentLogger:
         """按修改时间保留最新的 MAX_AGENT_LOG_FILES 个日志文件，删除其余旧文件."""
         try:
             log_files = sorted(
-                self.log_dir.glob("agent_*.jsonl"),
+                self.log_dir.glob("*.jsonl"),
                 key=lambda p: p.stat().st_mtime,
                 reverse=True,
             )
@@ -211,16 +231,32 @@ class AgentLogger:
             "reason": reason,
         })
 
+    def log_event(self, event_type: str, **kwargs: Any) -> None:
+        """记录通用事件.
 
-def get_agent_logger(session_id: Optional[str] = None) -> AgentLogger:
+        Args:
+            event_type: 事件类型标识
+            **kwargs: 事件附加字段
+        """
+        entry: Dict[str, Any] = {"call_type": event_type, **kwargs}
+        self._log_entry(entry)
+
+
+def get_agent_logger(
+    repo_id: str,
+    task_name: str,
+    session_id: Optional[str] = None,
+) -> AgentLogger:
     """获取 AgentLogger 实例.
 
     每次调用均创建新实例，对应独立的会话日志文件。
 
     Args:
+        repo_id: 仓库唯一标识，用于日志文件名。
+        task_name: 任务名称，用于日志文件名。
         session_id: 可选的会话唯一标识，为空则自动生成 UUID。
 
     Returns:
         AgentLogger 新实例。
     """
-    return AgentLogger(session_id=session_id)
+    return AgentLogger(repo_id=repo_id, task_name=task_name, session_id=session_id)

@@ -23,7 +23,6 @@ class GenerateDocumentResponse(BaseModel):
     repo_id: str = Field(..., description="仓库ID")
     template_id: str = Field(..., description="文档模板ID")
     document_id: Optional[str] = Field(None, description="生成的文档ID")
-    output_path: Optional[str] = Field(None, description="输出路径（向后兼容）")
     created_at: str = Field(..., description="创建时间")
 
 
@@ -39,7 +38,6 @@ class GenerationProgressResponse(BaseModel):
     current_step: int = Field(..., description="当前步骤")
     total_steps: int = Field(..., description="总步骤")
     message: str = Field(..., description="状态消息")
-    output_path: Optional[str] = Field(None, description="输出文件路径")
     error: Optional[str] = Field(None, description="错误信息")
 
 
@@ -89,6 +87,35 @@ class ActiveGenerationInfo(BaseModel):
 
     flow_id: str = Field(..., description="流程ID")
     status: Optional[str] = Field(None, description="当前状态")
+
+
+# ========== 改写相关 ==========
+
+class RewriteBlockRequest(BaseModel):
+    """改写文档条目请求."""
+
+    repo_id: str = Field(..., description="仓库ID")
+    target_key: str = Field(..., description="目标键")
+    target_type: str = Field(default="block", description="目标类型: block/selection")
+    block_id: str = Field(..., description="条目ID")
+    block_text: Optional[str] = Field(None, description="当前块的纯文本内容")
+    selected_text: Optional[str] = Field(None, description="选中文本")
+    selection_start: Optional[int] = Field(None, description="选区起始偏移")
+    selection_end: Optional[int] = Field(None, description="选区结束偏移")
+    prompt: str = Field(..., description="改写提示词")
+    action: Optional[str] = Field(None, description="改写动作: rewrite/continue")
+    deep_think: bool = Field(default=False, description="是否深度思考")
+    document_id: Optional[str] = Field(None, description="文档ID，用于获取文档上下文")
+
+
+class RewriteBlockResponse(BaseModel):
+    """改写文档条目响应."""
+
+    result_text: str = Field(default="", description="改写后的纯文本结果")
+    result_markdown: str = Field(default="", description="改写后的 Markdown")
+    candidates: List[str] = Field(default=[], description="候选结果列表")
+    apply_modes: List[str] = Field(default=[], description="支持的应用方式")
+    summary: Optional[str] = Field(None, description="改写摘要")
 
 
 # 兼容性导出（保留旧名称以兼容现有代码）

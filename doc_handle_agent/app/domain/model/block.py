@@ -176,21 +176,15 @@ class ImageInfo:
 class DocumentBlock:
     """文档块模型.
 
-    表示文档中的一个内容块，可以是标题或正文。
-    用于存储生成后的文档内容。
+    表示LLM返回的文档内容块，只承载生成结果中的核心字段。
+    其他元数据（如source_refs、source_node_ids）在内容生成节点中
+    通过与TemplateBlock合并后写入doc_blocks。
     """
 
-    block_type: str  # "heading" | "paragraph"
+    block_type: str  # "heading" | "paragraph" | "image" | 其他扩展类型
     text_content: str  # 文本内容
     heading_level: int = 0  # 标题层级
-    source_refs: List[Dict[str, Any]] = field(default_factory=list)  # 源码来源引用（workspace 格式）
-    source_node_ids: List[str] = field(default_factory=list)  # 内容生成依据节点ID（内部使用）
-    imgs: List[str] = field(default_factory=list)  # 包含的图片id
-
-    def __post_init__(self):
-        """验证block_type的合法性."""
-        if self.block_type not in ("heading", "paragraph"):
-            raise ValueError(f"Invalid block_type: {self.block_type}. Must be 'heading' or 'paragraph'")
+    block_id: Optional[str] = None  # 关联的模板block ID
 
     @property
     def is_heading(self) -> bool:
@@ -199,8 +193,8 @@ class DocumentBlock:
 
     @property
     def is_paragraph(self) -> bool:
-        """是否为正文块."""
-        return self.block_type == "paragraph"
+        """是否为正文块（非标题即正文）."""
+        return self.block_type != "heading"
 
     def to_dict(self) -> Dict:
         """转换为字典."""
@@ -208,7 +202,5 @@ class DocumentBlock:
             "block_type": self.block_type,
             "text_content": self.text_content,
             "heading_level": self.heading_level,
-            "source_refs": self.source_refs,
-            "source_node_ids": self.source_node_ids,
-            "imgs": self.imgs,
+            "block_id": self.block_id,
         }

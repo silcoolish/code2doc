@@ -112,7 +112,7 @@ class MCPClient:
         if not self._session:
             raise RuntimeError("MCP client not connected")
 
-        logger.info(
+        logger.debug(
             "tool_call_start",
             tool_name=tool_name,
             arguments=arguments,
@@ -135,7 +135,7 @@ class MCPClient:
                 error_msg = result.get("error", "Unknown error")
                 raise RuntimeError(f"Tool execution failed: {error_msg}")
 
-            logger.info(
+            logger.debug(
                 "tool_call_success",
                 tool_name=tool_name,
                 result_length=len(text_content),

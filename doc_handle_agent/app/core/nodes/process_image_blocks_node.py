@@ -5,7 +5,6 @@
 将图片块转换为 workspace 期望的标准格式。
 """
 
-import re
 from typing import Any, Dict, List, Optional
 
 from app.core.nodes.base import WorkflowNode
@@ -63,6 +62,14 @@ class ProcessImageBlocksNode(WorkflowNode):
             logger.info("no_doc_blocks_to_process")
             return state
 
+        document_id = state.get("document_id")
+        if not document_id:
+            logger.error("document_id_not_found")
+            state["error"] = "document_id 不存在，无法创建图片资源"
+            state["status"] = GenerationStatus.FAILED.value
+            state["message"] = "图片资源处理失败: 文档尚未创建"
+            return state
+
         try:
             state["status"] = GenerationStatus.GENERATING.value
             state["message"] = "正在处理图片资源..."
@@ -70,7 +77,7 @@ class ProcessImageBlocksNode(WorkflowNode):
             with log_timing("process_image_blocks", block_count=len(doc_blocks)):
                 updated_blocks = await self._process_blocks(
                     doc_blocks,
-                    repo_id=state["repo_id"],
+                    document_id=document_id,
                 )
 
             state["doc_blocks"] = updated_blocks
@@ -97,13 +104,13 @@ class ProcessImageBlocksNode(WorkflowNode):
     async def _process_blocks(
         self,
         doc_blocks: List[Dict[str, Any]],
-        repo_id: str,
+        document_id: str,
     ) -> List[Dict[str, Any]]:
         """处理文档块列表中的图片块.
 
         Args:
             doc_blocks: 文档块列表
-            repo_id: 仓库 ID
+            document_id: 文档 ID
 
         Returns:
             更新后的文档块列表
@@ -112,7 +119,7 @@ class ProcessImageBlocksNode(WorkflowNode):
 
         for block in doc_blocks:
             if block.get("blockType") == "image":
-                processed = await self._process_image_block(block, repo_id)
+                processed = await self._process_image_block(block, document_id)
                 updated_blocks.append(processed)
             else:
                 updated_blocks.append(block)
@@ -122,7 +129,7 @@ class ProcessImageBlocksNode(WorkflowNode):
     async def _process_image_block(
         self,
         block: Dict[str, Any],
-        repo_id: str,
+        document_id: str,
     ) -> Dict[str, Any]:
         """处理单个图片块.
 
@@ -130,7 +137,7 @@ class ProcessImageBlocksNode(WorkflowNode):
 
         Args:
             block: 原始图片块数据
-            repo_id: 仓库 ID
+            document_id: 文档 ID
 
         Returns:
             更新后的图片块数据
@@ -147,7 +154,7 @@ class ProcessImageBlocksNode(WorkflowNode):
 
         resource_response = await self._create_resource(
             image_url=image_url,
-            repo_id=repo_id,
+            document_id=document_id,
             caption=caption,
         )
 
@@ -182,14 +189,14 @@ class ProcessImageBlocksNode(WorkflowNode):
     async def _create_resource(
         self,
         image_url: str,
-        repo_id: str,
+        document_id: str,
         caption: str,
     ) -> SaveResourceResponse:
         """调用 workspace API 创建图片资源记录.
 
         Args:
             image_url: 图片外部 URL
-            repo_id: 仓库 ID（用作 owner_id）
+            document_id: 文档 ID（用作 owner_id）
             caption: 图片标题（用于生成文件名）
 
         Returns:
@@ -200,7 +207,7 @@ class ProcessImageBlocksNode(WorkflowNode):
 
         request = SaveResourceRequest(
             owner_type="document",
-            owner_id=repo_id,
+            owner_id=document_id,
             resource_type="image",
             file_name=file_name,
             mime_type=mime_type,
@@ -213,10 +220,7 @@ class ProcessImageBlocksNode(WorkflowNode):
     def _extract_image_url(block: Dict[str, Any]) -> Optional[str]:
         """从块数据中提取图片 URL.
 
-        提取优先级：
-        1. attrs.imageIds 列表中的第一个 URL
-        2. contentText 中 markdown 图片语法的 URL
-        3. contentText 本身如果是纯 URL
+        图片 URL 直接存储在 contentText 中。
 
         Args:
             block: 块数据
@@ -224,21 +228,10 @@ class ProcessImageBlocksNode(WorkflowNode):
         Returns:
             图片 URL 或 None
         """
-        attrs = block.get("attrs", {})
-        image_ids = attrs.get("imageIds", [])
-        if image_ids and isinstance(image_ids, list):
-            return str(image_ids[0]).strip()
-
         content = block.get("contentText", "")
         if not content:
             return None
 
-        # 尝试匹配 markdown 图片语法: ![alt](url)
-        match = re.search(r"!?\[.*?\]\((https?://[^\s)]+)\)", content)
-        if match:
-            return match.group(1).strip()
-
-        # 尝试直接匹配 URL
         stripped = content.strip()
         if stripped.startswith(("http://", "https://")):
             return stripped
@@ -249,8 +242,7 @@ class ProcessImageBlocksNode(WorkflowNode):
     def _extract_caption(block: Dict[str, Any]) -> str:
         """从块数据中提取图片标题/说明.
 
-        优先从 contentText 的 markdown 图片语法中提取 alt 文本，
-        否则返回 contentText 的纯文本内容。
+        直接返回 contentText 的内容（排除纯 URL 的情况）。
 
         Args:
             block: 块数据
@@ -262,12 +254,7 @@ class ProcessImageBlocksNode(WorkflowNode):
         if not content:
             return ""
 
-        # 尝试匹配 markdown 图片语法中的 alt 文本
-        match = re.search(r"!?\[(.*?)\]\(", content)
-        if match:
-            return match.group(1).strip()
-
-        # 如果不是 markdown 格式，直接返回（排除 URL 的情况）
+        # 排除纯 URL 的情况
         stripped = content.strip()
         if not stripped.startswith(("http://", "https://")):
             return stripped

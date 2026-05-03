@@ -200,8 +200,44 @@ class DocumentEngine:
             # 清理临时文件
             cleanup_temp_files(initial_state["repo_id"])
 
+    # 节点顺序定义（与 generator.py 工作流保持一致）
+    _NODE_ORDER = [
+        "list_template_block",
+        "outline_confirmation",
+        "select_strategy",
+        "generate_blocks",
+        "create_document",
+        "process_image_blocks",
+        "store_block_list",
+    ]
+
+    # 节点中文名称映射
+    _NODE_NAME_MAP = {
+        "list_template_block": "获取模板内容块列表",
+        "outline_confirmation": "确认文档大纲",
+        "select_strategy": "选择内容生成策略",
+        "generate_blocks": "生成文档内容",
+        "create_document": "创建文档",
+        "process_image_blocks": "处理图片资源",
+        "store_block_list": "保存最终文档",
+    }
+
+    # 节点进度百分比映射
+    _NODE_PROGRESS_MAP = {
+        "list_template_block": 10,
+        "outline_confirmation": 25,
+        "select_strategy": 40,
+        "generate_blocks": 55,
+        "create_document": 70,
+        "process_image_blocks": 85,
+        "store_block_list": 95,
+    }
+
     def get_progress(self, flow_id: str) -> Dict:
         """获取生成进度.
+
+        根据当前执行的节点计算 current_step、total_steps、progress，
+        并生成中文 message 明确告知当前所处节点。
 
         Args:
             flow_id: 流程ID
@@ -218,22 +254,59 @@ class DocumentEngine:
                 "error": "流程不存在",
             }
 
-        # 优先使用block相关字段，兼容paragraph字段
-        total = state.get("total_blocks", 0) or state.get("total_paragraphs", 0)
-        current = state.get("current_block_index", 0) or state.get("current_paragraph_index", 0)
-        progress = (current / total * 100) if total > 0 else 0
+        status = state["status"]
+        current_node = state.get("current_node")
+        error = state.get("error")
+
+        # 终态直接返回
+        if status == GenerationStatus.COMPLETED.value:
+            return {
+                "flow_id": flow_id,
+                "repo_id": state["repo_id"],
+                "status": status,
+                "progress": 100,
+                "current_step": len(self._NODE_ORDER),
+                "total_steps": len(self._NODE_ORDER),
+                "message": "文档生成完成",
+                "document_id": state.get("document_id"),
+                "error": None,
+            }
+
+        if status == GenerationStatus.FAILED.value:
+            return {
+                "flow_id": flow_id,
+                "repo_id": state["repo_id"],
+                "status": status,
+                "progress": 0,
+                "current_step": 0,
+                "total_steps": len(self._NODE_ORDER),
+                "message": f"文档生成失败: {error}" if error else "文档生成失败",
+                "document_id": state.get("document_id"),
+                "error": error,
+            }
+
+        # 根据当前节点计算进度
+        total_steps = len(self._NODE_ORDER)
+        if current_node and current_node in self._NODE_ORDER:
+            current_step = self._NODE_ORDER.index(current_node) + 1
+            progress = self._NODE_PROGRESS_MAP.get(current_node, 0)
+            node_name_cn = self._NODE_NAME_MAP.get(current_node, current_node)
+            message = f"正在{node_name_cn}..."
+        else:
+            current_step = 0
+            progress = 0
+            message = state.get("message", "等待开始生成...")
 
         return {
             "flow_id": flow_id,
             "repo_id": state["repo_id"],
-            "status": state["status"],
-            "progress": round(progress, 2),
-            "current_step": current,
-            "total_steps": total,
-            "message": state["message"],
+            "status": status,
+            "progress": progress,
+            "current_step": current_step,
+            "total_steps": total_steps,
+            "message": message,
             "document_id": state.get("document_id"),
-            "output_path": state.get("output_path"),
-            "error": state.get("error"),
+            "error": error,
         }
 
     def get_state(self, flow_id: str) -> Optional[AgentState]:

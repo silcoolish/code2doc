@@ -47,7 +47,7 @@ class ContentGeneratorAgent:
                 base_url=base_url,
                 temperature=0.7,
                 max_retries=3,
-                timeout=120,
+                timeout=settings.llm_request_timeout,
             )
 
             logger.info(
@@ -76,6 +76,13 @@ class ContentGeneratorAgent:
         if self._context_limit is not None:
             return self._context_limit
         return self._get_default_context_limit(self.model_name)
+
+    @property
+    def timeout(self) -> float:
+        """获取LLM请求超时时间(秒)."""
+        if hasattr(self.llm, "request_timeout") and self.llm.request_timeout is not None:
+            return float(self.llm.request_timeout)
+        return get_settings().llm_request_timeout
 
     async def ainitialize(self) -> None:
         """异步初始化模型上下文限制.
@@ -238,6 +245,12 @@ class ContentGeneratorAgent:
         elif "qwen" in model_name.lower():
             return 131072
 
+        # DeepSeek模型
+        elif "deepseek-v2" in model_name.lower() or "deepseek-v2.5" in model_name.lower():
+            return 128000
+        elif "deepseek" in model_name.lower():
+            return 64000
+
         # Claude模型
         elif "claude-3-opus" in model_name.lower():
             return 200000
@@ -322,7 +335,11 @@ class ContentGeneratorAgent:
         system_prompt: str,
         task_message: str,
         repo_id: str,
+        task_name: str = "generate",
         max_iterations: int = 10,
+        excluded_tools: Optional[List[str]] = None,
+        extra_tools: Optional[List[Any]] = None,
+        custom_tool_handler: Optional[Any] = None,
     ) -> str:
         """使用工具生成内容.
 
@@ -330,14 +347,18 @@ class ContentGeneratorAgent:
             system_prompt: 系统提示词
             task_message: 任务消息
             repo_id: 仓库ID
+            task_name: 任务名称，用于 agent 日志文件名
             max_iterations: 最大迭代次数
+            excluded_tools: 禁止 LLM 使用的工具名称列表
 
         Returns:
             生成的原始内容字符串
         """
         # 生成会话唯一标识并创建专属日志记录器，绑定到当前流程
         session_id = str(uuid.uuid4())
-        self._agent_logger = get_agent_logger(session_id=session_id)
+        self._agent_logger = get_agent_logger(
+            repo_id=repo_id, task_name=task_name, session_id=session_id
+        )
 
         try:
             # 记录 agent 请求开始
@@ -350,6 +371,24 @@ class ContentGeneratorAgent:
             )
 
             tools = await self._load_langchain_tools()
+            if excluded_tools:
+                excluded_set = set(excluded_tools)
+                tools = [
+                    t for t in tools
+                    if t.get("function", {}).get("name") not in excluded_set
+                ]
+                logger.info(
+                    "tools_filtered",
+                    excluded=excluded_tools,
+                    remaining=len(tools),
+                )
+            if extra_tools:
+                tools = tools + extra_tools
+                logger.info(
+                    "tools_extended",
+                    extra_count=len(extra_tools),
+                    total=len(tools),
+                )
             llm_with_tools = self.llm.bind_tools(tools)
 
             messages = [
@@ -415,7 +454,10 @@ class ContentGeneratorAgent:
                         )
 
                         try:
-                            result = await self.call_tool(tool_name, tool_args)
+                            if custom_tool_handler is not None:
+                                result = await custom_tool_handler(tool_name, tool_args)
+                            else:
+                                result = await self.call_tool(tool_name, tool_args)
                         except Exception as e:
                             result = f"工具调用失败: {str(e)}"
 
@@ -532,40 +574,19 @@ class ContentGeneratorAgent:
 
         if cache_key in self._tool_result_cache:
             self._cache_hits += 1
-            logger.debug(
-                "tool_cache_hit",
-                tool_name=tool_name,
-                cache_hits=self._cache_hits,
-                cache_misses=self._cache_misses,
-            )
+            if self._agent_logger:
+                self._agent_logger.log_event(
+                    "tool_cache_hit",
+                    tool_name=tool_name,
+                    cache_hits=self._cache_hits,
+                    cache_misses=self._cache_misses,
+                )
             return self._tool_result_cache[cache_key]
 
         self._cache_misses += 1
 
-        # 复用当前流程的 agent_logger（若存在），否则创建新的独立日志
-        agent_logger = self._agent_logger
-        if agent_logger is None:
-            agent_logger = get_agent_logger()
-
-        # 记录工具调用请求
-        agent_logger.log_tool_call(
-            session_id=getattr(agent_logger, "session_id", str(uuid.uuid4())),
-            iteration=1,
-            tool_name=tool_name,
-            arguments=tool_args,
-        )
-
         try:
             result = await self.mcp_client.call_tool(tool_name, tool_args)
-
-            # 记录工具调用成功响应
-            agent_logger.log_tool_response(
-                session_id=getattr(agent_logger, "session_id", ""),
-                iteration=1,
-                tool_name=tool_name,
-                response=result,
-                success=True,
-            )
 
             # 缓存结果
             self._tool_result_cache[cache_key] = result
@@ -573,15 +594,6 @@ class ContentGeneratorAgent:
         except Exception as e:
             error_msg = f"工具调用失败: {str(e)}"
 
-            # 记录工具调用失败响应
-            agent_logger.log_tool_response(
-                session_id=getattr(agent_logger, "session_id", ""),
-                iteration=1,
-                tool_name=tool_name,
-                response=error_msg,
-                success=False,
-                error=str(e),
-            )
             # 失败结果也缓存，避免重复失败请求
             self._tool_result_cache[cache_key] = error_msg
             return error_msg

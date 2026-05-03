@@ -1,14 +1,15 @@
 """内容生成策略 - 定义不同上下文处理策略的实现."""
 
-import asyncio
 import json
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List
+
+from json_repair import repair_json
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from app.domain.content_generator_agent import ContentGeneratorAgent
 from app.domain.prompts import (
     FULL_CONTEXT_STRATEGY_PROMPT,
-    FILTERED_CONTEXT_STRATEGY_PROMPT,
+    BATCH_CONTEXT_STRATEGY_PROMPT,
 )
 from app.domain.model import DocumentBlock, TemplateBlock
 from app.utils.logger import get_logger
@@ -17,11 +18,23 @@ from app.utils.token_estimator import TokenEstimator
 logger = get_logger(__name__)
 
 
+class FallbackSignalError(RuntimeError):
+    """降级信号异常.
+
+    当Agent返回 context_exceeded=true 时抛出，
+    用于与策略执行中的其他异常区分，只捕获此异常才触发降级逻辑。
+    """
+    pass
+
+
 class GenerationStrategy(ABC):
     """内容生成策略基类.
 
     定义内容生成的策略接口，不同策略处理不同规模的上下文。
     """
+
+    # 内容生成阶段禁止使用的探索类工具
+    EXCLUDED_TOOLS = ["get_repo_stats", "get_all_nodes"]
 
     def __init__(self, agent: ContentGeneratorAgent):
         """初始化策略.
@@ -42,7 +55,7 @@ class GenerationStrategy(ABC):
         self,
         blocks: List[TemplateBlock],
         repo_id: str,
-    ) -> Dict[str, List[DocumentBlock]]:
+    ) -> List[DocumentBlock]:
         """执行生成策略.
 
         Args:
@@ -50,35 +63,33 @@ class GenerationStrategy(ABC):
             repo_id: 仓库ID
 
         Returns:
-            {block ID: [DocumentBlock]} 映射
+            DocumentBlock 列表
         """
         pass
 
     def _build_static_results(
         self,
         static_blocks: List[TemplateBlock],
-    ) -> Dict[str, List[DocumentBlock]]:
-        """构建静态block的结果映射.
+    ) -> List[DocumentBlock]:
+        """构建静态block的结果列表.
 
         Args:
             static_blocks: 静态block列表
 
         Returns:
-            {block ID: [DocumentBlock]} 映射
+            DocumentBlock 列表
         """
-        results: Dict[str, List[DocumentBlock]] = {}
+        results: List[DocumentBlock] = []
 
         for block in static_blocks:
-            results[block.id] = [
+            results.append(
                 DocumentBlock(
+                    block_id=block.id,
                     block_type="heading" if block.is_heading else "paragraph",
                     text_content=block.content_text or "",
                     heading_level=block.heading_level,
-                    source_refs=block.source_refs,
-                    source_node_ids=block.source_node_ids,
-                    imgs=[],
                 )
-            ]
+            )
 
         return results
 
@@ -139,11 +150,81 @@ class GenerationStrategy(ABC):
         try:
             json_content = self._extract_json_from_response(raw_content)
             if json_content:
-                data = json.loads(json_content)
+                data = self._safe_json_loads(json_content)
                 return data.get("context_exceeded", False)
         except (json.JSONDecodeError, AttributeError):
             pass
         return False
+
+    @staticmethod
+    def _fix_unescaped_quotes(json_str: str) -> str:
+        """修复 JSON 字符串中未转义的双引号.
+
+        LLM 有时会在字符串值内输出未转义的双引号（如代码中的引号），
+        导致 json.loads 解析失败。此函数通过向后看字符判断双引号
+        是合法的字符串结束还是未转义的内部引号，对后者进行转义。
+        """
+        result = []
+        i = 0
+        length = len(json_str)
+        in_string = False
+
+        while i < length:
+            char = json_str[i]
+
+            if char == '"' and not in_string:
+                # 字符串开始
+                in_string = True
+                result.append(char)
+                i += 1
+            elif char == '\\' and in_string and i + 1 < length:
+                # 转义序列，原样保留
+                result.append(char)
+                result.append(json_str[i + 1])
+                i += 2
+            elif char == '"' and in_string:
+                # 判断是字符串结束还是未转义的内部引号
+                # 向后看（跳过空白），若遇到 JSON 结构字符则为合法结束
+                j = i + 1
+                while j < length and json_str[j] in ' \t\n\r':
+                    j += 1
+                if j < length and json_str[j] in ',:}])':
+                    in_string = False
+                    result.append(char)
+                    i += 1
+                else:
+                    # 未转义的双引号
+                    result.append('\\"')
+                    i += 1
+            else:
+                result.append(char)
+                i += 1
+
+        return ''.join(result)
+
+    def _safe_json_loads(self, json_str: str) -> Any:
+        """安全地解析 JSON 字符串，自动修复常见格式错误.
+
+        先尝试标准解析，失败时调用 json_repair 修复后重试。
+        json_repair 能处理 LLM 常见的 JSON 损坏模式：
+        - 字符串缺少引号包裹
+        - 字符串内部未转义的双引号
+        - 尾部缺少逗号或括号等
+
+        Args:
+            json_str: JSON 字符串
+
+        Returns:
+            解析后的 Python 对象
+
+        Raises:
+            json.JSONDecodeError: 当自动修复也无法解析时
+        """
+        try:
+            return json.loads(json_str)
+        except json.JSONDecodeError:
+            fixed = repair_json(json_str)
+            return json.loads(fixed)
 
     def _apply_length_constraints(
         self,
@@ -248,114 +329,56 @@ class GenerationStrategy(ABC):
     def _parse_blocks_from_response(
         self,
         raw_content: str,
-        blocks: List[TemplateBlock],
-    ) -> Dict[str, List[DocumentBlock]]:
-        """从响应中解析block列表（统一处理新旧两种JSON格式）.
+    ) -> List[DocumentBlock]:
+        """从响应中解析block列表（只支持新JSON格式）.
 
         支持格式：
         - 新格式: [{"id": "...", "block_type": "paragraph", "content_text": "..."}, ...]
-        - 旧格式: {"paragraphs": [{"paragraph_id": "...", "content": "...", "is_heading": false}, ...]}
 
         Args:
             raw_content: 原始响应内容
-            blocks: 原始block列表（用于id匹配和属性回退）
 
         Returns:
-            {block ID: [DocumentBlock]} 解析结果映射
+            DocumentBlock 列表
         """
-        results: Dict[str, List[DocumentBlock]] = {}
+        results: List[DocumentBlock] = []
 
         json_content = self._extract_json_from_response(raw_content)
         if not json_content:
             return results
 
         try:
-            data = json.loads(json_content)
+            data = self._safe_json_loads(json_content)
 
-            # 统一处理两种格式：列表格式和字典格式
-            if isinstance(data, list):
-                paragraph_list = data
-            elif isinstance(data, dict):
-                paragraph_list = data.get("paragraphs", [])
-            else:
-                paragraph_list = []
+            if not isinstance(data, list):
+                logger.warning(
+                    "response_not_list_format",
+                    data_type=type(data).__name__,
+                )
+                return results
 
-            block_map = {b.id: b for b in blocks}
-
-            for idx, item in enumerate(paragraph_list):
+            for item in data:
                 if not isinstance(item, dict):
                     continue
 
-                # 获取block_id（新格式用id，旧格式用paragraph_id）
-                block_id = item.get("id") or item.get("paragraph_id")
-
-                # 如果id为空，尝试按索引顺序匹配
-                if not block_id and idx < len(blocks):
-                    block_id = blocks[idx].id
-
-                if not block_id or block_id not in block_map:
-                    continue
-
-                block = block_map[block_id]
-
+                block_id = item.get("id")
                 content = item.get("content_text")
                 block_type = item.get("block_type")
                 heading_level = item.get("heading_level")
 
-                # 处理图片类型的block
-                if block.is_image_block:
-                    image_url = content.strip()
-                    if image_url:
-                        results[block_id] = [
-                            DocumentBlock(
-                                block_type=block_type,
-                                text_content=f"![{block.content_text}]({image_url})",
-                                heading_level=0,
-                                source_refs=block.source_refs,
-                                source_node_ids=block.source_node_ids,
-                                imgs=[image_url],
-                            )
-                        ]
-                        logger.info(
-                            "image_block_parsed",
-                            block_id=block_id,
-                            image_url=image_url,
-                        )
-                    else:
-                        results[block_id] = [
-                            DocumentBlock(
-                                block_type=block_type,
-                                text_content=f"[图片获取失败: {block.content_text}]",
-                                heading_level=0,
-                                source_refs=block.source_refs,
-                                source_node_ids=block.source_node_ids,
-                                imgs=[],
-                            )
-                        ]
-                    continue
-
-                # 应用长度限制
-                content = self._apply_length_constraints(
-                    content,
-                    block.min_length,
-                    block.max_length,
-                )
-
-                results[block_id] = [
+                results.append(
                     DocumentBlock(
+                        block_id=block_id,
                         block_type=block_type,
                         text_content=content,
                         heading_level=heading_level,
-                        source_refs=block.source_refs,
-                        source_node_ids=block.source_node_ids,
-                        imgs=[],
                     )
-                ]
+                )
 
                 logger.info(
                     "block_parsed",
                     block_id=block_id,
-                    content_length=len(content),
+                    content_length=len(content) if content else 0,
                 )
 
         except json.JSONDecodeError as e:
@@ -385,7 +408,7 @@ class FullContextStrategy(GenerationStrategy):
         self,
         blocks: List[TemplateBlock],
         repo_id: str,
-    ) -> Dict[str, List[DocumentBlock]]:
+    ) -> List[DocumentBlock]:
         """执行完整上下文策略.
 
         Args:
@@ -393,10 +416,10 @@ class FullContextStrategy(GenerationStrategy):
             repo_id: 仓库ID
 
         Returns:
-            生成结果映射
+            DocumentBlock 列表
 
         Raises:
-            RuntimeError: 当Agent返回降级信号时
+            FallbackSignalError: 当Agent返回降级信号时
         """
         logger.info(
             "full_context_strategy_execute",
@@ -411,13 +434,15 @@ class FullContextStrategy(GenerationStrategy):
             system_prompt=FULL_CONTEXT_STRATEGY_PROMPT,
             task_message=task_message,
             repo_id=repo_id,
+            task_name="full_context",
             max_iterations=15,
+            excluded_tools=self.EXCLUDED_TOOLS,
         )
 
         # 检查降级信号
         if self._is_fallback_signal(raw_content):
             logger.warning("full_context_strategy_fallback_signal")
-            raise RuntimeError("Agent returned fallback signal")
+            raise FallbackSignalError("Agent returned fallback signal")
 
         return self._parse_response(raw_content, blocks)
 
@@ -425,6 +450,7 @@ class FullContextStrategy(GenerationStrategy):
         self,
         blocks: List[TemplateBlock],
         repo_id: str,
+        context_description: str = ""
     ) -> str:
         """构建任务消息."""
         desc = f"共 {len(blocks)} 个内容块（包含静态和模板内容块），请按规则处理所有内容块。"
@@ -434,164 +460,33 @@ class FullContextStrategy(GenerationStrategy):
         self,
         raw_content: str,
         blocks: List[TemplateBlock],
-    ) -> Dict[str, List[DocumentBlock]]:
+    ) -> List[DocumentBlock]:
         """解析响应.
 
         Args:
             raw_content: 原始响应内容
             blocks: 原始block列表
         """
-        results = self._parse_blocks_from_response(raw_content, blocks)
+        results = self._parse_blocks_from_response(raw_content)
+        result_ids = {r.block_id for r in results if r.block_id}
 
         # 为未解析到的block创建默认结果
         for block in blocks:
-            if block.id not in results:
+            if block.id not in result_ids:
                 logger.warning(
                     "block_missing_in_response",
                     block_id=block.id,
                     fallback_to_default=True,
                 )
-                results[block.id] = [
+                results.append(
                     DocumentBlock(
+                        block_id=block.id,
                         block_type="heading" if block.is_heading else "paragraph",
                         text_content=block.content_text
                         or f"[内容块 '{block.id}' 生成缺失]",
                         heading_level=block.heading_level,
-                        source_refs=block.source_refs,
-                        source_node_ids=block.source_node_ids,
-                        imgs=[],
                     )
-                ]
-
-        return results
-
-
-class FilteredContextStrategy(GenerationStrategy):
-    """精简上下文策略.
-
-    过滤掉静态block，只将模板block交给Agent处理。
-    生成完成后，将结果与静态block手动拼接复原。
-
-    适用场景：静态block较多，过滤后可以减少上下文占用。
-    """
-
-    @property
-    def name(self) -> str:
-        return "filtered_context"
-
-    async def execute(
-        self,
-        blocks: List[TemplateBlock],
-        repo_id: str,
-    ) -> Dict[str, List[DocumentBlock]]:
-        """执行精简上下文策略.
-
-        Args:
-            blocks: 完整block列表
-            repo_id: 仓库ID
-
-        Returns:
-            生成结果映射
-
-        Raises:
-            RuntimeError: 当Agent返回降级信号时
-        """
-        logger.info(
-            "filtered_context_strategy_execute",
-            total_blocks=len(blocks),
-        )
-
-        # 分离静态和模板block
-        static_blocks = [b for b in blocks if not b.is_template]
-        template_blocks = [b for b in blocks if b.is_template]
-
-        logger.info(
-            "blocks_separated",
-            static_count=len(static_blocks),
-            template_count=len(template_blocks),
-        )
-
-        if not template_blocks:
-            # 没有模板block，直接返回静态结果
-            return self._build_static_results(static_blocks)
-
-        task_message = self._build_task_message(template_blocks, repo_id)
-
-        raw_content = await self.agent.generate_with_tools(
-            system_prompt=FILTERED_CONTEXT_STRATEGY_PROMPT,
-            task_message=task_message,
-            repo_id=repo_id,
-            max_iterations=15,
-        )
-
-        # 检查降级信号
-        if self._is_fallback_signal(raw_content):
-            logger.warning("filtered_context_strategy_fallback_signal")
-            raise RuntimeError("Agent returned fallback signal")
-
-        # 解析模板block的生成结果
-        template_results = self._parse_response(raw_content, template_blocks)
-
-        # 构建静态block的结果
-        static_results = self._build_static_results(static_blocks)
-
-        # 合并结果（保持原始顺序）
-        all_results: Dict[str, List[DocumentBlock]] = {}
-        for block in blocks:
-            if block.id in template_results:
-                all_results[block.id] = template_results[block.id]
-            elif block.id in static_results:
-                all_results[block.id] = static_results[block.id]
-
-        logger.info(
-            "filtered_context_strategy_complete",
-            total_results=len(all_results),
-            template_results=len(template_results),
-            static_results=len(static_results),
-        )
-
-        return all_results
-
-    def _build_task_message(
-        self,
-        template_blocks: List[TemplateBlock],
-        repo_id: str,
-    ) -> str:
-        """构建任务消息."""
-        desc = f"共 {len(template_blocks)} 个模板内容块，请依次为每个内容块生成内容。"
-        return super()._build_task_message(template_blocks, repo_id, desc)
-
-    def _parse_response(
-        self,
-        raw_content: str,
-        template_blocks: List[TemplateBlock],
-    ) -> Dict[str, List[DocumentBlock]]:
-        """解析响应.
-
-        Args:
-            raw_content: 原始响应内容
-            template_blocks: 模板block列表
-        """
-        results = self._parse_blocks_from_response(raw_content, template_blocks)
-
-        # 为未解析到的block创建默认结果
-        for block in template_blocks:
-            if block.id not in results:
-                logger.warning(
-                    "block_missing_in_response",
-                    block_id=block.id,
-                    fallback_to_default=True,
                 )
-                results[block.id] = [
-                    DocumentBlock(
-                        block_type="heading" if block.is_heading else "paragraph",
-                        text_content=f"[内容块 '{block.id}' 生成缺失]",
-                        heading_level=block.heading_level,
-                        source_refs=block.source_refs,
-                        source_node_ids=block.source_node_ids,
-                        imgs=[],
-                    )
-                ]
 
         return results
 
@@ -599,20 +494,11 @@ class FilteredContextStrategy(GenerationStrategy):
 class BatchedGenerationStrategy(GenerationStrategy):
     """分批生成策略.
 
-    将模板block分批处理，每批单独调用Agent生成。
-    最后将所有批次的结果与静态block手动拼接复原。
+    按文档标题层级将 block 分组，每批保留完整的章节结构（含静态块），
+    由 Agent 逐批生成。批次内静态块作为结构上下文，template 块作为生成目标。
 
     适用场景：文档规模较大，即使过滤静态block后仍然超出模型上下文限制。
     """
-
-    # 安全余量比例 - 为工具调用结果预留空间
-    SAFETY_RATIO = 0.6
-
-    # 最大每批block数量
-    MAX_BATCH_SIZE = 20
-
-    # 最大并发批次数量 - 防止同时发起过多LLM调用压垮API
-    MAX_CONCURRENCY = 3
 
     @property
     def name(self) -> str:
@@ -622,111 +508,133 @@ class BatchedGenerationStrategy(GenerationStrategy):
         self,
         blocks: List[TemplateBlock],
         repo_id: str,
-    ) -> Dict[str, List[DocumentBlock]]:
+    ) -> List[DocumentBlock]:
         """执行分批生成策略.
+
+        按需构建批次：生成一个批次，处理一个批次，再生成下一个。
+        每个批次从上一个批次结束位置的下一个 block 开始，
+        按原始列表顺序逐个添加 block，若发现父 block 不在当前批次，
+        则将父 block 按原始顺序插入到正确位置，直到根 block 也在批次中。
 
         Args:
             blocks: 完整block列表
             repo_id: 仓库ID
 
         Returns:
-            生成结果映射
+            DocumentBlock 列表
         """
         logger.info(
             "batched_generation_strategy_execute",
             total_blocks=len(blocks),
         )
 
-        # 分离静态和模板block
         static_blocks = [b for b in blocks if not b.is_template]
         template_blocks = [b for b in blocks if b.is_template]
 
         if not template_blocks:
             return self._build_static_results(static_blocks)
 
-        # 计算每批的block数量
-        batch_size = self._calculate_batch_size(template_blocks)
-        total_batches = (len(template_blocks) + batch_size - 1) // batch_size
+        block_map = {b.id: b for b in blocks}
+        index_map = {b.id: i for i, b in enumerate(blocks)}
 
-        logger.info(
-            "batch_calculation",
-            template_count=len(template_blocks),
-            batch_size=batch_size,
-            total_batches=total_batches,
-        )
+        all_template_results: List[DocumentBlock] = []
+        generated_ids: Set[str] = set()
+        i = 0
+        batch_num = 0
 
-        # 分批处理（各批次之间无依赖，限制并发避免压垮LLM API）
-        semaphore = asyncio.Semaphore(self.MAX_CONCURRENCY)
-
-        async def _process_batch_limited(
-            batch: List[TemplateBlock],
-            repo_id: str,
-            batch_num: int,
-        ) -> Dict[str, List[DocumentBlock]]:
-            async with semaphore:
-                return await self._process_batch(batch, repo_id, batch_num)
-
-        tasks = []
-        for i in range(0, len(template_blocks), batch_size):
-            batch = template_blocks[i : i + batch_size]
-            batch_num = i // batch_size + 1
-
-            logger.info(
-                "scheduling_batch",
-                batch_num=batch_num,
-                total_batches=total_batches,
-                batch_size=len(batch),
+        while i < len(blocks):
+            batch_num += 1
+            batch, next_i = self._build_next_batch(
+                blocks=blocks,
+                start_idx=i,
+                block_map=block_map,
+                index_map=index_map,
+                generated_ids=generated_ids,
             )
 
-            tasks.append(_process_batch_limited(batch, repo_id, batch_num))
+            if not batch:
+                break
 
-        # 并行执行所有批次（受semaphore限制最大并发数）
-        batch_results_list = await asyncio.gather(*tasks, return_exceptions=True)
+            templates_to_generate = [
+                b for b in batch if b.is_template and b.id not in generated_ids
+            ]
+            if not templates_to_generate:
+                logger.info(
+                    "batch_all_generated",
+                    batch_num=batch_num,
+                    start_idx=i,
+                    next_idx=next_i,
+                )
+                i = next_i
+                continue
 
-        all_template_results: Dict[str, List[DocumentBlock]] = {}
-        for batch_num, batch_results in enumerate(batch_results_list, start=1):
-            if isinstance(batch_results, Exception):
+            logger.info(
+                "processing_batch",
+                batch_num=batch_num,
+                start_idx=i,
+                next_idx=next_i,
+                batch_size=len(batch),
+                template_count=len(templates_to_generate),
+                static_count=len(batch) - len(templates_to_generate),
+            )
+
+            try:
+                batch_results = await self._process_batch(
+                    batch, repo_id, batch_num, generated_ids
+                )
+            except FallbackSignalError:
+                logger.warning(
+                    "batch_fallback_signal",
+                    batch_num=batch_num,
+                )
+                raise
+            except Exception as e:
                 logger.error(
                     "batch_processing_exception",
                     batch_num=batch_num,
-                    error_type=type(batch_results).__name__,
-                    error=str(batch_results),
+                    error_type=type(e).__name__,
+                    error=str(e),
                     exc_info=True,
                 )
+                i = next_i
                 continue
-            all_template_results.update(batch_results)
+
+            # 替换模板内容并记录已生成 block
+            for result in batch_results:
+                if result.block_id:
+                    all_template_results.append(result)
+                    generated_ids.add(result.block_id)
+                    block = block_map.get(result.block_id)
+                    if block:
+                        block.content_text = result.text_content
+
+            i = next_i
 
         # 构建静态block的结果
         static_results = self._build_static_results(static_blocks)
 
         # 合并结果（保持原始顺序）
-        all_results: Dict[str, List[DocumentBlock]] = {}
+        result_map = {
+            r.block_id: r for r in all_template_results + static_results if r.block_id
+        }
+        all_results: List[DocumentBlock] = []
         for block in blocks:
-            if block.id in all_template_results:
-                all_results[block.id] = all_template_results[block.id]
-            elif block.id in static_results:
-                all_results[block.id] = static_results[block.id]
-
-        # 为缺失的模板 block 补充占位符（某个批次异常时）
-        template_block_ids = {b.id for b in template_blocks}
-        missing_ids = template_block_ids - set(all_template_results.keys())
-        for block_id in missing_ids:
-            block = next((b for b in template_blocks if b.id == block_id), None)
-            if block:
-                logger.warning(
-                    "batch_block_missing_fallback",
-                    block_id=block_id,
-                )
-                all_results[block_id] = [
+            if block.id in result_map:
+                all_results.append(result_map[block.id])
+            else:
+                all_results.append(
                     DocumentBlock(
+                        block_id=block.id,
                         block_type="heading" if block.is_heading else "paragraph",
-                        text_content=f"[内容块 '{block_id}' 生成缺失]",
+                        text_content=f"[内容块 '{block.id}' 生成缺失]",
                         heading_level=block.heading_level,
-                        source_refs=block.source_refs,
-                        source_node_ids=block.source_node_ids,
-                        imgs=[],
                     )
-                ]
+                )
+
+        # 统计缺失的模板 block
+        template_block_ids = {b.id for b in template_blocks}
+        result_ids = {r.block_id for r in all_template_results if r.block_id}
+        missing_ids = template_block_ids - result_ids
 
         logger.info(
             "batched_generation_strategy_complete",
@@ -738,48 +646,181 @@ class BatchedGenerationStrategy(GenerationStrategy):
 
         return all_results
 
-    def _calculate_batch_size(self, template_blocks: List[TemplateBlock]) -> int:
-        """计算每批处理的block数量.
+    def _get_ancestor_ids(
+        self,
+        block_idx: int,
+        blocks: List[TemplateBlock],
+    ) -> List[str]:
+        """基于 heading_level 获取祖先ID列表.
 
-        使用 TokenEstimator 根据预估的token数和模型上下文限制动态计算。
+        从当前节点向列表之前找最近的标题等级低于该节点的节点，
+        直到根节点。不使用 parent_block_id 字段。
 
         Args:
-            template_blocks: 模板block列表
+            block_idx: 当前 block 在列表中的索引
+            blocks: 完整 block 列表
 
         Returns:
-            每批block数量
+            祖先ID列表（按文档顺序，根在前）
         """
-        return TokenEstimator.estimate_batch_size(
-            template_blocks,
-            self.agent.context_limit,
-        )
+        if block_idx <= 0 or block_idx >= len(blocks):
+            return []
+
+        current = blocks[block_idx]
+        ancestors: List[str] = []
+
+        if current.is_heading:
+            search_level = current.heading_level
+        else:
+            # 非标题节点：先找到向前最近的标题作为锚点
+            search_level = 0
+            for j in range(block_idx - 1, -1, -1):
+                if blocks[j].is_heading:
+                    search_level = blocks[j].heading_level
+                    ancestors.insert(0, blocks[j].id)
+                    break
+            if search_level == 0:
+                return []
+
+        # 继续向上找祖先标题
+        for j in range(block_idx - 1, -1, -1):
+            candidate = blocks[j]
+            if candidate.is_heading and candidate.heading_level < search_level:
+                ancestors.insert(0, candidate.id)
+                search_level = candidate.heading_level
+                if search_level == 1:
+                    break
+
+        return ancestors
+
+    # 每批最大模板 block 数量（静态/标题 block 不计入限制）
+    MAX_TEMPLATE_BLOCKS_PER_BATCH = 20
+
+    def _build_next_batch(
+        self,
+        blocks: List[TemplateBlock],
+        start_idx: int,
+        block_map: Dict[str, TemplateBlock],
+        index_map: Dict[str, int],
+        generated_ids: Optional[Set[str]] = None,
+    ) -> Tuple[List[TemplateBlock], int]:
+        """从 start_idx 开始构建下一个批次.
+
+        按原始列表顺序逐个添加 block，若父 block 不在当前批次，
+        则按原始顺序插入到正确位置，直到根 block 也在批次中。
+        当待生成的模板 block 数量达到上限时停止（静态/标题 block 不计入限制）。
+
+        Args:
+            blocks: 完整 block 列表
+            start_idx: 本次起始索引（包含）
+            block_map: block ID 到 block 的映射
+            index_map: block ID 到原始索引的映射
+            generated_ids: 已生成完毕的 block ID 集合
+
+        Returns:
+            (批次 block 列表, 下一个起始索引)
+        """
+        if start_idx >= len(blocks):
+            return [], start_idx
+
+        generated_ids = generated_ids or set()
+        batch: List[TemplateBlock] = []
+        batch_ids: Set[str] = set()
+        i = start_idx
+
+        def _count_templates_to_generate(blocks_to_count: List[TemplateBlock]) -> int:
+            """统计待生成的模板 block 数量."""
+            return sum(
+                1 for b in blocks_to_count if b.is_template and b.id not in generated_ids
+            )
+
+        while i < len(blocks):
+            block = blocks[i]
+            ancestor_ids = self._get_ancestor_ids(i, blocks)
+
+            # 需要加入的祖先（不在当前批次中）
+            needed_ancestor_ids = [aid for aid in ancestor_ids if aid not in batch_ids]
+            needed_ancestors = [block_map[aid] for aid in needed_ancestor_ids if aid in block_map]
+
+            blocks_to_add = needed_ancestors.copy()
+            if block.id not in batch_ids:
+                blocks_to_add.append(block)
+
+            # 检查待生成的模板 block 是否超出限制
+            current_templates = _count_templates_to_generate(batch)
+            adding_templates = _count_templates_to_generate(blocks_to_add)
+            if batch and current_templates + adding_templates > self.MAX_TEMPLATE_BLOCKS_PER_BATCH:
+                break
+
+            # 按原始顺序插入祖先
+            for anc in needed_ancestors:
+                if anc.id in batch_ids:
+                    continue
+                insert_pos = self._find_insert_position(batch, anc, index_map)
+                batch.insert(insert_pos, anc)
+                batch_ids.add(anc.id)
+
+            # 加入当前 block（按原始顺序应位于所有已处理 block 之后）
+            if block.id not in batch_ids:
+                batch.append(block)
+                batch_ids.add(block.id)
+
+            i += 1
+
+        return batch, i
+
+    @staticmethod
+    def _find_insert_position(
+        batch: List[TemplateBlock],
+        block: TemplateBlock,
+        index_map: Dict[str, int],
+    ) -> int:
+        """找到 block 在 batch 中的正确插入位置，保持原始相对顺序.
+
+        Args:
+            batch: 当前批次
+            block: 待插入的 block
+            index_map: block ID 到原始索引的映射
+
+        Returns:
+            插入位置索引
+        """
+        block_idx = index_map[block.id]
+        for j, b in enumerate(batch):
+            if index_map[b.id] > block_idx:
+                return j
+        return len(batch)
 
     async def _process_batch(
         self,
         batch: List[TemplateBlock],
         repo_id: str,
         batch_num: int,
-    ) -> Dict[str, List[DocumentBlock]]:
+        generated_ids: Optional[Set[str]] = None,
+    ) -> List[DocumentBlock]:
         """处理单个批次.
 
         Args:
-            batch: 当前批次的block列表
+            batch: 当前批次的block列表（含 static 和 template）
             repo_id: 仓库ID
             batch_num: 批次编号
+            generated_ids: 已在之前批次中生成完毕的 block ID 集合
 
         Returns:
             批次生成结果
 
         Raises:
-            RuntimeError: 当批次处理失败时
+            FallbackSignalError: 当批次处理失败时
         """
-        task_message = self._build_task_message(batch, repo_id)
+        task_message = self._build_task_message(batch, repo_id, generated_ids)
 
         raw_content = await self.agent.generate_with_tools(
-            system_prompt=FILTERED_CONTEXT_STRATEGY_PROMPT,
+            system_prompt=BATCH_CONTEXT_STRATEGY_PROMPT,
             task_message=task_message,
             repo_id=repo_id,
+            task_name="batch",
             max_iterations=15,
+            excluded_tools=self.EXCLUDED_TOOLS,
         )
 
         # 检查降级信号
@@ -788,7 +829,7 @@ class BatchedGenerationStrategy(GenerationStrategy):
                 "batch_fallback_signal_received",
                 batch_num=batch_num,
             )
-            raise RuntimeError("Agent returned fallback signal")
+            raise FallbackSignalError("Agent returned fallback signal")
 
         return self._parse_response(raw_content, batch)
 
@@ -796,40 +837,109 @@ class BatchedGenerationStrategy(GenerationStrategy):
         self,
         batch: List[TemplateBlock],
         repo_id: str,
+        generated_ids: Optional[Set[str]] = None,
     ) -> str:
-        """构建批次任务消息."""
-        desc = f"共 {len(batch)} 个模板内容块，请依次为每个内容块生成内容。"
-        return super()._build_task_message(batch, repo_id, desc)
+        """构建批次任务消息.
+
+        已生成的 block 会被当作 static 处理，避免 LLM 重复生成。
+        """
+        generated_ids = generated_ids or set()
+        template_count = sum(
+            1 for b in batch if b.is_template and b.id not in generated_ids
+        )
+        static_count = len(batch) - template_count
+        desc = (
+            f"共 {len(batch)} 个内容块（含 {template_count} 个模板块、"
+            f"{static_count} 个静态块）。请为模板块生成内容，静态块保持原样。"
+        )
+
+        payload = self._serialize_batch_blocks(batch, generated_ids)
+        blocks_json = json.dumps(payload, ensure_ascii=False, indent=2)
+
+        parts = [
+            f"仓库ID: {repo_id}",
+            "",
+            desc,
+            "",
+            "## 内容块列表",
+            "",
+            "```json",
+            blocks_json,
+            "```",
+        ]
+        return "\n".join(parts)
+
+    def _serialize_batch_blocks(
+        self,
+        blocks: List[TemplateBlock],
+        generated_ids: Optional[Set[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        """将block列表序列化为LLM所需的精简格式.
+
+        已生成的 block 会被当作 static 处理，避免 LLM 重复生成内容。
+
+        Args:
+            blocks: 原始block列表
+            generated_ids: 已生成完毕的 block ID 集合
+
+        Returns:
+            精简后的字典列表
+        """
+        generated_ids = generated_ids or set()
+        result: List[Dict[str, Any]] = []
+        for block in blocks:
+            is_generated = block.id in generated_ids
+            data: Dict[str, Any] = {
+                "id": block.id,
+                "block_type": block.block_type,
+                "heading_level": block.heading_level,
+                "content_text": block.content_text,
+                "template": "static" if is_generated else ("template" if block.is_template else "static"),
+            }
+            if block.is_template and not is_generated:
+                if block.prompt:
+                    data["prompt"] = block.prompt
+                if block.image_id:
+                    data["image_id"] = block.image_id
+                if block.min_length is not None:
+                    data["min_length"] = block.min_length
+                if block.max_length is not None:
+                    data["max_length"] = block.max_length
+                if block.example:
+                    data["example"] = block.example
+            result.append(data)
+        return result
 
     def _parse_response(
         self,
         raw_content: str,
         batch: List[TemplateBlock],
-    ) -> Dict[str, List[DocumentBlock]]:
-        """解析批次响应.
+    ) -> List[DocumentBlock]:
+        """解析批次响应，只提取 template 块的结果，static 块使用原始内容.
 
         Args:
             raw_content: 原始响应内容
-            batch: 批次block列表
+            batch: 批次block列表（含 static 和 template）
 
         Returns:
-            生成结果映射
+            DocumentBlock 列表
         """
-        results = self._parse_blocks_from_response(raw_content, batch)
+        results = self._parse_blocks_from_response(raw_content)
+        result_ids = {r.block_id for r in results if r.block_id}
 
-        # 为未解析到的block创建默认结果
+        # 只为 template 块填充结果；static 块在 execute 中由 _build_static_results 覆盖
         for block in batch:
-            if block.id not in results:
-                results[block.id] = [
+            if not block.is_template:
+                continue
+            if block.id not in result_ids:
+                results.append(
                     DocumentBlock(
+                        block_id=block.id,
                         block_type="heading" if block.is_heading else "paragraph",
                         text_content=f"[内容块 '{block.id}' 生成缺失]",
                         heading_level=block.heading_level,
-                        source_refs=block.source_refs,
-                        source_node_ids=block.source_node_ids,
-                        imgs=[],
                     )
-                ]
+                )
 
         return results
 
@@ -848,13 +958,16 @@ class StrategySelector:
         """
         self.agent = agent
 
+    # 每 1K token 预估生成耗时（秒），用于时间预算判定
+    TIME_PER_1K_TOKENS = 3.0
+    TIME_SAFETY_RATIO = 0.7
+
     def select(self, blocks: List[TemplateBlock]) -> tuple[GenerationStrategy, int]:
         """选择最适合的生成策略.
 
         策略选择逻辑（TokenEstimator 已内部包含安全余量）：
-        1. 完整上下文策略：预估 token < 上下文限制
-        2. 精简上下文策略：过滤静态后预估 token < 上下文限制
-        3. 分批生成策略：以上都不满足
+        1. 完整上下文策略：预估 token < 上下文限制 且 预估耗时 < 超时阈值
+        2. 分批生成策略：以上不满足
 
         Args:
             blocks: 完整block列表
@@ -863,46 +976,34 @@ class StrategySelector:
             (选择的策略实例, 预估token数)
         """
         context_limit = self.agent.context_limit
+        timeout_limit = self.agent.timeout
 
         # 使用 TokenEstimator 预估完整上下文的 token
         full_context_tokens = TokenEstimator.estimate_full_context(blocks)
 
-        # 如果完整上下文在安全范围内，选择完整上下文策略
-        # TokenEstimator 已内部包含安全余量，直接与 context_limit 比较
-        if full_context_tokens < context_limit:
+        # 预估耗时判定：大上下文即使未越界也可能因处理缓慢而超时
+        estimated_time_sec = (full_context_tokens / 1000) * self.TIME_PER_1K_TOKENS
+        fits_time_budget = estimated_time_sec < timeout_limit * self.TIME_SAFETY_RATIO
+
+        # 如果完整上下文在安全范围内且时间预算充足，选择完整上下文策略
+        if full_context_tokens < context_limit and fits_time_budget:
             logger.info(
                 "strategy_selected",
                 strategy="full_context",
                 estimated_tokens=full_context_tokens,
                 context_limit=context_limit,
+                estimated_time_sec=round(estimated_time_sec, 1),
+                timeout_limit=timeout_limit,
             )
             return FullContextStrategy(self.agent), full_context_tokens
 
-        # 预估精简上下文的 token（过滤静态 block）
-        template_blocks = [b for b in blocks if b.is_template]
-        static_blocks = [b for b in blocks if not b.is_template]
-        filtered_context_tokens = TokenEstimator.estimate_filtered_context(
-            template_blocks, static_blocks
-        )
-
-        # 如果精简上下文在安全范围内，选择精简上下文策略
-        if filtered_context_tokens < context_limit:
-            logger.info(
-                "strategy_selected",
-                strategy="filtered_context",
-                estimated_tokens=filtered_context_tokens,
-                context_limit=context_limit,
-                template_blocks=len(template_blocks),
-                static_blocks=len(static_blocks),
-            )
-            return FilteredContextStrategy(self.agent), filtered_context_tokens
-
-        # 否则选择分批生成策略
+        # 否则选择分批生成策略（保留完整文档结构，按标题层级分批）
         logger.info(
             "strategy_selected",
             strategy="batched_generation",
-            estimated_tokens=filtered_context_tokens,
+            estimated_tokens=full_context_tokens,
             context_limit=context_limit,
-            template_blocks=len(template_blocks),
+            estimated_time_sec=round(estimated_time_sec, 1),
+            timeout_limit=timeout_limit,
         )
-        return BatchedGenerationStrategy(self.agent), filtered_context_tokens
+        return BatchedGenerationStrategy(self.agent), full_context_tokens

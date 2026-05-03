@@ -32,28 +32,6 @@ class StoreBlockListNode(WorkflowNode):
     def name(self) -> str:
         return "store_block_list"
 
-    def _extract_title(self, state: AgentState) -> str:
-        """从生成的blocks中提取文档标题.
-
-        优先使用第一个一级标题(heading_level=1)的content_text，
-        其次使用任意heading类型block，最后返回默认标题。
-        """
-        blocks = state.get("blocks", [])
-        if not blocks:
-            return "项目文档"
-
-        # 优先找一级标题
-        for block in blocks:
-            if block.block_type == "heading" and block.heading_level == 1:
-                return block.content_text or "项目文档"
-
-        # 其次找任意heading
-        for block in blocks:
-            if block.block_type == "heading":
-                return block.content_text or "项目文档"
-
-        return "项目文档"
-
     async def execute(self, state: AgentState) -> AgentState:
         """构建文档.
 
@@ -79,7 +57,7 @@ class StoreBlockListNode(WorkflowNode):
             for block in doc_blocks:
                 block["id"] = ""
 
-            title = self._extract_title(state)
+            title = state.get("title") or "项目文档"
             save_request = SaveDocumentRequest(
                 repo_id=state["repo_id"],
                 doc_type="project",

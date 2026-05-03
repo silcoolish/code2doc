@@ -6,12 +6,14 @@ from langgraph.graph import END, StateGraph
 
 from app.domain.content_generator import ContentGenerator
 from app.core.nodes import (
+    CreateDocumentNode,
     GenerateBlocksNode,
     ListTemplateBlockNode,
     OutlineConfirmationNode,
     ProcessImageBlocksNode,
     SelectStrategyNode,
     StoreBlockListNode,
+    WorkflowNode,
 )
 from app.core.state import AgentState, GenerationStatus
 from app.infrastructure.mcp_client import MCPClient
@@ -45,7 +47,7 @@ class DocumentGenerator:
     def _build_workflow(self) -> StateGraph:
         """构建工作流.
 
-        流程：获取模板 -> 大纲确认 -> 选择策略 -> 生成内容 -> 处理图片块 -> 存储文档
+        流程：获取模板 -> 大纲确认 -> 选择策略 -> 生成内容 -> 创建文档 -> 处理图片块 -> 存储文档块
 
         Returns:
             LangGraph工作流
@@ -58,13 +60,14 @@ class DocumentGenerator:
             OutlineConfirmationNode(self.content_generator),
             SelectStrategyNode(self.content_generator),
             GenerateBlocksNode(self.content_generator),
+            CreateDocumentNode(self.workspace_adapter),
             ProcessImageBlocksNode(self.workspace_adapter),
             StoreBlockListNode(self.workspace_adapter),
         ]
 
-        # 添加节点到工作流
+        # 添加节点到工作流（包装后写入 current_node）
         for node in nodes:
-            workflow.add_node(node.name, node.execute)
+            workflow.add_node(node.name, self._wrap_node(node))
 
         # 设置入口
         workflow.set_entry_point("list_template_block")
@@ -73,11 +76,21 @@ class DocumentGenerator:
         workflow.add_edge("list_template_block", "outline_confirmation")
         workflow.add_edge("outline_confirmation", "select_strategy")
         workflow.add_edge("select_strategy", "generate_blocks")
-        workflow.add_edge("generate_blocks", "process_image_blocks")
+        workflow.add_edge("generate_blocks", "create_document")
+        workflow.add_edge("create_document", "process_image_blocks")
         workflow.add_edge("process_image_blocks", "store_block_list")
         workflow.add_edge("store_block_list", END)
 
         return workflow.compile()
+
+    def _wrap_node(self, node: WorkflowNode):
+        """包装节点执行函数，在执行前记录当前节点."""
+
+        async def wrapped(state: AgentState) -> AgentState:
+            state["current_node"] = node.name
+            return await node.execute(state)
+
+        return wrapped
 
     async def run(self, initial_state: AgentState) -> AgentState:
         """运行工作流.

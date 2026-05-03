@@ -34,6 +34,7 @@ class Settings(BaseSettings):
         alias="DASHSCOPE_BASE_URL",
     )
     llm_model: str = Field(default="qwen-max-latest", alias="LLM_MODEL")
+    llm_request_timeout: float = Field(default=180.0, alias="LLM_REQUEST_TIMEOUT")
 
     # MCP配置
     mcp_server_url: str = Field(

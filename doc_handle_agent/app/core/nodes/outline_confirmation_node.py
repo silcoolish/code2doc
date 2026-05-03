@@ -2,14 +2,14 @@
 
 import copy
 import json
-import uuid
-from typing import Any, Dict, List, Optional
+import re
+from typing import List, Optional
 
 from app.core.nodes.base import WorkflowNode
 from app.core.state import AgentState, GenerationStatus
 from app.domain.content_generator import ContentGenerator
 from app.domain.model import TemplateBlock
-from app.domain.prompts import OUTLINE_CONFIRMATION_PROMPT
+from app.domain.prompts import LIST_GENERATION_SYSTEM_PROMPT
 from app.utils.logger import get_logger
 from app.utils.timing import log_timing
 
@@ -19,14 +19,18 @@ logger = get_logger(__name__)
 class OutlineConfirmationNode(WorkflowNode):
     """大纲确认节点.
 
-    将预处理后的 block 列表交给 LLM 进行大纲确认：
-    1. 确认/优化标题内容
-    2. 展开 isList=true 的模板 block 为具体列表项
-    3. 返回确认后的完整 block 结构
+    对文档大纲中的模板列表块进行确认和展开：
+    1. 应用层递归展开 isList=true 的模板列表项，LLM 仅负责生成列表项名称
+    2. 自动识别并复制子内容块，支持嵌套列表展开
+    3. 优先使用静态工具（list_tool）获取列表，完全绕过 LLM 输出限制
+
+    注意：单个模板内容块（is_template=true 且 isList=false）的 content_text
+    生成由后续 generate_blocks 节点负责，本节点不处理。
     """
 
     def __init__(self, content_generator: ContentGenerator):
         self.agent = content_generator.agent
+        self.static_list_provider = content_generator.static_list_provider
 
     @property
     def name(self) -> str:
@@ -35,9 +39,8 @@ class OutlineConfirmationNode(WorkflowNode):
     async def execute(self, state: AgentState) -> AgentState:
         """执行大纲确认.
 
-        1. 预处理 block 列表
-        2. 调用 LLM 确认大纲
-        3. 解析响应并重建 blocks
+        1. 对 block 列表递归展开模板块
+        2. 重新分配 id 和 order_no
         """
         if state.get("error"):
             return state
@@ -51,28 +54,23 @@ class OutlineConfirmationNode(WorkflowNode):
             state["message"] = "正在确认文档大纲..."
 
             with log_timing("outline_confirmation", block_count=len(blocks)):
-                outline_blocks = self._prepare_outline_blocks(blocks)
-                task_message = self._build_task_message(
-                    outline_blocks, state["repo_id"]
+                sorted_blocks = sorted(blocks, key=lambda b: b.order_no)
+                expanded_blocks = await self._expand_blocks(
+                    sorted_blocks, state["repo_id"]
                 )
 
-                raw_content = await self.agent.generate_with_tools(
-                    system_prompt=OUTLINE_CONFIRMATION_PROMPT,
-                    task_message=task_message,
-                    repo_id=state["repo_id"],
-                    max_iterations=15,
-                )
+                for i, block in enumerate(expanded_blocks):
+                    block.order_no = i
+                    block.id = str(i)
 
-                new_blocks = self._parse_and_rebuild(raw_content, blocks)
-
-                state["blocks"] = new_blocks
-                state["total_blocks"] = len(new_blocks)
-                state["message"] = f"大纲确认完成，共{len(new_blocks)}个内容块"
+                state["blocks"] = expanded_blocks
+                state["total_blocks"] = len(expanded_blocks)
+                state["message"] = f"大纲确认完成，共{len(expanded_blocks)}个内容块"
 
             logger.info(
                 "outline_confirmation_success",
                 original_count=len(blocks),
-                new_count=len(new_blocks),
+                new_count=len(expanded_blocks),
             )
 
         except Exception as e:
@@ -88,227 +86,205 @@ class OutlineConfirmationNode(WorkflowNode):
 
         return state
 
-    def _prepare_outline_blocks(
+    async def _expand_blocks(
         self,
         blocks: List[TemplateBlock],
-    ) -> List[Dict[str, Any]]:
-        """预处理 block 列表用于大纲确认.
-
-        Token 最小化策略：
-        - 保留 id、heading_level
-        - 去掉 block_type（heading_level 1-9 即标题，0 即非标题）
-        - 去掉 template（静态/模板由是否含 prompt/isList 暗示）
-        - 静态标题保留 content_text；模板标题去掉 content_text，保留 prompt
-        - 非标题块仅保留 id + heading_level=0
-        """
-        sorted_blocks = sorted(blocks, key=lambda b: b.order_no)
-        result = []
-        for block in sorted_blocks:
-            data: Dict[str, Any] = {"id": block.id}
-
-            if block.heading_level and block.heading_level > 0:
-                data["heading_level"] = block.heading_level
-                if block.is_template:
-                    if block.prompt:
-                        data["prompt"] = block.prompt
-                    data["isList"] = block.is_list
-                    if block.example:
-                        data["example"] = block.example
-                else:
-                    data["content_text"] = block.content_text
-            else:
-                data["heading_level"] = 99
-
-            result.append(data)
-        return result
-
-    def _build_task_message(
-        self,
-        outline_blocks: List[Dict[str, Any]],
         repo_id: str,
-    ) -> str:
-        """构建任务消息."""
-        blocks_json = json.dumps(outline_blocks, ensure_ascii=False, indent=2)
-
-        return "\n".join([
-            f"仓库ID: {repo_id}",
-            "",
-            "## 文档大纲内容块列表",
-            "",
-            "以下是需要你确认和优化的文档大纲结构。数组中的顺序即为文档中的顺序。",
-            "",
-            "```json",
-            blocks_json,
-            "```",
-        ])
-
-    def _parse_and_rebuild(
-        self,
-        raw_content: str,
-        original_blocks: List[TemplateBlock],
+        parent_context: str = "",
     ) -> List[TemplateBlock]:
-        """解析 LLM 响应并重建 block 列表.
+        """递归展开 block 列表中的模板列表块.
 
-        只根据 id/template_block_id 补全 block 属性，不新增节点。
-        完全信任 LLM 返回的 block 顺序和结构。
+        遇到 isList=true 的块时，识别子内容块、生成列表项、递归展开。
+        其他块（包括单个模板内容块）原样保留，由后续节点处理。
         """
-        json_content = self._extract_json_from_response(raw_content)
-        if not json_content:
-            logger.warning("outline_response_no_json_found")
-            return original_blocks
-
-        try:
-            data = json.loads(json_content)
-            if isinstance(data, list):
-                returned_blocks = data
-            else:
-                returned_blocks = data.get("blocks", [])
-        except json.JSONDecodeError as e:
-            logger.error("outline_response_json_parse_failed", error=str(e))
-            return original_blocks
-
-        if not returned_blocks:
-            logger.warning("outline_response_empty_blocks")
-            return original_blocks
-
-        original_map = {b.id: b for b in original_blocks}
         result: List[TemplateBlock] = []
+        i = 0
+        while i < len(blocks):
+            block = blocks[i]
+            if block.is_list:
+                children = self._get_child_blocks(blocks, i)
+                items = await self._generate_list_items(block, repo_id, parent_context)
 
-        for ret in returned_blocks:
-            # 兼容 id 和 template_block_id：若原始 block 是 isList=true，统一创建展开项
-            ref_id = ret.get("id") or ret.get("template_block_id")
-            if ref_id:
-                original = original_map.get(ref_id)
-                if original:
-                    result.append(self._create_item_block(original, ret))
-                else:
-                    logger.warning("block_reference_unknown", id=ref_id)
-                    result.append(self._create_new_block_from_response(ret))
+                for item_text in items:
+                    item_block = self._create_item_block(block, item_text)
+                    result.append(item_block)
+
+                    expanded_children = await self._expand_blocks(
+                        children, repo_id, parent_context=item_text
+                    )
+                    result.extend(expanded_children)
+
+                i += 1 + len(children)
             else:
-                logger.warning("block_without_id_or_template_block_id")
-                result.append(self._create_new_block_from_response(ret))
-
-        for i, block in enumerate(result):
-            block.order_no = i
-            block.id = str(i)
+                result.append(copy.deepcopy(block))
+                i += 1
 
         return result
+
+    @staticmethod
+    def _get_child_blocks(
+        blocks: List[TemplateBlock], parent_index: int
+    ) -> List[TemplateBlock]:
+        """识别父内容块的子内容块.
+
+        子内容块定义为：在扁平列表中，位于父块之后，且 heading_level
+        大于父块 heading_level 的连续内容块，直到遇到 heading_level
+        小于或等于父块的块为止。
+
+        非标题块的 heading_level 可能为 null/None，统一视为 99。
+        """
+        parent = blocks[parent_index]
+        parent_level = parent.heading_level or 99
+        children: List[TemplateBlock] = []
+        for j in range(parent_index + 1, len(blocks)):
+            child_level = blocks[j].heading_level or 99
+            if child_level <= parent_level:
+                break
+            children.append(blocks[j])
+        return children
+
+    async def _generate_list_items(
+        self,
+        block: TemplateBlock,
+        repo_id: str,
+        parent_context: str = "",
+    ) -> List[str]:
+        """为模板列表块生成列表项名称.
+
+        优先使用 block.list_tool 调用静态工具获取全量列表；
+        否则调用 LLM 生成字符串数组。
+        """
+        if block.list_tool:
+            logger.info(
+                "outline_list_using_static_tool",
+                list_tool=block.list_tool,
+                repo_id=repo_id,
+            )
+            try:
+                list_items = await self.static_list_provider.get_list_items(
+                    block.list_tool, repo_id
+                )
+                return [item.name for item in list_items]
+            except Exception as e:
+                logger.warning(
+                    "static_list_tool_failed_falling_back_to_llm",
+                    list_tool=block.list_tool,
+                    error=str(e),
+                )
+
+        raw_content = await self._call_llm_for_list_items(
+            block.prompt or "",
+            block.example,
+            repo_id,
+            parent_context,
+        )
+        items = self._parse_string_list(raw_content)
+
+        if not items:
+            logger.warning(
+                "llm_list_generation_empty",
+                prompt=block.prompt,
+                parent_context=parent_context,
+            )
+            items = [block.prompt or "未命名项"]
+
+        return items
+
+    async def _call_llm_for_list_items(
+        self,
+        prompt: str,
+        example: Optional[str],
+        repo_id: str,
+        parent_context: str = "",
+    ) -> str:
+        """调用 LLM 生成列表项字符串数组."""
+        task_parts: List[str] = [f"仓库ID: {repo_id}"]
+        if parent_context:
+            task_parts.append(f"当前上下文：{parent_context}")
+        task_parts.append(f"任务：{prompt}")
+        if example:
+            task_parts.extend(["", "## 参考示例", example])
+
+        return await self.agent.generate_with_tools(
+            system_prompt=LIST_GENERATION_SYSTEM_PROMPT,
+            task_message="\n".join(task_parts),
+            repo_id=repo_id,
+            task_name="list_generation",
+            max_iterations=10,
+        )
 
     def _create_item_block(
         self,
         original: TemplateBlock,
-        returned: Dict[str, Any],
+        content_text: str,
     ) -> TemplateBlock:
-        """基于原始 block 创建列表展开项."""
+        """基于原始模板块创建列表展开项."""
         new_block = copy.deepcopy(original)
 
         new_block.id = ""
-        new_block.parent_block_id = original.parent_block_id
+        new_block.content_text = content_text
+        new_block.attrs.pop("isList", None)
+        new_block.attrs.pop("prompt", None)
+        new_block.attrs.pop("example", None)
 
-        if "content_text" in returned:
-            new_block.content_text = returned["content_text"]
-
-        # heading_level 强制保持与原始 block 一致
-        new_block.heading_level = original.heading_level
-
-        # 设置 attrs
         if new_block.block_type == "heading":
             new_block.attrs["templateType"] = "static"
-            new_block.attrs.pop("prompt", None)
-            new_block.attrs.pop("isList", None)
-            new_block.attrs.pop("example", None)
 
         new_block.attrs["template_block_id"] = original.id
 
         return new_block
 
-    def _create_new_block_from_response(
-        self,
-        returned: Dict[str, Any],
-    ) -> TemplateBlock:
-        """从 LLM 返回创建新 block（无对应原始 block 时）."""
-        heading_level = returned.get("heading_level", 99)
-        block_type = "heading" if (heading_level and heading_level > 0 and heading_level != 99) else "paragraph"
+    def _parse_string_list(self, raw_content: str) -> List[str]:
+        """从 LLM 响应中解析字符串数组.
 
-        content_text = returned.get("content_text", "")
-        attrs: Dict[str, Any] = {}
-        if "template_block_id" in returned:
-            attrs["template_block_id"] = returned["template_block_id"]
-        attrs["templateType"] = "static" if content_text else "template"
-
-        return TemplateBlock(
-            id=f"outline_new_{uuid.uuid4().hex[:8]}",
-            parent_block_id=None,
-            block_type=block_type,
-            heading_level=heading_level,
-            order_no=0,
-            content_text=content_text,
-            attrs=attrs,
-        )
-
-    def _extract_json_from_response(self, raw_content: str) -> Optional[str]:
-        """从响应中提取 JSON.
-
-        支持两种 LLM 输出格式：
-        - 对象格式：{"blocks": [...]}
-        - 数组格式：[{...}, ...]
+        支持以下格式：
+        - JSON 数组：["项1", "项2"]
+        - 含 items/blocks/list 键的 JSON 对象
+        - Markdown 列表行（降级解析）
         """
-        raw_content = raw_content.strip()
+        content = raw_content.strip()
 
-        def _is_valid_blocks(candidate: str) -> bool:
-            """判断是否包含有效的 block 数据."""
-            return '"blocks"' in candidate or '"id"' in candidate or '"heading_level"' in candidate
+        # 提取 ```json 代码块
+        if "```json" in content:
+            start = content.find("```json") + 7
+            end = content.find("```", start)
+            if end > start:
+                content = content[start:end].strip()
+        elif "```" in content:
+            start = content.find("```") + 3
+            end = content.find("```", start)
+            if end > start:
+                content = content[start:end].strip()
 
-        # 优先找 ```json 块
-        if "```json" in raw_content:
-            start = 0
-            while True:
-                start = raw_content.find("```json", start)
-                if start == -1:
-                    break
-                start += 7
-                end = raw_content.find("```", start)
-                if end > start:
-                    candidate = raw_content[start:end].strip()
-                    if _is_valid_blocks(candidate):
-                        return candidate
-                start = end + 3 if end != -1 else len(raw_content)
+        # 尝试解析 JSON 数组或对象
+        try:
+            data = json.loads(content)
+            if isinstance(data, list):
+                return [
+                    str(item)
+                    for item in data
+                    if item is not None and str(item).strip()
+                ]
+            elif isinstance(data, dict):
+                for key in ("items", "blocks", "list"):
+                    if key in data and isinstance(data[key], list):
+                        return [
+                            str(item)
+                            for item in data[key]
+                            if item is not None and str(item).strip()
+                        ]
+        except json.JSONDecodeError:
+            pass
 
-        # 找 ``` 块
-        if "```" in raw_content:
-            last_candidate = None
-            start = 0
-            while True:
-                start = raw_content.find("```", start)
-                if start == -1:
-                    break
-                start += 3
-                end = raw_content.find("```", start)
-                if end > start:
-                    candidate = raw_content[start:end].strip()
-                    if _is_valid_blocks(candidate):
-                        last_candidate = candidate
-                start = end + 3 if end != -1 else len(raw_content)
-            if last_candidate:
-                return last_candidate
+        # 降级：按行解析 markdown 列表
+        items: List[str] = []
+        for line in content.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            cleaned = re.sub(r"^(\d+[\.、]\s*|[-*•]\s+)", "", line)
+            cleaned = cleaned.strip().strip('"').strip("'")
+            if cleaned and cleaned not in ("[", "]", "{", "}", "``"):
+                items.append(cleaned)
 
-        # 找 JSON 数组（以 [ 开头）
-        array_start = raw_content.find("[")
-        if array_start >= 0:
-            array_end = raw_content.rfind("]")
-            if array_end > array_start:
-                candidate = raw_content[array_start:array_end + 1]
-                if _is_valid_blocks(candidate):
-                    return candidate
-
-        # 找 JSON 对象（以 { 开头）
-        json_start = raw_content.find("{")
-        while json_start >= 0:
-            json_end = raw_content.rfind("}", json_start)
-            if json_end > json_start:
-                candidate = raw_content[json_start:json_end + 1]
-                if _is_valid_blocks(candidate):
-                    return candidate
-            json_start = raw_content.find("{", json_start + 1)
-
-        return None
+        return items

@@ -20,25 +20,31 @@ def setup_logging() -> None:
     log_dir = settings.log_path
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    # 配置标准库日志
-    logging.basicConfig(
-        format="%(message)s",
-        stream=sys.stdout,
-        level=getattr(logging, settings.log_level.upper()),
-    )
+    log_level = getattr(logging, settings.log_level.upper())
 
-    # 配置文件日志处理器
+    # 清除已有的 handlers（避免重复配置）
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+
+    # 配置文件日志处理器（记录所有配置的级别）
     file_handler = logging.FileHandler(
         log_dir / "doc_handle_agent.log",
         encoding="utf-8",
     )
-    file_handler.setLevel(getattr(logging, settings.log_level.upper()))
+    file_handler.setLevel(log_level)
 
     # JSON格式
     json_formatter = jsonlogger.JsonFormatter(
         "%(asctime)s %(name)s %(levelname)s %(message)s"
     )
     file_handler.setFormatter(json_formatter)
+
+    # 控制台处理器：debug 模式使用 log_level，否则只输出 WARNING+
+    console_level = log_level if settings.debug else logging.WARNING
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(console_level)
+    console_handler.setFormatter(logging.Formatter("%(message)s"))
 
     # 配置structlog
     structlog.configure(
@@ -60,9 +66,10 @@ def setup_logging() -> None:
         cache_logger_on_first_use=True,
     )
 
-    # 添加文件处理器到根日志器
-    root_logger = logging.getLogger()
+    # 配置根日志器
+    root_logger.setLevel(log_level)
     root_logger.addHandler(file_handler)
+    root_logger.addHandler(console_handler)
 
 
 def get_logger(name: str):

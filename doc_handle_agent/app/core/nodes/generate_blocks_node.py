@@ -54,26 +54,9 @@ class GenerateBlocksNode(WorkflowNode):
                     repo_id=state["repo_id"],
                 )
 
-            # 保存生成结果到state
-            for block_id, result_list in results.items():
-                state["generated_contents"][block_id] = result_list
-
-                if result_list:
-                    block = next((b for b in blocks if b.id == block_id), None)
-                    if block:
-                        result = result_list[0]
-                        block.content_text = result.text_content
-                        if result.source_node_ids:
-                            block.source_node_ids = result.source_node_ids
-                        if result.source_refs:
-                            block.source_refs = result.source_refs
-                        if result.imgs:
-                            block.attrs = {**block.attrs, "imageIds": result.imgs}
-
             # 构建文档blocks
-            doc_blocks = self._build_document_blocks(blocks)
+            doc_blocks = self._build_document_blocks(blocks, results)
             state["doc_blocks"] = doc_blocks
-            state["current_block_index"] = len(blocks)
 
             logger.info(
                 "generate_blocks_complete",
@@ -98,11 +81,20 @@ class GenerateBlocksNode(WorkflowNode):
     def _build_document_blocks(
         self,
         blocks: List[TemplateBlock],
+        results: List[DocumentBlock],
     ) -> List[dict]:
         """构建文档blocks.
 
-        将生成的内容整合到block结构中，字段对齐 workspace DocumentBlockPayload。
+        用生成结果更新block内容后，整合到block结构中，字段对齐 workspace DocumentBlockPayload。
         """
+        # 用生成结果更新block内容
+        for result in results:
+            if not result.block_id:
+                continue
+            block = next((b for b in blocks if b.id == result.block_id), None)
+            if block:
+                block.content_text = result.text_content
+
         doc_blocks: List[dict] = []
 
         for block in blocks:

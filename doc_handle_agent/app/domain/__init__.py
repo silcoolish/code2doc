@@ -4,7 +4,6 @@ from app.domain.content_generator import ContentGenerator
 from app.domain.content_generator_agent import ContentGeneratorAgent
 from app.domain.generation_strategies import (
     BatchedGenerationStrategy,
-    FilteredContextStrategy,
     FullContextStrategy,
     GenerationStrategy,
     StrategySelector,
@@ -26,7 +25,6 @@ __all__ = [
     # 策略
     "GenerationStrategy",
     "FullContextStrategy",
-    "FilteredContextStrategy",
     "BatchedGenerationStrategy",
     "StrategySelector",
     # 领域模型

@@ -144,6 +144,110 @@ class WorkspaceServiceAdapter:
         path = path.lstrip("/")
         return f"{base}/{path}"
 
+    async def get_block(self, document_id: str, block_id: str) -> Dict[str, Any]:
+        """获取单个文档条目.
+
+        Args:
+            document_id: 文档ID
+            block_id: 条目ID
+
+        Returns:
+            条目信息字典
+
+        Raises:
+            ValueError: 请求失败或条目不存在
+        """
+        url = self._build_url(f"/api/documents/{document_id}/blocks/{block_id}")
+
+        logger.info(
+            "get_block_request",
+            document_id=document_id,
+            block_id=block_id,
+            url=url,
+        )
+
+        try:
+            response = await self.http.get(url)
+
+            if not response.get("success"):
+                error_msg = response.get("message", "Unknown error")
+                logger.error(
+                    "get_block_failed",
+                    document_id=document_id,
+                    block_id=block_id,
+                    error=error_msg,
+                )
+                raise ValueError(f"Failed to get block: {error_msg}")
+
+            data = response.get("data", {})
+            logger.info(
+                "get_block_success",
+                document_id=document_id,
+                block_id=block_id,
+            )
+            return data
+
+        except Exception as e:
+            logger.error(
+                "get_block_error",
+                document_id=document_id,
+                block_id=block_id,
+                error_type=type(e).__name__,
+                error=str(e),
+                exc_info=True,
+            )
+            raise
+
+    async def get_document_blocks(self, document_id: str) -> List[Dict[str, Any]]:
+        """列取文档所有条目.
+
+        Args:
+            document_id: 文档ID
+
+        Returns:
+            条目信息字典列表
+
+        Raises:
+            ValueError: 请求失败
+        """
+        url = self._build_url(f"/api/documents/{document_id}/blocks")
+
+        logger.info(
+            "get_document_blocks_request",
+            document_id=document_id,
+            url=url,
+        )
+
+        try:
+            response = await self.http.get(url)
+
+            if not response.get("success"):
+                error_msg = response.get("message", "Unknown error")
+                logger.error(
+                    "get_document_blocks_failed",
+                    document_id=document_id,
+                    error=error_msg,
+                )
+                raise ValueError(f"Failed to get document blocks: {error_msg}")
+
+            data = response.get("data", [])
+            logger.info(
+                "get_document_blocks_success",
+                document_id=document_id,
+                block_count=len(data),
+            )
+            return data
+
+        except Exception as e:
+            logger.error(
+                "get_document_blocks_error",
+                document_id=document_id,
+                error_type=type(e).__name__,
+                error=str(e),
+                exc_info=True,
+            )
+            raise
+
     async def get_template_blocks(self, template_id: str) -> List[TemplateBlock]:
         """获取模板条目列表.
 

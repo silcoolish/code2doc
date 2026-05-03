@@ -29,7 +29,7 @@ class LLMClientFactory:
             base_url=base_url,
             temperature=0.7,
             max_retries=3,
-            timeout=120,
+            timeout=settings.llm_request_timeout,
         )
 
         logger.info(
