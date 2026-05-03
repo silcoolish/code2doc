@@ -74,8 +74,8 @@ class StoreBlockListNode(WorkflowNode):
 
             document_id = save_response.document_id
             state["document_id"] = document_id
-            state["status"] = GenerationStatus.COMPLETED.value
-            state["message"] = "文档生成完成"
+            state["status"] = GenerationStatus.BUILDING.value
+            state["message"] = "文档已保存，正在收尾..."
 
             logger.info(
                 "store_block_list_success",

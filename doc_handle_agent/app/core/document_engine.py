@@ -166,6 +166,11 @@ class DocumentEngine:
                 # 执行工作流
                 final_state = await document_generator.run(initial_state)
 
+                # 工作流正常结束后统一标记为完成（仅当未失败时）
+                if final_state.get("status") != GenerationStatus.FAILED.value:
+                    final_state["status"] = GenerationStatus.COMPLETED.value
+                    final_state["message"] = "文档生成完成"
+
                 # 保存最终状态
                 self._task_states[flow_id] = final_state
 
