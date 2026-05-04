@@ -20,6 +20,7 @@ from app.api.test import (
     module_detection as test_module_detection,
     structure_graph_build as test_structure_graph_build,
     semantic_analysis as test_semantic_analysis,
+    vector_db_store as test_vector_db_store,
 )
 from app.core.pipeline import get_orchestrator
 from app.mcp import router as mcp_router
@@ -222,6 +223,11 @@ def create_app() -> FastAPI:
     )
     app.include_router(
         test_flowchart_generation.router,
+        prefix="/api/v1/test",
+        tags=["test"],
+    )
+    app.include_router(
+        test_vector_db_store.router,
         prefix="/api/v1/test",
         tags=["test"],
     )

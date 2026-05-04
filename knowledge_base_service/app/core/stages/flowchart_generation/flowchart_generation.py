@@ -690,7 +690,7 @@ class FlowchartGenerationStage(PipelineStageHandler):
             path_dirs = parts[:-1]
             file_name = parts[-1]
             reconstructed = "/".join(path_dirs)
-            path_slug = reconstructed.replace("/", "_").replace("\\", "_")
+            path_slug = self._generate_path_slug(reconstructed)
             base_name = file_name.replace(".flowchart.svg", "").replace(".flowchart.png", "")
             return f"{path_slug}_{base_name}"
         elif len(parts) == 1:
@@ -731,11 +731,9 @@ class FlowchartGenerationStage(PipelineStageHandler):
                 path_dirs = parts[:-1]  # 所有目录部分
                 file_name = parts[-1]   # 文件名
 
-                # 将目录路径转换为slug（用_替换路径分隔符）
+                # 将目录路径转换为slug，与_generate_path_slug保持完全一致
                 reconstructed = "/".join(path_dirs)
-                # 如果在Windows上，path_dirs中的元素可能包含反斜杠（来自压缩包路径）
-                # 统一替换为下划线
-                path_slug = reconstructed.replace("/", "_").replace("\\", "_")
+                path_slug = self._generate_path_slug(reconstructed)
 
                 # 移除.flowchart.{ext}后缀
                 base_name = file_name.replace(f".flowchart{extension}", "")
@@ -867,6 +865,6 @@ class FlowchartGenerationStage(PipelineStageHandler):
 
         # 统一替换Windows和Linux路径分隔符为下划线
         slug = path_with_underscore_ext.replace("/", "_").replace("\\", "_")
-        # 保留字母、数字、下划线
-        slug = "".join(c for c in slug if c.isalnum() or c == "_")
+        # 保留字母、数字、下划线、连字符（连字符是合法的文件名字符）
+        slug = "".join(c for c in slug if c.isalnum() or c in "_-")
         return slug
