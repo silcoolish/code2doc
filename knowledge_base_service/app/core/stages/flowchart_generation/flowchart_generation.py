@@ -12,6 +12,7 @@
 import asyncio
 import logging
 import os
+import shutil
 import zipfile
 from collections import defaultdict
 from io import BytesIO
@@ -143,12 +144,14 @@ class FlowchartGenerationStage(PipelineStageHandler):
                 for method in methods:
                     existing_image = method.get("image", "")
                     if existing_image:
-                        # 检查是否存在已生成的图片（多种可能的命名格式，包括svg和png）
+                        # 检查是否存在已生成的图片（多种可能的命名格式，包括svg、png和drawio）
                         possible_paths = [
                             image_dir / f"{existing_image}.svg",
                             image_dir / f"{existing_image}.png",
+                            image_dir / f"{existing_image}.drawio",
                             image_dir / f"{path_slug}_{method.get('name', '')}__L{method.get('start_line', 0)}.svg",
                             image_dir / f"{path_slug}_{method.get('name', '')}__L{method.get('start_line', 0)}.png",
+                            image_dir / f"{path_slug}_{method.get('name', '')}__L{method.get('start_line', 0)}.drawio",
                         ]
                         if any(p.exists() for p in possible_paths):
                             skipped_count += 1
@@ -286,12 +289,15 @@ class FlowchartGenerationStage(PipelineStageHandler):
 
         try:
             # 构建请求项列表，并跟踪每个文件的方法数量
+            repo_base_path = Path(context.repo_path)
             file_items = []
             for file_path, file_data in files_to_process.items():
                 file_name = Path(file_path).name
+                abs_path = str(repo_base_path / file_path)
                 file_items.append({
                     "file_name": file_name,
-                    "source_path": file_path,
+                    "source_path": abs_path,
+                    "_rel_path": file_path,
                     "code": file_data["content"],
                     "methods": file_data["methods"],
                 })
@@ -319,9 +325,9 @@ class FlowchartGenerationStage(PipelineStageHandler):
                     for item in batch_items
                 ]
 
-                # 构建当前批次的文件映射
+                # 构建当前批次的文件映射（使用相对路径作为键，保持与Neo4j一致）
                 batch_files = {
-                    item["source_path"]: {
+                    item["_rel_path"]: {
                         "content": item["code"],
                         "methods": item["methods"],
                     }
@@ -330,7 +336,7 @@ class FlowchartGenerationStage(PipelineStageHandler):
 
                 # 调用批量生成接口
                 batch_result = await self._process_single_batch(
-                    api_items, batch_files, image_dir, repo_id, batch_index, total_batches
+                    api_items, batch_files, image_dir, repo_id, batch_index, total_batches, context.repo_path
                 )
 
                 generated_count += batch_result.get("generated_count", 0)
@@ -400,6 +406,7 @@ class FlowchartGenerationStage(PipelineStageHandler):
         repo_id: str,
         batch_index: int,
         total_batches: int,
+        repo_path: str = "",
     ) -> Dict[str, int]:
         """处理单批流程图生成.
 
@@ -410,6 +417,7 @@ class FlowchartGenerationStage(PipelineStageHandler):
             repo_id: 仓库ID
             batch_index: 当前批次索引
             total_batches: 总批次数
+            repo_path: 仓库绝对路径，用于将API返回的绝对路径转回相对路径
 
         Returns:
             统计结果 {generated_count, failed_count}
@@ -432,54 +440,104 @@ class FlowchartGenerationStage(PipelineStageHandler):
 
             # 下载并解压压缩包
             if archive_url:
-                actual_files = await self._download_and_extract_archive(
+                archive_result = await self._download_and_extract_archive(
                     archive_url, image_dir, batch_files, repo_id
                 )
-                if actual_files > 0:
+                if archive_result["total"] > 0:
+                    # 将API返回的绝对路径 source_path 转回相对路径
+                    results = service_result.get("results", [])
+                    if repo_path:
+                        repo_path_obj = Path(repo_path)
+                        for result in results:
+                            source_path = result.get("source_path", "")
+                            try:
+                                sp = Path(source_path)
+                                if sp.is_absolute():
+                                    rel = sp.relative_to(repo_path_obj)
+                                    result["source_path"] = str(rel).replace("\\", "/")
+                            except ValueError:
+                                pass
+                            except Exception:
+                                pass
+
                     # 根据结果更新数据库
                     result_updates = self._parse_batch_results(
-                        service_result.get("results", []),
+                        results,
                         batch_files,
                     )
 
-                    # 构建基础URL
-                    base_url = self.settings.public_base_url.rstrip('/')
-                    static_url = self.settings.static_files_url.strip('/')
+                    # 扫描所有实际生成的图片文件（drawio文件不参与数据库image属性更新）
+                    all_images = {f.stem: f for f in list(image_dir.glob("*.svg")) + list(image_dir.glob("*.png"))}
 
-                    # 验证文件实际存在后再更新数据库
+                    # 构建 method_id -> func_name 映射（用于模糊匹配）
+                    method_id_to_name = {}
+                    for file_path, file_data in batch_files.items():
+                        for method in file_data["methods"]:
+                            method_id_to_name[method.get("id", "")] = method.get("name", "")
+
+                    # 已处理的method和图片
+                    processed_methods = set()
+                    used_images = set()
+
+                    # 1. 先尝试精确匹配（_parse_batch_results 猜测的文件名）
                     for method_id, image_id in result_updates.items():
-                        # 优先检查svg，然后检查png
-                        svg_path = image_dir / f"{image_id}.svg"
-                        png_path = image_dir / f"{image_id}.png"
+                        matched_path = None
+                        if image_id in all_images and image_id not in used_images:
+                            matched_path = all_images[image_id]
+                        elif f"{image_id}" in all_images and f"{image_id}" not in used_images:
+                            matched_path = all_images[f"{image_id}"]
 
-                        if svg_path.exists():
+                        if matched_path:
                             try:
-                                # 构建完整URL: {base_url}/{static_url}/{repo_id}/image/{image_id}.svg
-                                image_url = f"{base_url}/{static_url}/{repo_id}/image/{image_id}.svg"
-                                await self.graph_db.update_method_image(method_id, image_url)
+                                image_id = matched_path.name
+                                await self.graph_db.update_method_image(method_id, image_id)
                                 generated_count += 1
+                                processed_methods.add(method_id)
+                                used_images.add(matched_path.stem)
                             except Exception as e:
                                 logger.error(f"Failed to update method {method_id} image: {e}")
                                 failed_count += 1
-                        elif png_path.exists():
-                            try:
-                                # 构建完整URL: {base_url}/{static_url}/{repo_id}/image/{image_id}.png
-                                image_url = f"{base_url}/{static_url}/{repo_id}/image/{image_id}.png"
-                                await self.graph_db.update_method_image(method_id, image_url)
-                                generated_count += 1
-                            except Exception as e:
-                                logger.error(f"Failed to update method {method_id} image: {e}")
-                                failed_count += 1
+                                processed_methods.add(method_id)
                         else:
-                            logger.warning(f"Image file not found for method {method_id}: {svg_path} or {png_path}")
+                            # 精确匹配失败，记录日志，后续用模糊匹配
+                            logger.debug(f"Exact match failed for method {method_id}, image_id={image_id}")
+
+                    # 2. 对未匹配的方法，用 func_name 在剩余未使用的图片中模糊匹配
+                    for method_id, func_name in method_id_to_name.items():
+                        if method_id in processed_methods or not func_name:
+                            continue
+
+                        matched = False
+                        for stem, img_path in all_images.items():
+                            if stem in used_images:
+                                continue
+                            if func_name in stem:
+                                try:
+                                    image_id = img_path.name
+                                    await self.graph_db.update_method_image(method_id, image_id)
+                                    generated_count += 1
+                                    processed_methods.add(method_id)
+                                    used_images.add(stem)
+                                    matched = True
+                                    logger.debug(f"Fuzzy matched method {method_id} ({func_name}) to {img_path.name}")
+                                    break
+                                except Exception as e:
+                                    logger.error(f"Failed to update method {method_id} image: {e}")
+                                    failed_count += 1
+                                    processed_methods.add(method_id)
+                                    matched = True
+                                    break
+
+                        if not matched:
+                            logger.warning(f"Image file not found for method {method_id} (func={func_name})")
                             failed_count += 1
 
-                    # 记录差异
-                    if generated_count != actual_files:
-                        logger.warning(f"Batch {batch_index} mismatch: {actual_files} files saved, but only {generated_count} database records updated")
+                    # 记录差异（只比较图片文件数与数据库更新数）
+                    if generated_count != archive_result["image_count"]:
+                        logger.warning(f"Batch {batch_index} mismatch: {archive_result['image_count']} image files saved, but only {generated_count} database records updated")
                 else:
                     # 下载失败或没有文件
-                    logger.error(f"Batch {batch_index}: Download returned {actual_files} files, marking all as failed")
+                    logger.error(f"Batch {batch_index}: Download returned {archive_result['total']} files, marking all as failed")
                     failed_count = sum(len(f["methods"]) for f in batch_files.values())
             else:
                 logger.error(f"Batch {batch_index}: No archive_url in response")
@@ -509,9 +567,10 @@ class FlowchartGenerationStage(PipelineStageHandler):
         url = f"{service_url}/api/flowchart/generate/batch"
 
         payload = {
-            "output_format": "both",
+            "output_format": "svg",
             "show_legend": False,
             "llvm_path": None,
+            "include_drawio_artifacts": True,
             "items": items,
         }
 
@@ -545,7 +604,7 @@ class FlowchartGenerationStage(PipelineStageHandler):
         image_dir: Path,
         files_to_process: Dict[str, Dict],
         repo_id: str,
-    ) -> int:
+    ) -> Dict[str, int]:
         """下载并解压流程图压缩包.
 
         Args:
@@ -555,7 +614,7 @@ class FlowchartGenerationStage(PipelineStageHandler):
             repo_id: 仓库ID
 
         Returns:
-            成功保存的文件数量
+            {"total": 总文件数, "image_count": 图片文件数, "drawio_count": drawio文件数}
         """
         service_url = self.settings.flowchart_service_url
         timeout = self.settings.flowchart_service_timeout * 5  # 下载可能需要更长时间
@@ -587,34 +646,34 @@ class FlowchartGenerationStage(PipelineStageHandler):
                             logger.info(f"Extracted {len(zf.namelist())} files from archive")
 
                         # 移动并重命名图片文件
-                        moved_count = self._organize_extracted_images(temp_extract_dir, image_dir)
-                        logger.info(f"Organized {moved_count} images to {image_dir}")
+                        result = self._organize_extracted_images(temp_extract_dir, image_dir)
+                        logger.info(f"Organized {result['total']} files ({result['image_count']} images, {result['drawio_count']} drawio) to {image_dir}")
 
                         # 清理临时目录
-                        import shutil
                         shutil.rmtree(temp_extract_dir, ignore_errors=True)
 
-                        return moved_count
+                        return result
                     else:
                         error_text = await response.text()
                         logger.error(f"Failed to download archive from {full_url}: {response.status} - {error_text}")
-                        return 0
+                        return {"total": 0, "image_count": 0, "drawio_count": 0}
 
         except aiohttp.ClientError as e:
             logger.error(f"HTTP error downloading archive from {full_url}: {e}")
-            return 0
+            return {"total": 0, "image_count": 0, "drawio_count": 0}
         except zipfile.BadZipFile as e:
             logger.error(f"Invalid zip file from {full_url}: {e}")
-            return 0
+            return {"total": 0, "image_count": 0, "drawio_count": 0}
         except Exception as e:
             logger.error(f"Unexpected error downloading archive from {full_url}: {e}")
-            return 0
+            return {"total": 0, "image_count": 0, "drawio_count": 0}
 
-    def _organize_extracted_images(self, temp_dir: Path, image_dir: Path) -> int:
+    def _organize_extracted_images(self, temp_dir: Path, image_dir: Path) -> Dict[str, int]:
         """整理解压后的图片文件.
 
         将解压的子目录中的图片移动到主目录，并按function_id重命名.
         优先选择SVG格式，如果没有SVG则选择PNG格式.
+        drawio文件与SVG一一对应，独立保存，不参与图片去重.
         支持多层目录结构，如：Libraries/STM32F10x_StdPeriph_Driver/src/stm32f10x_tim_c/TIM_DeInit__L1.flowchart.svg
 
         Args:
@@ -622,9 +681,10 @@ class FlowchartGenerationStage(PipelineStageHandler):
             image_dir: 最终图片目录
 
         Returns:
-            移动的文件数量
+            {"total": 总文件数, "image_count": 图片文件数, "drawio_count": drawio文件数}
         """
-        moved_count = 0
+        image_moved_count = 0
+        drawio_moved_count = 0
         skipped_count = 0
         error_count = 0
 
@@ -632,7 +692,8 @@ class FlowchartGenerationStage(PipelineStageHandler):
         all_files = list(temp_dir.rglob("*"))
         svg_files = list(temp_dir.rglob("*.svg"))
         png_files = list(temp_dir.rglob("*.png"))
-        logger.info(f"Archive contains {len(all_files)} items, {len(svg_files)} svg files, {len(png_files)} png files")
+        drawio_files = list(temp_dir.rglob("*.drawio"))
+        logger.info(f"Archive contains {len(all_files)} items, {len(svg_files)} svg files, {len(png_files)} png files, {len(drawio_files)} drawio files")
 
         # 优先使用SVG文件，收集每个方法对应的图片（避免重复）
         processed_methods = set()
@@ -644,7 +705,7 @@ class FlowchartGenerationStage(PipelineStageHandler):
 
             result = self._process_image_file(image_file, temp_dir, image_dir, ".svg", processed_methods)
             if result == "moved":
-                moved_count += 1
+                image_moved_count += 1
             elif result == "skipped":
                 skipped_count += 1
             else:
@@ -664,14 +725,26 @@ class FlowchartGenerationStage(PipelineStageHandler):
 
             result = self._process_image_file(image_file, temp_dir, image_dir, ".png", processed_methods)
             if result == "moved":
-                moved_count += 1
+                image_moved_count += 1
             elif result == "skipped":
                 skipped_count += 1
             else:
                 error_count += 1
 
-        logger.info(f"Image organization complete: {moved_count} copied, {skipped_count} skipped, {error_count} errors")
-        return moved_count
+        # 处理drawio文件（与SVG一一对应，独立保存）
+        drawio_processed = set()
+        for drawio_file in drawio_files:
+            result = self._process_image_file(drawio_file, temp_dir, image_dir, ".drawio", drawio_processed)
+            if result == "moved":
+                drawio_moved_count += 1
+            elif result == "skipped":
+                skipped_count += 1
+            else:
+                error_count += 1
+
+        total_moved = image_moved_count + drawio_moved_count
+        logger.info(f"Image organization complete: {total_moved} copied ({image_moved_count} images, {drawio_moved_count} drawio), {skipped_count} skipped, {error_count} errors")
+        return {"total": total_moved, "image_count": image_moved_count, "drawio_count": drawio_moved_count}
 
     def _get_method_key_from_image_path(self, image_file: Path, temp_dir: Path) -> str:
         """从图片路径提取方法标识符（用于去重）.
@@ -686,16 +759,16 @@ class FlowchartGenerationStage(PipelineStageHandler):
         relative_path = image_file.relative_to(temp_dir)
         parts = relative_path.parts
 
+        base_name = parts[-1] if parts else ""
+        for suffix in (".flowchart.svg", ".flowchart.png", ".flowchart.drawio"):
+            base_name = base_name.removesuffix(suffix)
+
         if len(parts) >= 2:
             path_dirs = parts[:-1]
-            file_name = parts[-1]
             reconstructed = "/".join(path_dirs)
             path_slug = self._generate_path_slug(reconstructed)
-            base_name = file_name.replace(".flowchart.svg", "").replace(".flowchart.png", "")
             return f"{path_slug}_{base_name}"
         elif len(parts) == 1:
-            file_name = parts[0]
-            base_name = file_name.replace(".flowchart.svg", "").replace(".flowchart.png", "")
             return base_name
         return ""
 
@@ -713,7 +786,7 @@ class FlowchartGenerationStage(PipelineStageHandler):
             image_file: 图片文件路径
             temp_dir: 临时解压目录
             image_dir: 最终图片目录
-            extension: 文件扩展名（.svg 或 .png）
+            extension: 文件扩展名（.svg, .png 或 .drawio）
             processed_methods: 已处理方法标识集合
 
         Returns:
@@ -735,15 +808,27 @@ class FlowchartGenerationStage(PipelineStageHandler):
                 reconstructed = "/".join(path_dirs)
                 path_slug = self._generate_path_slug(reconstructed)
 
-                # 移除.flowchart.{ext}后缀
-                base_name = file_name.replace(f".flowchart{extension}", "")
+                # 安全移除.flowchart.{ext}后缀；若不存在则仅移除{ext}
+                suffix = f".flowchart{extension}"
+                if file_name.endswith(suffix):
+                    base_name = file_name[:-len(suffix)]
+                elif file_name.endswith(extension):
+                    base_name = file_name[:-len(extension)]
+                else:
+                    base_name = file_name
 
                 # 生成新的文件名：{path_slug}_{base_name}.{ext}
                 new_name = f"{path_slug}_{base_name}{extension}"
             elif len(parts) == 1:
                 # 格式：{file_name}.flowchart.{ext}（在根目录）
                 file_name = parts[0]
-                base_name = file_name.replace(f".flowchart{extension}", "")
+                suffix = f".flowchart{extension}"
+                if file_name.endswith(suffix):
+                    base_name = file_name[:-len(suffix)]
+                elif file_name.endswith(extension):
+                    base_name = file_name[:-len(extension)]
+                else:
+                    base_name = file_name
                 new_name = f"{base_name}{extension}"
             else:
                 logger.warning(f"Unexpected path structure: {relative_path}")
@@ -752,7 +837,6 @@ class FlowchartGenerationStage(PipelineStageHandler):
             dest_path = image_dir / new_name
 
             # 复制文件
-            import shutil
             shutil.copy2(image_file, dest_path)
 
             # 记录已处理方法

@@ -7,7 +7,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api.routes import generation, progress
+from app.api.routes import generation, progress, settings
 from app.config import get_settings
 from app.utils.logger import get_logger, setup_logging, bind_log_context
 
@@ -37,10 +37,10 @@ def create_app() -> FastAPI:
     Returns:
         FastAPI应用实例
     """
-    settings = get_settings()
+    app_settings = get_settings()
 
     app = FastAPI(
-        title=settings.app_name,
+        title=app_settings.app_name,
         description="文档处理Agent服务 - 基于LangGraph的智能文档生成",
         version="1.0.0",
         lifespan=lifespan,
@@ -95,17 +95,21 @@ def create_app() -> FastAPI:
         progress.router,
         prefix="/api/v1",
     )
+    app.include_router(
+        settings.router,
+        prefix="/api/v1",
+    )
 
     @app.get("/health")
     async def health_check():
         """健康检查端点."""
-        return {"status": "healthy", "service": settings.app_name}
+        return {"status": "healthy", "service": app_settings.app_name}
 
     @app.get("/")
     async def root():
         """根路径."""
         return {
-            "service": settings.app_name,
+            "service": app_settings.app_name,
             "version": "1.0.0",
             "docs": "/docs",
         }

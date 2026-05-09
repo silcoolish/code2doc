@@ -10,14 +10,14 @@
 | Directory | Directory | path | 文件系统目录 |
 | File | File | path, code, summary, suffix, fileType | 文件节点，code 为完整文件内容 |
 | Class | Class | filePath, startLine, endLine, code, summary, docstring, realType, language | 类/结构体/接口/枚举 |
-| Method | Method | filePath, startLine, endLine, code, summary, docstring, language, classId, image | 方法/函数，image 为流程图 URL |
+| Method | Method | filePath, startLine, endLine, code, summary, docstring, language, classId, image | 方法/函数，image 为流程图图片ID |
 | Module | Module | summary, detail, keywords, confidence | 功能模块（语义抽象），detail 为详细设计说明 |
 | Workflow | Workflow | summary, detail, keywords, confidence, moduleId | 业务流程（语义抽象），detail 为详细设计说明 |
 
 **重点提示**：
 - File 节点的 `code` 是完整文件内容；Class/Method 的 `code` 是源码片段
 - Module/Workflow 有 `detail` 字段（详细设计说明），生成模块/流程文档时应优先取此字段，而非仅用 `summary`
-- Method 的 `image` 字段存储流程图的可访问 URL
+- Method 的 `image` 字段存储流程图的图片ID（文件名），可通过 `/images/{repo_id}/{image_id}` 下载
 
 ## 关系类型
 
@@ -86,8 +86,8 @@
 **8. 分析模块间依赖关系**
 - `get_node_dependencies(node_id=..., depth=1/2)` → 返回 source/target/relationships/distance
 
-**9. 获取流程图/架构图 URL**
-- `batch_get_image_urls(node_ids=[...])` → 返回图片可访问 URL
+**9. 获取流程图/架构图图片ID**
+- `batch_get_image_ids(node_ids=[...])` → 返回图片ID（如 `xxx.svg`），可通过 `/images/{repo_id}/{image_id}` 下载
 
 **重要提示**：
 - 优先使用 `returns` 参数裁剪字段，显著减少 token 消耗

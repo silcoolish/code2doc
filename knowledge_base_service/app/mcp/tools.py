@@ -7,7 +7,6 @@ import os
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
-from app.config import get_settings
 from app.infrastructure.db import GraphDatabaseClient, VectorDatabaseClient
 from app.domain.llm import get_llm_service
 
@@ -538,32 +537,29 @@ class KnowledgeBaseTools:
             return json.dumps({"repo_id": repo_id, "error": str(e), "total": 0, "nodes": []}, indent=2, ensure_ascii=False)
 
     # ------------------------------------------------------------------ #
-    # 图片 URL
+    # 图片 ID
     # ------------------------------------------------------------------ #
 
-    async def batch_get_image_urls(
+    async def batch_get_image_ids(
         self,
         repo_id: str,
         node_ids: List[str],
     ) -> str:
-        """批量获取节点对应图片的 URL.
+        """批量获取节点对应图片的 ID.
 
         适用于：文档中需要插入流程图、架构图、方法调用图等图片的场景。
-        传入节点ID（通常是 Method 或 Workflow 节点），返回图片的访问 URL。
+        传入节点ID（通常是 Method 或 Workflow 节点），返回图片的文件 ID。
+        使用图片 ID 可通过 /images/{repo_id}/{image_id} 接口下载图片。
 
         Args:
             repo_id: 仓库ID
             node_ids: 节点 ID 列表
 
         Returns:
-            JSON 字符串，包含每个节点对应的图片 URL 信息
+            JSON 字符串，包含每个节点对应的图片 ID 信息
         """
         if not node_ids:
             return json.dumps({"repo_id": repo_id, "success": False, "error": "No node IDs provided", "images": []}, indent=2, ensure_ascii=False)
-
-        settings = get_settings()
-        static_url = settings.static_files_url.strip("/")
-        base_url = settings.public_base_url.rstrip("/")
 
         image_results = []
         for node_id in node_ids:
@@ -574,28 +570,23 @@ class KnowledgeBaseTools:
                     continue
 
                 node = node_info.get("node", {})
-                image_url = node.get("image", "")
+                image_id = node.get("image", "")
                 node_name = node.get("name", "")
                 node_type = node.get("type", "")
 
-                if not image_url:
+                if not image_id:
                     image_results.append({"node_id": node_id, "node_name": node_name, "node_type": node_type, "success": False, "error": "No image available"})
                     continue
-
-                if image_url.startswith("http"):
-                    final_url = image_url
-                else:
-                    final_url = f"{base_url}/{static_url}/{repo_id}/image/{image_url}.svg"
 
                 image_results.append({
                     "node_id": node_id,
                     "node_name": node_name,
                     "node_type": node_type,
                     "success": True,
-                    "url": final_url,
+                    "image_id": image_id,
                 })
             except Exception as e:
-                logger.error(f"Failed to get image URL for node {node_id}: {e}")
+                logger.error(f"Failed to get image ID for node {node_id}: {e}")
                 image_results.append({"node_id": node_id, "success": False, "error": str(e)})
 
         success_count = sum(1 for img in image_results if img.get("success"))

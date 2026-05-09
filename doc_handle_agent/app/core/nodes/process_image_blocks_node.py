@@ -1,23 +1,35 @@
 """处理图片块节点.
 
 在内容生成完成后，遍历文档块中的图片类型块，
-调用 workspace 资源接口创建 external_url 记录，
+下载图片文件并调用 workspace 上传资源文件接口，
 将图片块转换为 workspace 期望的标准格式。
+同时检查并上传同名的 drawio 资源文件。
 """
 
+from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
+import httpx
+
+from app.config import get_settings
 from app.core.nodes.base import WorkflowNode
 from app.core.state import AgentState, GenerationStatus
 from app.infrastructure.workspace import (
-    SaveResourceRequest,
-    SaveResourceResponse,
+    UploadResourceResponse,
     WorkspaceServiceAdapter,
 )
 from app.utils.logger import get_logger
 from app.utils.timing import log_timing
 
 logger = get_logger(__name__)
+
+# 最大允许下载/上传的文件大小（50MB）
+MAX_FILE_SIZE = 50 * 1024 * 1024
+
+# HTTP 下载重试配置
+DOWNLOAD_MAX_RETRIES = 3
+DOWNLOAD_RETRY_DELAY = 1.0
 
 
 class ProcessImageBlocksNode(WorkflowNode):
@@ -26,8 +38,9 @@ class ProcessImageBlocksNode(WorkflowNode):
     负责：
     1. 识别文档块中的图片类型块
     2. 提取图片 URL 和 caption
-    3. 调用 workspace API 创建 external_url 资源记录
-    4. 更新图片块为标准格式（blockType="image", attrs.assetId 等）
+    3. 下载图片文件并调用 workspace API 上传资源文件
+    4. 检查并上传同名的 drawio 资源文件
+    5. 更新图片块为标准格式（blockType="image", attrs.assetId 等）
     """
 
     def __init__(
@@ -40,6 +53,8 @@ class ProcessImageBlocksNode(WorkflowNode):
             workspace_adapter: workspace 服务适配器，默认创建新实例
         """
         self.workspace_adapter = workspace_adapter or WorkspaceServiceAdapter()
+        settings = get_settings()
+        self.kb_base_url = self._resolve_kb_base_url(settings.mcp_server_url)
 
     @property
     def name(self) -> str:
@@ -70,6 +85,7 @@ class ProcessImageBlocksNode(WorkflowNode):
             state["message"] = "图片资源处理失败: 文档尚未创建"
             return state
 
+        repo_id = state.get("repo_id", "")
         try:
             state["status"] = GenerationStatus.GENERATING.value
             state["message"] = "正在处理图片资源..."
@@ -78,6 +94,7 @@ class ProcessImageBlocksNode(WorkflowNode):
                 updated_blocks = await self._process_blocks(
                     doc_blocks,
                     document_id=document_id,
+                    repo_id=repo_id,
                 )
 
             state["doc_blocks"] = updated_blocks
@@ -85,7 +102,7 @@ class ProcessImageBlocksNode(WorkflowNode):
             logger.info(
                 "process_image_blocks_complete",
                 total_blocks=len(doc_blocks),
-                repo_id=state["repo_id"],
+                repo_id=repo_id,
             )
 
         except Exception as e:
@@ -105,12 +122,14 @@ class ProcessImageBlocksNode(WorkflowNode):
         self,
         doc_blocks: List[Dict[str, Any]],
         document_id: str,
+        repo_id: str,
     ) -> List[Dict[str, Any]]:
         """处理文档块列表中的图片块.
 
         Args:
             doc_blocks: 文档块列表
             document_id: 文档 ID
+            repo_id: 仓库 ID
 
         Returns:
             更新后的文档块列表
@@ -119,7 +138,7 @@ class ProcessImageBlocksNode(WorkflowNode):
 
         for block in doc_blocks:
             if block.get("blockType") == "image":
-                processed = await self._process_image_block(block, document_id)
+                processed = await self._process_image_block(block, document_id, repo_id)
                 updated_blocks.append(processed)
             else:
                 updated_blocks.append(block)
@@ -130,119 +149,344 @@ class ProcessImageBlocksNode(WorkflowNode):
         self,
         block: Dict[str, Any],
         document_id: str,
+        repo_id: str,
     ) -> Dict[str, Any]:
         """处理单个图片块.
 
-        提取图片 URL，创建资源记录，更新块格式。
+        下载图片文件并上传，同时检查并上传同名的 drawio 文件，更新块格式。
 
         Args:
             block: 原始图片块数据
             document_id: 文档 ID
+            repo_id: 仓库 ID
 
         Returns:
             更新后的图片块数据
         """
-        image_url = self._extract_image_url(block)
-        if not image_url:
+        image_ref = self._extract_image_reference(block)
+        if not image_ref:
             logger.warning(
-                "image_url_not_found",
+                "image_reference_not_found",
                 block_content=block.get("contentText", "")[:100],
             )
             return block
 
         caption = self._extract_caption(block) or ""
+        block_id = block.get("id")
+        if not block_id:
+            logger.warning(
+                "block_id_missing",
+                block_type=block.get("blockType"),
+                block_content=block.get("contentText", "")[:50],
+            )
 
-        resource_response = await self._create_resource(
-            image_url=image_url,
-            document_id=document_id,
-            caption=caption,
-        )
+        # 构造下载 URL：支持外部 URL 和知识底座 image_id
+        if image_ref.startswith(("http://", "https://")):
+            image_url = image_ref
+        else:
+            image_url = f"{self.kb_base_url}/images/{repo_id}/{image_ref}"
 
-        if not resource_response.success or not resource_response.resource_id:
+        # 下载图片文件
+        image_bytes = await self._download_file(image_url)
+        if not image_bytes:
             logger.error(
-                "create_image_resource_failed",
-                image_url=image_url,
-                error=resource_response.error,
+                "download_image_failed",
+                image_url=self._sanitize_url(image_url),
             )
             return block
 
-        asset_id = resource_response.resource_id
+        file_name = self._extract_file_name(image_url) or "image.png"
+        resource_type = self._resolve_resource_type(image_url)
+
+        # 上传图片文件
+        image_response = await self._upload_resource(
+            file_name=file_name,
+            file_content=image_bytes,
+            document_id=document_id,
+            resource_type=resource_type,
+            block_id=block_id,
+        )
+
+        if not image_response.success or not image_response.resource_id:
+            logger.error(
+                "upload_image_resource_failed",
+                image_url=self._sanitize_url(image_url),
+                error=image_response.error,
+            )
+            return block
+
+        asset_id = image_response.resource_id
         logger.info(
-            "image_resource_created",
+            "image_resource_uploaded",
             asset_id=asset_id,
-            image_url=image_url,
+            image_url=self._sanitize_url(image_url),
             caption=caption,
         )
+
+        # 检查并上传同名的 drawio 文件
+        drawio_asset_id = None
+        if image_ref.startswith(("http://", "https://")):
+            drawio_url = self._to_drawio_url(image_ref)
+        else:
+            drawio_id = self._to_drawio_id(image_ref)
+            drawio_url = f"{self.kb_base_url}/images/{repo_id}/{drawio_id}" if drawio_id else None
+
+        if drawio_url:
+            drawio_bytes = await self._download_file(drawio_url)
+            if drawio_bytes:
+                drawio_file_name = self._extract_file_name(drawio_url) or "diagram.drawio"
+                drawio_response = await self._upload_resource(
+                    file_name=drawio_file_name,
+                    file_content=drawio_bytes,
+                    document_id=document_id,
+                    resource_type="drawio",
+                    block_id=block_id,
+                )
+                if drawio_response.success and drawio_response.resource_id:
+                    drawio_asset_id = drawio_response.resource_id
+                    logger.info(
+                        "drawio_resource_uploaded",
+                        drawio_asset_id=drawio_asset_id,
+                        drawio_url=self._sanitize_url(drawio_url),
+                    )
+
+        attrs = {
+            **block.get("attrs", {}),
+            "assetId": asset_id,
+            "caption": caption,
+            "alt": caption,
+        }
+        if drawio_asset_id:
+            attrs["drawioAssetId"] = drawio_asset_id
 
         return {
             **block,
             "blockType": "image",
             "contentText": caption,
-            "attrs": {
-                **block.get("attrs", {}),
-                "assetId": asset_id,
-                "caption": caption,
-                "alt": caption,
-            },
+            "attrs": attrs,
         }
 
-    async def _create_resource(
+    async def _upload_resource(
         self,
-        image_url: str,
+        file_name: str,
+        file_content: bytes,
         document_id: str,
-        caption: str,
-    ) -> SaveResourceResponse:
-        """调用 workspace API 创建图片资源记录.
+        resource_type: str,
+        block_id: Optional[str] = None,
+    ) -> UploadResourceResponse:
+        """调用 workspace API 上传资源文件.
 
         Args:
-            image_url: 图片外部 URL
+            file_name: 文件名
+            file_content: 文件字节内容
             document_id: 文档 ID（用作 owner_id）
-            caption: 图片标题（用于生成文件名）
+            resource_type: 资源类型 (image/drawio/flowchart/callgraph)
+            block_id: 所属条目ID（可选）
 
         Returns:
-            资源创建响应
+            资源上传响应
         """
-        file_name = self._extract_file_name(image_url) or "image.png"
-        mime_type = self._guess_mime_type(image_url)
-
-        request = SaveResourceRequest(
+        return await self.workspace_adapter.upload_resource_bytes(
             owner_type="document",
             owner_id=document_id,
-            resource_type="image",
+            resource_type=resource_type,
             file_name=file_name,
-            mime_type=mime_type,
-            storage_path=image_url,
+            file_content=file_content,
+            block_id=block_id,
         )
 
-        return await self.workspace_adapter.save_resource(request)
+    async def _download_file(self, url: str) -> Optional[bytes]:
+        """下载文件内容.
+
+        支持 HTTP URL（带重试）和本地文件路径。
+        对文件大小做上限检查，避免大文件导致内存溢出。
+
+        Args:
+            url: 文件 URL 或本地路径
+
+        Returns:
+            文件字节内容，下载失败或超限时返回 None
+        """
+        try:
+            if url.startswith(("http://", "https://")):
+                return await self._download_http(url)
+            else:
+                path = Path(url)
+                if path.exists():
+                    size = path.stat().st_size
+                    if size > MAX_FILE_SIZE:
+                        logger.warning(
+                            "local_file_too_large",
+                            path=str(path),
+                            size=size,
+                            max_size=MAX_FILE_SIZE,
+                        )
+                        return None
+                    return path.read_bytes()
+                logger.warning("local_file_not_found", path=str(path))
+        except (httpx.HTTPError, OSError) as e:
+            logger.warning(
+                "download_file_error",
+                url=self._sanitize_url(url),
+                error_type=type(e).__name__,
+                error=str(e),
+            )
+        return None
+
+    async def _download_http(self, url: str) -> Optional[bytes]:
+        """下载 HTTP 文件（带重试和内容校验）.
+
+        复用单个 AsyncClient，优先通过 Content-Length 头预检查文件大小，
+        避免大文件下载到内存后才拒绝。
+
+        Args:
+            url: HTTP URL
+
+        Returns:
+            文件字节内容，下载失败返回 None
+        """
+        import asyncio
+
+        async with httpx.AsyncClient(
+            timeout=30.0, follow_redirects=True, trust_env=False
+        ) as client:
+            for attempt in range(DOWNLOAD_MAX_RETRIES):
+                try:
+                    response = await client.get(url)
+                    if response.status_code == 200:
+                        content_length = response.headers.get("content-length")
+                        if content_length:
+                            size = int(content_length)
+                            if size > MAX_FILE_SIZE:
+                                logger.warning(
+                                    "http_file_too_large",
+                                    url=self._sanitize_url(url),
+                                    size=size,
+                                    max_size=MAX_FILE_SIZE,
+                                )
+                                return None
+                        content_type = response.headers.get("content-type", "")
+                        if content_type.startswith("text/html"):
+                            logger.warning(
+                                "http_unexpected_content_type",
+                                url=self._sanitize_url(url),
+                                content_type=content_type,
+                            )
+                            return None
+                        return response.content
+                    logger.warning(
+                        "http_download_failed",
+                        url=self._sanitize_url(url),
+                        status_code=response.status_code,
+                        attempt=attempt + 1,
+                    )
+                except httpx.HTTPError as e:
+                    logger.warning(
+                        "http_download_error",
+                        url=self._sanitize_url(url),
+                        attempt=attempt + 1,
+                        max_retries=DOWNLOAD_MAX_RETRIES,
+                        error_type=type(e).__name__,
+                        error=str(e),
+                    )
+                    if attempt < DOWNLOAD_MAX_RETRIES - 1:
+                        await asyncio.sleep(DOWNLOAD_RETRY_DELAY * (2 ** attempt))
+        return None
 
     @staticmethod
-    def _extract_image_url(block: Dict[str, Any]) -> Optional[str]:
-        """从块数据中提取图片 URL.
+    def _to_drawio_url(image_url: str) -> Optional[str]:
+        """从图片 URL 推导出 drawio 文件 URL.
 
-        图片 URL 直接存储在 contentText 中。
+        去除查询参数和 fragment 后，将已知图片后缀替换为 .drawio。
+
+        Args:
+            image_url: 图片 URL
+
+        Returns:
+            drawio URL 或 None
+        """
+        parsed = urlparse(image_url)
+        path_lower = parsed.path.lower()
+        for ext in (".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp"):
+            if path_lower.endswith(ext):
+                new_path = parsed.path[: -len(ext)] + ".drawio"
+                return parsed._replace(path=new_path).geturl()
+        return None
+
+    @staticmethod
+    def _to_drawio_id(image_id: str) -> Optional[str]:
+        """从图片 ID 推导出 drawio 文件 ID.
+
+        将已知图片后缀替换为 .drawio。
+
+        Args:
+            image_id: 图片 ID（如 xxx.svg）
+
+        Returns:
+            drawio ID 或 None
+        """
+        path_lower = image_id.lower()
+        for ext in (".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp"):
+            if path_lower.endswith(ext):
+                return image_id[: -len(ext)] + ".drawio"
+        return None
+
+    @staticmethod
+    def _resolve_resource_type(url: str) -> str:
+        """根据 URL 中的文件名后缀解析资源类型.
+
+        Args:
+            url: 文件 URL
+
+        Returns:
+            资源类型字符串
+        """
+        parsed = urlparse(url)
+        file_name = parsed.path.split("/")[-1].lower()
+        if file_name.endswith(".flowchart.svg") or file_name.endswith(".flowchart.png"):
+            return "flowchart"
+        if file_name.endswith(".callgraph.svg") or file_name.endswith(".callgraph.png"):
+            return "callgraph"
+        return "image"
+
+    @staticmethod
+    def _sanitize_url(url: str) -> str:
+        """脱敏 URL，去除查询参数中的敏感信息.
+
+        Args:
+            url: 原始 URL
+
+        Returns:
+            仅保留 scheme + netloc + path 的 URL 字符串
+        """
+        if not isinstance(url, str):
+            return str(url) if url is not None else ""
+        parsed = urlparse(url)
+        return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+
+    @staticmethod
+    def _extract_image_reference(block: Dict[str, Any]) -> Optional[str]:
+        """从块数据中提取图片引用（URL 或 image_id）.
+
+        图片引用直接存储在 contentText 中，可能是完整 URL 或知识底座图片 ID。
 
         Args:
             block: 块数据
 
         Returns:
-            图片 URL 或 None
+            图片引用（URL 或 image_id）或 None
         """
         content = block.get("contentText", "")
         if not content:
             return None
-
         stripped = content.strip()
-        if stripped.startswith(("http://", "https://")):
-            return stripped
-
-        return None
+        return stripped if stripped else None
 
     @staticmethod
     def _extract_caption(block: Dict[str, Any]) -> str:
         """从块数据中提取图片标题/说明.
 
-        直接返回 contentText 的内容（排除纯 URL 的情况）。
+        排除纯 URL 和图片 ID（含常见图片后缀）的情况。
 
         Args:
             block: 块数据
@@ -254,12 +498,17 @@ class ProcessImageBlocksNode(WorkflowNode):
         if not content:
             return ""
 
-        # 排除纯 URL 的情况
         stripped = content.strip()
-        if not stripped.startswith(("http://", "https://")):
-            return stripped
+        # 排除纯 URL
+        if stripped.startswith(("http://", "https://")):
+            return ""
+        # 排除常见图片 ID 格式（如 xxx.svg, xxx.png）
+        lower = stripped.lower()
+        for ext in (".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".drawio"):
+            if lower.endswith(ext):
+                return ""
 
-        return ""
+        return stripped
 
     @staticmethod
     def _extract_file_name(url: str) -> Optional[str]:
@@ -272,8 +521,6 @@ class ProcessImageBlocksNode(WorkflowNode):
             文件名或 None
         """
         try:
-            from urllib.parse import urlparse
-
             path = urlparse(url).path
             if path:
                 name = path.split("/")[-1]
@@ -284,24 +531,20 @@ class ProcessImageBlocksNode(WorkflowNode):
         return None
 
     @staticmethod
-    def _guess_mime_type(url: str) -> str:
-        """根据 URL 后缀猜测 MIME 类型.
+    def _resolve_kb_base_url(mcp_server_url: str) -> str:
+        """从 MCP 服务器 URL 推导知识底座服务基础 URL.
+
+        去掉 /mcp、/sse 等常见后缀路径。
 
         Args:
-            url: 图片 URL
+            mcp_server_url: MCP 服务器 URL（如 http://localhost:8000/mcp）
 
         Returns:
-            MIME 类型字符串
+            知识底座服务基础 URL（如 http://localhost:8000）
         """
-        url_lower = url.lower()
-        if url_lower.endswith(".svg"):
-            return "image/svg+xml"
-        if url_lower.endswith(".png"):
-            return "image/png"
-        if url_lower.endswith(".jpg") or url_lower.endswith(".jpeg"):
-            return "image/jpeg"
-        if url_lower.endswith(".gif"):
-            return "image/gif"
-        if url_lower.endswith(".webp"):
-            return "image/webp"
-        return "image/png"
+        url = mcp_server_url.rstrip("/")
+        for suffix in ("/mcp", "/sse"):
+            if url.endswith(suffix):
+                return url[: -len(suffix)]
+        return url
+

@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import get_settings
 from app.infrastructure.db import get_graph_db_client, get_vector_db_client
-from app.api.routes import initialization, progress, reset
+from app.api.routes import initialization, progress, reset, settings
 from app.api.test import (
     flowchart_generation as test_flowchart_generation,
     module_detection as test_module_detection,
@@ -73,12 +73,12 @@ async def lifespan(app: FastAPI):
     """应用生命周期管理."""
     # 启动时
     logger.info("Starting up Knowledge Base Service...")
-    settings = get_settings()
+    app_settings = get_settings()
 
     # 创建日志根目录
     try:
-        Path(settings.log_dir).mkdir(parents=True, exist_ok=True)
-        logger.info(f"Log directory created: {settings.log_dir}")
+        Path(app_settings.log_dir).mkdir(parents=True, exist_ok=True)
+        logger.info(f"Log directory created: {app_settings.log_dir}")
     except Exception as e:
         logger.error(f"Failed to create log directory: {e}")
 
@@ -130,14 +130,25 @@ async def lifespan(app: FastAPI):
         logger.error(f"Error closing vector database connection: {e}")
 
 
+def _resolve_static_path(app_settings) -> Path:
+    """解析静态文件目录路径."""
+    if app_settings.static_files_path.startswith("./"):
+        relative_path = app_settings.static_files_path[2:]
+        return BASE_DIR / relative_path
+    elif app_settings.static_files_path.startswith("/"):
+        return Path(app_settings.static_files_path)
+    else:
+        return BASE_DIR / app_settings.static_files_path
+
+
 def create_app() -> FastAPI:
     """创建 FastAPI 应用实例."""
-    settings = get_settings()
+    app_settings = get_settings()
 
     app = FastAPI(
         title="Knowledge Base Service",
         description="代码知识底座管理服务",
-        version=settings.app_version,
+        version=app_settings.app_version,
         lifespan=lifespan,
     )
 
@@ -166,26 +177,20 @@ def create_app() -> FastAPI:
         prefix="/api/v1/initialization",
         tags=["reset"],
     )
+    app.include_router(
+        settings.router,
+        prefix="/api/v1",
+        tags=["settings"],
+    )
 
     # MCP 路由 (HTTP 方式)
     app.include_router(mcp_router)
 
     # 静态文件服务 - 提供data目录中的图片访问
-    # 使用基于项目根目录的绝对路径，避免工作目录问题
-    if settings.static_files_path.startswith("./"):
-        # 相对路径，基于项目根目录
-        relative_path = settings.static_files_path[2:]  # 移除 ./ 前缀
-        static_path = BASE_DIR / relative_path
-    elif settings.static_files_path.startswith("/"):
-        # 已经是绝对路径
-        static_path = Path(settings.static_files_path)
-    else:
-        # 相对路径但没有 ./ 前缀，基于项目根目录
-        static_path = BASE_DIR / settings.static_files_path
-
+    static_path = _resolve_static_path(app_settings)
     static_path.mkdir(parents=True, exist_ok=True)
     static_dir = str(static_path.resolve())
-    static_url = settings.static_files_url
+    static_url = app_settings.static_files_url
 
     # 确保URL以/开头
     if not static_url.startswith("/"):
@@ -193,11 +198,6 @@ def create_app() -> FastAPI:
 
     logger.info(f"BASE_DIR: {BASE_DIR}")
     logger.info(f"Static files configured: URL={static_url}, Directory={static_dir}")
-
-    # 验证测试文件是否存在
-    test_file = static_path / "repo_b087a727a064488f9078f5c0bbc00624/image/Hardware_usart3_usart3_c_Usart3_Init__L27.svg"
-    logger.info(f"Test file path: {test_file}")
-    logger.info(f"Test file exists: {test_file.exists()}")
 
     app.mount(
         static_url,
@@ -235,35 +235,27 @@ def create_app() -> FastAPI:
     @app.get("/health")
     async def health_check():
         """健康检查端点."""
-        return {"status": "healthy", "version": settings.app_version}
+        return {"status": "healthy", "version": app_settings.app_version}
 
-    # 临时测试路由：直接提供图片文件
-    @app.get("/test-image/{repo_id}/{filename:path}")
-    async def test_image(repo_id: str, filename: str):
-        """测试图片访问."""
+    # 图片下载接口
+    @app.get("/images/{repo_id}/{image_id}")
+    async def download_image(repo_id: str, image_id: str):
+        """根据仓库ID和图片ID下载图片文件."""
         from fastapi.responses import FileResponse
-        import os
 
-        # 使用与静态文件服务相同的路径逻辑
-        if settings.static_files_path.startswith("./"):
-            relative_path = settings.static_files_path[2:]
-            static_path = BASE_DIR / relative_path
-        elif settings.static_files_path.startswith("/"):
-            static_path = Path(settings.static_files_path)
-        else:
-            static_path = BASE_DIR / settings.static_files_path
-
-        # 构建文件路径
-        file_path = static_path / repo_id / "image" / filename
-        logger.info(f"Test image request: {file_path}")
+        static_path = _resolve_static_path(app_settings)
+        file_path = static_path / repo_id / "image" / image_id
+        logger.info(f"Image download request: {file_path}")
 
         if not file_path.exists():
             logger.error(f"File not found: {file_path}")
             return {"error": "File not found", "path": str(file_path)}
 
+        media_type = "image/svg+xml" if image_id.endswith(".svg") else "image/png"
         return FileResponse(
             path=str(file_path),
-            media_type="image/svg+xml" if filename.endswith(".svg") else "image/png"
+            media_type=media_type,
+            filename=image_id,
         )
 
     return app
@@ -275,10 +267,10 @@ app = create_app()
 if __name__ == "__main__":
     import uvicorn
 
-    settings = get_settings()
+    app_settings = get_settings()
     uvicorn.run(
         "app.main:app",
-        host=settings.host,
-        port=settings.port,
-        reload=settings.debug,
+        host=app_settings.host,
+        port=app_settings.port,
+        reload=app_settings.debug,
     )

@@ -36,14 +36,14 @@ class ContentGeneratorAgent:
             logger.info("content_generator_agent_initialized", model="custom_llm_client")
         else:
             settings = get_settings()
-            base_url = settings.dashscope_base_url.replace(
+            base_url = settings.llm_base_url.replace(
                 "/api/v1", "/compatible-mode/v1"
             )
 
             self.model_name = settings.llm_model
             self.llm = ChatOpenAI(
                 model=settings.llm_model,
-                api_key=settings.dashscope_api_key,
+                api_key=settings.llm_api_key,
                 base_url=base_url,
                 temperature=0.7,
                 max_retries=3,
@@ -143,10 +143,10 @@ class ContentGeneratorAgent:
         import httpx
 
         settings = get_settings()
-        api_key = settings.dashscope_api_key
+        api_key = settings.llm_api_key
 
         if not api_key:
-            raise RuntimeError("DashScope API key not configured")
+            raise RuntimeError("LLM API key not configured")
 
         url = "https://dashscope.aliyuncs.com/api/v1/models"
         headers = {
@@ -173,10 +173,10 @@ class ContentGeneratorAgent:
         import httpx
 
         settings = get_settings()
-        api_key = getattr(settings, "anthropic_api_key", None)
+        api_key = settings.llm_api_key
 
         if not api_key:
-            raise RuntimeError("Anthropic API key not configured")
+            raise RuntimeError("LLM API key not configured")
 
         url = "https://api.anthropic.com/v1/models"
         headers = {
@@ -203,11 +203,11 @@ class ContentGeneratorAgent:
         import httpx
 
         settings = get_settings()
-        api_key = getattr(settings, "openai_api_key", None)
-        base_url = getattr(settings, "openai_base_url", "https://api.openai.com/v1")
+        api_key = settings.llm_api_key
+        base_url = settings.llm_base_url.replace("/compatible-mode/v1", "/api/v1")
 
         if not api_key:
-            raise RuntimeError("OpenAI API key not configured")
+            raise RuntimeError("LLM API key not configured")
 
         url = f"{base_url}/models"
         headers = {"Authorization": f"Bearer {api_key}"}
@@ -382,7 +382,13 @@ class ContentGeneratorAgent:
                     excluded=excluded_tools,
                     remaining=len(tools),
                 )
+            extra_tool_names: set[str] = set()
             if extra_tools:
+                extra_tool_names = {
+                    t.get("function", {}).get("name")
+                    for t in extra_tools
+                    if t.get("function")
+                }
                 tools = tools + extra_tools
                 logger.info(
                     "tools_extended",
@@ -454,14 +460,20 @@ class ContentGeneratorAgent:
                         )
 
                         try:
-                            if custom_tool_handler is not None:
+                            is_extra_tool = tool_name in extra_tool_names
+                            if is_extra_tool and custom_tool_handler is not None:
                                 result = await custom_tool_handler(tool_name, tool_args)
                             else:
                                 result = await self.call_tool(tool_name, tool_args)
+                            self._agent_logger.log_tool_response(
+                                session_id=session_id,
+                                iteration=final_iteration,
+                                tool_name=tool_name,
+                                response=result,
+                                success=True,
+                            )
                         except Exception as e:
                             result = f"工具调用失败: {str(e)}"
-
-                            # 记录工具调用失败响应
                             self._agent_logger.log_tool_response(
                                 session_id=session_id,
                                 iteration=final_iteration,

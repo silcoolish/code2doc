@@ -19,13 +19,13 @@ class LLMClientFactory:
             ChatOpenAI实例
         """
         settings = get_settings()
-        base_url = settings.dashscope_base_url.replace(
+        base_url = settings.llm_base_url.replace(
             "/api/v1", "/compatible-mode/v1"
         )
 
         llm = ChatOpenAI(
             model=settings.llm_model,
-            api_key=settings.dashscope_api_key,
+            api_key=settings.llm_api_key,
             base_url=base_url,
             temperature=0.7,
             max_retries=3,

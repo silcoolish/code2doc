@@ -234,13 +234,13 @@ class QwenProvider(LLMProvider):
                 "Install it with: pip install langchain-openai"
             )
 
-        if not self.settings.dashscope_api_key:
-            raise ValueError("DASHSCOPE_API_KEY is required for Qwen provider")
+        if not self.settings.llm_api_key:
+            raise ValueError("LLM_API_KEY is required for Qwen provider")
 
         return ChatOpenAI(
-            model=self.settings.qwen_model,
-            api_key=self.settings.dashscope_api_key,
-            base_url=self.settings.qwen_base_url,
+            model=self.settings.llm_model,
+            api_key=self.settings.llm_api_key,
+            base_url=self.settings.llm_base_url,
             temperature=0.3,
             max_tokens=4096,
         )
@@ -255,13 +255,16 @@ class QwenProvider(LLMProvider):
                 "Install it with: pip install langchain-openai"
             )
 
-        if not self.settings.dashscope_api_key:
-            raise ValueError("DASHSCOPE_API_KEY is required for Qwen provider")
+        api_key = self.settings.embedding_api_key or self.settings.llm_api_key
+        base_url = self.settings.embedding_base_url or self.settings.llm_base_url
+
+        if not api_key:
+            raise ValueError("LLM_API_KEY or EMBEDDING_API_KEY is required for Qwen provider")
 
         return OpenAIEmbeddings(
-            model=self.settings.qwen_embedding_model,
-            api_key=self.settings.dashscope_api_key,
-            base_url=self.settings.qwen_base_url,
+            model=self.settings.embedding_model,
+            api_key=api_key,
+            base_url=base_url,
             # Note: DashScope 需要禁用 token 长度检查，否则会以 token 列表格式发送
             check_embedding_ctx_length=False,
         )
@@ -288,11 +291,11 @@ class QwenProvider(LLMProvider):
             from openai import AsyncOpenAI
 
             client = AsyncOpenAI(
-                api_key=self.settings.dashscope_api_key,
-                base_url=self.settings.qwen_base_url,
+                api_key=self.settings.llm_api_key,
+                base_url=self.settings.llm_base_url,
             )
 
-            model_id = self.settings.qwen_model
+            model_id = self.settings.llm_model
 
             # 尝试获取模型信息
             try:
@@ -308,7 +311,7 @@ class QwenProvider(LLMProvider):
 
         except Exception as e:
             logger.warning(f"Failed to get context window for Qwen: {e}")
-            return self._get_fallback_context_window(self.settings.qwen_model)
+            return self._get_fallback_context_window(self.settings.llm_model)
 
 
 class OpenAIProvider(LLMProvider):
@@ -339,12 +342,13 @@ class OpenAIProvider(LLMProvider):
                 "Install it with: pip install langchain-openai"
             )
 
-        if not self.settings.openai_api_key:
-            raise ValueError("OPENAI_API_KEY is required for OpenAI provider")
+        if not self.settings.llm_api_key:
+            raise ValueError("LLM_API_KEY is required for OpenAI provider")
 
         return ChatOpenAI(
-            model=self.settings.openai_model,
-            api_key=self.settings.openai_api_key,
+            model=self.settings.llm_model,
+            api_key=self.settings.llm_api_key,
+            base_url=self.settings.llm_base_url or None,
             temperature=0.3,
             max_tokens=4096,
         )
@@ -359,12 +363,16 @@ class OpenAIProvider(LLMProvider):
                 "Install it with: pip install langchain-openai"
             )
 
-        if not self.settings.openai_api_key:
-            raise ValueError("OPENAI_API_KEY is required for OpenAI provider")
+        api_key = self.settings.embedding_api_key or self.settings.llm_api_key
+        base_url = self.settings.embedding_base_url or self.settings.llm_base_url or None
+
+        if not api_key:
+            raise ValueError("LLM_API_KEY or EMBEDDING_API_KEY is required for OpenAI provider")
 
         return OpenAIEmbeddings(
-            model=self.settings.openai_embedding_model,
-            api_key=self.settings.openai_api_key,
+            model=self.settings.embedding_model,
+            api_key=api_key,
+            base_url=base_url,
             dimensions=self.settings.embedding_dimensions,
         )
 
@@ -385,8 +393,11 @@ class OpenAIProvider(LLMProvider):
         try:
             from openai import AsyncOpenAI
 
-            client = AsyncOpenAI(api_key=self.settings.openai_api_key)
-            model_id = self.settings.openai_model
+            client = AsyncOpenAI(
+                api_key=self.settings.llm_api_key,
+                base_url=self.settings.llm_base_url or None,
+            )
+            model_id = self.settings.llm_model
 
             # 尝试从 API 获取
             try:
@@ -400,7 +411,7 @@ class OpenAIProvider(LLMProvider):
 
         except Exception as e:
             logger.warning(f"Failed to get context window for OpenAI: {e}")
-            return self._get_fallback_context_window(self.settings.openai_model)
+            return self._get_fallback_context_window(self.settings.llm_model)
 
 
 class AnthropicProvider(LLMProvider):
@@ -430,12 +441,12 @@ class AnthropicProvider(LLMProvider):
                 "Install it with: pip install langchain-anthropic"
             )
 
-        if not self.settings.anthropic_api_key:
-            raise ValueError("ANTHROPIC_API_KEY is required for Anthropic provider")
+        if not self.settings.llm_api_key:
+            raise ValueError("LLM_API_KEY is required for Anthropic provider")
 
         return ChatAnthropic(
-            model=self.settings.anthropic_model,
-            api_key=self.settings.anthropic_api_key,
+            model=self.settings.llm_model,
+            api_key=self.settings.llm_api_key,
             temperature=0.3,
             max_tokens=4096,
         )
@@ -458,8 +469,8 @@ class AnthropicProvider(LLMProvider):
         try:
             import anthropic
 
-            client = anthropic.AsyncAnthropic(api_key=self.settings.anthropic_api_key)
-            model_id = self.settings.anthropic_model
+            client = anthropic.AsyncAnthropic(api_key=self.settings.llm_api_key)
+            model_id = self.settings.llm_model
 
             # Anthropic 提供 models API (beta)
             try:
@@ -473,7 +484,7 @@ class AnthropicProvider(LLMProvider):
 
         except Exception as e:
             logger.warning(f"Failed to get context window for Anthropic: {e}")
-            return self._get_fallback_context_window(self.settings.anthropic_model)
+            return self._get_fallback_context_window(self.settings.llm_model)
 
 
 class ProviderFactory:

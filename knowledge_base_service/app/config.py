@@ -1,17 +1,19 @@
 """配置管理模块."""
 
-from functools import lru_cache
+from pathlib import Path
 from typing import List, Optional
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+PROJECT_ROOT = Path(__file__).parent.parent
 
 
 class Settings(BaseSettings):
     """应用配置类."""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=str(PROJECT_ROOT / ".env"),
         env_file_encoding="utf-8",
         extra="ignore",
     )
@@ -41,24 +43,17 @@ class Settings(BaseSettings):
     # LLM Provider: "anthropic" | "openai" | "qwen" | "azure"
     llm_provider: str = Field(default="qwen")
 
-    # Anthropic Settings
-    anthropic_api_key: Optional[str] = Field(default=None)
-    anthropic_model: str = Field(default="claude-sonnet-4-6")
-
-    # OpenAI Settings
-    openai_api_key: Optional[str] = Field(default=None)
-    openai_model: str = Field(default="gpt-4o")
-    openai_embedding_model: str = Field(default="text-embedding-3-large")
-
-    # Qwen/DashScope Settings
-    dashscope_api_key: Optional[str] = Field(default=None)
-    qwen_model: str = Field(default="qwen3.5-plus")
-    qwen_embedding_model: str = Field(default="text-embedding-v3")
-    qwen_base_url: str = Field(default="https://dashscope.aliyuncs.com/compatible-mode/v1")
+    # Unified LLM Settings
+    llm_base_url: str = Field(default="https://dashscope.aliyuncs.com/compatible-mode/v1")
+    llm_api_key: Optional[str] = Field(default=None)
+    llm_model: str = Field(default="qwen3.5-plus")
 
     # Embedding Settings
     embedding_dimensions: int = Field(default=1024)
     embedding_provider: str = Field(default="qwen")  # "openai" | "qwen"
+    embedding_base_url: str = Field(default="https://dashscope.aliyuncs.com/compatible-mode/v1")
+    embedding_api_key: Optional[str] = Field(default=None)
+    embedding_model: str = Field(default="text-embedding-v3")
 
     # Pipeline Settings
     batch_size: int = Field(default=100)
@@ -131,7 +126,31 @@ class Settings(BaseSettings):
     clustering_strategy_merge_threshold: float = Field(default=0.7)
 
 
-@lru_cache()
 def get_settings() -> Settings:
-    """获取配置实例（单例模式）."""
+    """获取配置实例（每次调用重新读取 .env）."""
     return Settings()
+
+
+def update_env_file(updates: dict) -> None:
+    """更新 .env 文件中的配置项.
+
+    Args:
+        updates: 要更新的 key-value 字典
+    """
+    env_path = PROJECT_ROOT / ".env"
+    lines = []
+    existing: dict[str, str] = {}
+
+    if env_path.exists():
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#") and "=" in stripped:
+                key, val = stripped.split("=", 1)
+                existing[key] = val
+            lines.append(line)
+
+    existing.update(updates)
+
+    with open(env_path, "w", encoding="utf-8") as f:
+        for key, val in existing.items():
+            f.write(f"{key}={val}\n")

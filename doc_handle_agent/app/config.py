@@ -1,6 +1,5 @@
 """配置管理."""
 
-from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
@@ -28,10 +27,10 @@ class Settings(BaseSettings):
 
     # LLM配置
     llm_provider: str = Field(default="qwen", alias="LLM_PROVIDER")
-    dashscope_api_key: str = Field(default="", alias="DASHSCOPE_API_KEY")
-    dashscope_base_url: str = Field(
+    llm_api_key: str = Field(default="", alias="LLM_API_KEY")
+    llm_base_url: str = Field(
         default="https://dashscope.aliyuncs.com/api/v1",
-        alias="DASHSCOPE_BASE_URL",
+        alias="LLM_BASE_URL",
     )
     llm_model: str = Field(default="qwen-max-latest", alias="LLM_MODEL")
     llm_request_timeout: float = Field(default=180.0, alias="LLM_REQUEST_TIMEOUT")
@@ -84,7 +83,31 @@ class Settings(BaseSettings):
         return path.resolve()
 
 
-@lru_cache()
 def get_settings() -> Settings:
-    """获取配置单例."""
+    """获取配置实例（每次调用重新读取 .env）."""
     return Settings()
+
+
+def update_env_file(updates: dict) -> None:
+    """更新 .env 文件中的配置项.
+
+    Args:
+        updates: 要更新的 key-value 字典
+    """
+    env_path = PROJECT_ROOT / ".env"
+    lines = []
+    existing: dict[str, str] = {}
+
+    if env_path.exists():
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#") and "=" in stripped:
+                key, val = stripped.split("=", 1)
+                existing[key] = val
+            lines.append(line)
+
+    existing.update(updates)
+
+    with open(env_path, "w", encoding="utf-8") as f:
+        for key, val in existing.items():
+            f.write(f"{key}={val}\n")

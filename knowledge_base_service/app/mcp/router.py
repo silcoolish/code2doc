@@ -137,7 +137,7 @@ class GetAllNodesRequest(BaseModel):
         return _parse_string_to_list(v)
 
 
-class BatchGetImageUrlsRequest(BaseModel):
+class BatchGetImageIdsRequest(BaseModel):
     repo_id: str = Field(..., description="仓库ID")
     node_ids: list[str] = Field(..., description="节点ID列表")
 
@@ -293,20 +293,20 @@ async def get_all_nodes(
         return ToolResponse(success=False, error=str(e))
 
 
-@router.post("/tools/batch_get_image_urls", response_model=ToolResponse)
-async def batch_get_image_urls(
-    request: BatchGetImageUrlsRequest,
+@router.post("/tools/batch_get_image_ids", response_model=ToolResponse)
+async def batch_get_image_ids(
+    request: BatchGetImageIdsRequest,
     tools: KnowledgeBaseTools = Depends(get_tools),
 ) -> ToolResponse:
-    """批量获取节点对应图片的 URL."""
+    """批量获取节点对应图片的 ID."""
     try:
-        result = await tools.batch_get_image_urls(
+        result = await tools.batch_get_image_ids(
             repo_id=request.repo_id,
             node_ids=request.node_ids,
         )
         return ToolResponse(success=True, data=json.loads(result))
     except Exception as e:
-        logger.exception(f"batch_get_image_urls failed: {e}")
+        logger.exception(f"batch_get_image_ids failed: {e}")
         return ToolResponse(success=False, error=str(e))
 
 
@@ -436,9 +436,9 @@ async def list_tools() -> dict:
                 },
             },
             {
-                "name": "batch_get_image_urls",
-                "description": "批量获取节点对应图片的 URL。用于在文档中插入流程图、架构图",
-                "endpoint": "/mcp/tools/batch_get_image_urls",
+                "name": "batch_get_image_ids",
+                "description": "批量获取节点对应图片的 ID。用于在文档中插入流程图、架构图。返回的 image_id 可通过 /images/{repo_id}/{image_id} 下载图片",
+                "endpoint": "/mcp/tools/batch_get_image_ids",
                 "method": "POST",
                 "parameters": {
                     "repo_id": {"type": "string", "required": True},

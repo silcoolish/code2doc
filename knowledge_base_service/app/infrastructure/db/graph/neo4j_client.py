@@ -1007,7 +1007,8 @@ class Neo4jClient(GraphDatabaseClient):
         MATCH (m:Method)
         WHERE m.repoId = $repo_id AND m.language IN $languages
         RETURN m.id as id, m.name as name, m.code as code,
-               m.language as language, m.filePath as file_path, m.image as image
+               m.language as language, m.filePath as file_path, m.image as image,
+               m.startLine as start_line
         """
         return await self._execute_query(
             query,

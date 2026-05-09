@@ -460,6 +460,8 @@ class WorkspaceServiceAdapter:
     ) -> UploadResourceResponse:
         """上传资源文件.
 
+        读取本地文件后委托给 upload_resource_bytes 执行实际上传。
+
         Args:
             owner_type: 归属类型 (document/template)
             owner_id: 归属对象ID
@@ -470,8 +472,6 @@ class WorkspaceServiceAdapter:
         Returns:
             上传资源响应
         """
-        url = self._build_url("/api/resources/upload")
-
         logger.info(
             "upload_resource_request",
             owner_type=owner_type,
@@ -482,23 +482,87 @@ class WorkspaceServiceAdapter:
         )
 
         try:
-            # 读取文件内容
-            with open(file_path, "rb") as f:
-                file_content = f.read()
+            max_size = 50 * 1024 * 1024  # 50MB
+            file_size = file_path.stat().st_size
+            if file_size > max_size:
+                logger.error(
+                    "upload_resource_file_too_large",
+                    file_path=str(file_path),
+                    size=file_size,
+                    max_size=max_size,
+                )
+                return UploadResourceResponse(
+                    success=False,
+                    error=f"文件大小 {file_size} 超过限制 {max_size}",
+                )
 
-            # 获取文件类型
-            content_type = self._get_content_type(file_path)
+            file_content = file_path.read_bytes()
+            return await self.upload_resource_bytes(
+                owner_type=owner_type,
+                owner_id=owner_id,
+                resource_type=resource_type,
+                file_name=file_path.name,
+                file_content=file_content,
+                block_id=block_id,
+            )
+        except Exception as e:
+            logger.error(
+                "upload_resource_error",
+                owner_id=owner_id,
+                file_path=str(file_path),
+                error_type=type(e).__name__,
+                error=str(e),
+                exc_info=True,
+            )
+            return UploadResourceResponse(
+                success=False,
+                error=str(e),
+            )
 
-            # 构建文件字典
+    async def upload_resource_bytes(
+        self,
+        owner_type: str,
+        owner_id: str,
+        resource_type: str,
+        file_name: str,
+        file_content: bytes,
+        block_id: Optional[str] = None,
+    ) -> UploadResourceResponse:
+        """上传资源文件（字节内容）.
+
+        Args:
+            owner_type: 归属类型 (document/template)
+            owner_id: 归属对象ID
+            resource_type: 资源类型 (image/flowchart/callgraph/drawio)
+            file_name: 文件名
+            file_content: 文件字节内容
+            block_id: 所属条目ID（可选）
+
+        Returns:
+            上传资源响应
+        """
+        url = self._build_url("/api/resources/upload")
+
+        logger.info(
+            "upload_resource_bytes_request",
+            owner_type=owner_type,
+            owner_id=owner_id,
+            resource_type=resource_type,
+            file_name=file_name,
+            block_id=block_id,
+        )
+
+        try:
+            content_type = self._get_content_type_by_name(file_name)
+
             files = {
                 "file": (
-                    file_path.name,
+                    file_name,
                     file_content,
                     content_type,
                 )
             }
 
-            # 构建表单数据
             data = {
                 "ownerType": owner_type,
                 "ownerId": owner_id,
@@ -516,7 +580,7 @@ class WorkspaceServiceAdapter:
             if response.get("success"):
                 data = response.get("data", {})
                 logger.info(
-                    "upload_resource_success",
+                    "upload_resource_bytes_success",
                     owner_id=owner_id,
                     resource_id=data.get("id"),
                 )
@@ -529,7 +593,7 @@ class WorkspaceServiceAdapter:
             else:
                 error_msg = response.get("message", "Unknown error")
                 logger.error(
-                    "upload_resource_failed",
+                    "upload_resource_bytes_failed",
                     owner_id=owner_id,
                     error=error_msg,
                 )
@@ -540,9 +604,9 @@ class WorkspaceServiceAdapter:
 
         except Exception as e:
             logger.error(
-                "upload_resource_error",
+                "upload_resource_bytes_error",
                 owner_id=owner_id,
-                file_path=str(file_path),
+                file_name=file_name,
                 error_type=type(e).__name__,
                 error=str(e),
                 exc_info=True,
@@ -561,7 +625,18 @@ class WorkspaceServiceAdapter:
         Returns:
             Content-Type字符串
         """
-        extension = file_path.suffix.lower()
+        return self._get_content_type_by_name(file_path.name)
+
+    def _get_content_type_by_name(self, file_name: str) -> str:
+        """根据文件名获取Content-Type.
+
+        Args:
+            file_name: 文件名
+
+        Returns:
+            Content-Type字符串
+        """
+        extension = Path(file_name).suffix.lower()
 
         content_types = {
             ".png": "image/png",
@@ -570,6 +645,7 @@ class WorkspaceServiceAdapter:
             ".gif": "image/gif",
             ".svg": "image/svg+xml",
             ".webp": "image/webp",
+            ".drawio": "application/vnd.jgraph.mxfile",
         }
 
         return content_types.get(extension, "application/octet-stream")

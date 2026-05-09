@@ -56,17 +56,16 @@ class DocumentEngine:
 
     def __init__(self):
         """初始化文档生成引擎."""
-        self.settings = get_settings()
-        self.mcp_server_url = self.settings.mcp_server_url
         self.workspace_adapter = WorkspaceServiceAdapter()
 
         # 运行中的任务
         self._running_tasks: Dict[str, asyncio.Task] = {}
         self._task_states: Dict[str, AgentState] = {}
 
+        settings = get_settings()
         logger.info(
             "document_engine_initialized",
-            mcp_server_url=self.mcp_server_url,
+            mcp_server_url=settings.mcp_server_url,
         )
 
     async def start_generation(
@@ -140,7 +139,7 @@ class DocumentEngine:
 
         try:
             # 建立MCP连接
-            async with MCPClient(self.mcp_server_url) as mcp_client:
+            async with MCPClient(get_settings().mcp_server_url) as mcp_client:
                 # 创建LLM客户端
                 llm_client = LLMClientFactory.create()
 
