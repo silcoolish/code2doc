@@ -45,6 +45,7 @@ checkpoints/
 # Logs
 *.log
 logs/
+data/
 
 # OS
 .DS_Store
