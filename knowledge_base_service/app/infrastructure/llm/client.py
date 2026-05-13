@@ -374,6 +374,8 @@ class OpenAIProvider(LLMProvider):
             api_key=api_key,
             base_url=base_url,
             dimensions=self.settings.embedding_dimensions,
+            # DashScope 兼容接口需要禁用 token 长度检查，否则会以 token 列表格式发送
+            check_embedding_ctx_length=False,
         )
 
     def get_chat_model(self) -> BaseChatModel:
@@ -722,6 +724,19 @@ class LLMClient:
             logger.warning("No valid texts for embedding after filtering")
             return []
 
+        # 规范化文本：将换行符、制表符等空白字符替换为单个空格
+        # 避免特殊空白字符导致 DashScope 等提供商 API 报错
+        normalized_texts = []
+        for t in valid_texts:
+            normalized = " ".join(t.split())
+            if normalized:
+                normalized_texts.append(normalized)
+
+        if not normalized_texts:
+            logger.warning("No valid texts for embedding after normalization")
+            return []
+
+        valid_texts = normalized_texts
         logger.debug(f"Generating embeddings for {len(valid_texts)} texts")
 
         provider = self._get_embedding_provider()
@@ -756,6 +771,33 @@ class LLMClient:
             return embeddings
 
         except Exception as e:
+            # 如果批量调用失败且有多条文本，尝试逐条调用作为 fallback
+            if len(valid_texts) > 1:
+                logger.warning(f"Batch embedding failed, falling back to single calls: {e}")
+                fallback_embeddings = []
+                for text in valid_texts:
+                    try:
+                        single_embedding = await asyncio.get_event_loop().run_in_executor(
+                            None,
+                            lambda t=text: embedding_model.embed_query(t),
+                        )
+                        fallback_embeddings.append(single_embedding)
+                    except Exception as single_e:
+                        logger.error(f"Single embedding failed for text (len={len(text)}): {single_e}")
+                        raise
+
+                total_chars = sum(len(t) for t in valid_texts)
+                metrics.end(
+                    metadata={
+                        "text_count": len(valid_texts),
+                        "total_chars": total_chars,
+                        "avg_chars": round(total_chars / len(valid_texts), 2) if valid_texts else 0,
+                        "fallback": True,
+                    },
+                )
+                metrics.log()
+                return fallback_embeddings
+
             # 记录错误指标
             metrics.record_error(e)
             metrics.log()

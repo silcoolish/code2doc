@@ -23,6 +23,9 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+# app 目录，用于定位 data 等相对路径资源
+APP_DIR = Path(__file__).resolve().parents[2]
+
 
 class TestFlowchartGenerationRequest(BaseModel):
     """测试流程图生成请求."""
@@ -257,12 +260,16 @@ async def get_flowchart_generation_status(repo_id: str) -> Dict[str, Any]:
         if total_methods > 0:
             overall_completion = round((total_with_image / total_methods) * 100, 2)
 
-        # 检查图片目录是否存在
-        image_dir = Path(settings.flowchart_image_dir) / repo_id / "image"
+        # 检查图片目录是否存在（基于 app 目录解析相对路径）
+        flowchart_dir = settings.flowchart_image_dir
+        if flowchart_dir.startswith("/"):
+            image_dir = Path(flowchart_dir) / repo_id / "image"
+        else:
+            image_dir = APP_DIR / flowchart_dir / repo_id / "image"
         image_files = []
         if image_dir.exists():
-            # 获取前10个图片文件
-            image_files = [f.name for f in image_dir.glob("*.png")][:10]
+            # 获取前10个图片文件（支持png和svg）
+            image_files = [f.name for f in sorted(image_dir.glob("*.png") | image_dir.glob("*.svg"))][:10]
 
         return {
             "repo_id": repo_id,
@@ -275,7 +282,7 @@ async def get_flowchart_generation_status(repo_id: str) -> Dict[str, Any]:
             },
             "image_directory": str(image_dir),
             "image_files_sample": image_files,
-            "image_files_count": len(list(image_dir.glob("*.png"))) if image_dir.exists() else 0,
+            "image_files_count": len(list(image_dir.glob("*.png") | image_dir.glob("*.svg"))) if image_dir.exists() else 0,
         }
 
     except Exception as e:
@@ -355,16 +362,21 @@ async def get_methods_with_flowchart(
         )
 
         methods = []
-        image_dir = Path(settings.flowchart_image_dir) / repo_id / "image"
+        flowchart_dir = settings.flowchart_image_dir
+        if flowchart_dir.startswith("/"):
+            image_dir = Path(flowchart_dir) / repo_id / "image"
+        else:
+            image_dir = APP_DIR / flowchart_dir / repo_id / "image"
 
         for record in methods_results:
             method_data = {k: v for k, v in record.items() if v is not None}
 
-            # 检查图片文件是否存在
+            # 检查图片文件是否存在（支持png和svg）
             image_id = method_data.get("image")
             if image_id:
-                image_path = image_dir / f"{image_id}.png"
-                method_data["image_exists"] = image_path.exists()
+                image_path_png = image_dir / f"{image_id}.png"
+                image_path_svg = image_dir / f"{image_id}.svg"
+                method_data["image_exists"] = image_path_png.exists() or image_path_svg.exists()
                 method_data["image_url"] = f"/api/test/flowchart-generation/image/{repo_id}/{image_id}"
             else:
                 method_data["image_exists"] = False
@@ -404,7 +416,21 @@ async def get_flowchart_image(repo_id: str, image_id: str):
     """
     try:
         settings = get_settings()
-        image_path = Path(settings.flowchart_image_dir) / repo_id / "image" / f"{image_id}.png"
+        flowchart_dir = settings.flowchart_image_dir
+        if flowchart_dir.startswith("/"):
+            image_dir = Path(flowchart_dir) / repo_id / "image"
+        else:
+            image_dir = APP_DIR / flowchart_dir / repo_id / "image"
+
+        # 尝试查找 png 或 svg 格式的图片
+        image_path = image_dir / f"{image_id}.png"
+        media_type = "image/png"
+        filename = f"{image_id}.png"
+
+        if not image_path.exists():
+            image_path = image_dir / f"{image_id}.svg"
+            media_type = "image/svg+xml"
+            filename = f"{image_id}.svg"
 
         if not image_path.exists():
             raise HTTPException(
@@ -415,8 +441,8 @@ async def get_flowchart_image(repo_id: str, image_id: str):
         from fastapi.responses import FileResponse
         return FileResponse(
             path=str(image_path),
-            media_type="image/png",
-            filename=f"{image_id}.png",
+            media_type=media_type,
+            filename=filename,
         )
 
     except HTTPException:
