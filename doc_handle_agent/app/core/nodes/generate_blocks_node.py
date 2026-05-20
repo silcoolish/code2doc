@@ -1,5 +1,6 @@
 """内容生成节点."""
 
+import json
 from typing import List
 
 from app.domain.content_generator import ContentGenerator
@@ -94,6 +95,17 @@ class GenerateBlocksNode(WorkflowNode):
             block = next((b for b in blocks if b.id == result.block_id), None)
             if block:
                 block.content_text = result.text_content
+                if block.is_table and result.text_content:
+                    try:
+                        table_data = json.loads(result.text_content)
+                        if isinstance(table_data, dict):
+                            block.attrs["table"] = table_data
+                    except json.JSONDecodeError:
+                        logger.warning(
+                            "table_content_parse_failed",
+                            block_id=block.id,
+                            content=result.text_content[:200],
+                        )
 
         doc_blocks: List[dict] = []
 

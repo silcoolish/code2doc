@@ -10,6 +10,7 @@ from app.core.state import AgentState, GenerationStatus
 from app.domain.content_generator import ContentGenerator
 from app.domain.model import TemplateBlock
 from app.domain.prompts import LIST_GENERATION_SYSTEM_PROMPT
+from app.utils.fractional_sort_order import key_for_index
 from app.utils.logger import get_logger
 from app.utils.timing import log_timing
 
@@ -60,7 +61,7 @@ class OutlineConfirmationNode(WorkflowNode):
                 )
 
                 for i, block in enumerate(expanded_blocks):
-                    block.order_no = i
+                    block.order_no = key_for_index(i)
                     block.id = str(i)
 
                 state["blocks"] = expanded_blocks

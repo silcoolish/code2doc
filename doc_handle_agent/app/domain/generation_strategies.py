@@ -82,10 +82,16 @@ class GenerationStrategy(ABC):
         results: List[DocumentBlock] = []
 
         for block in static_blocks:
+            if block.is_table:
+                block_type = "table"
+            elif block.is_heading:
+                block_type = "heading"
+            else:
+                block_type = "paragraph"
             results.append(
                 DocumentBlock(
                     block_id=block.id,
-                    block_type="heading" if block.is_heading else "paragraph",
+                    block_type=block_type,
                     text_content=block.content_text or "",
                     heading_level=block.heading_level,
                 )
@@ -287,6 +293,13 @@ class GenerationStrategy(ABC):
                     data["max_length"] = block.max_length
                 if block.example:
                     data["example"] = block.example
+            if block.is_table:
+                if block.table_schema:
+                    data["table_schema"] = block.table_schema
+                if block.attrs.get("header_row") is not None:
+                    data["header_row"] = block.attrs["header_row"]
+                if block.attrs.get("header_column") is not None:
+                    data["header_column"] = block.attrs["header_column"]
             result.append(data)
         return result
 
@@ -478,10 +491,16 @@ class FullContextStrategy(GenerationStrategy):
                     block_id=block.id,
                     fallback_to_default=True,
                 )
+                if block.is_table:
+                    block_type = "table"
+                elif block.is_heading:
+                    block_type = "heading"
+                else:
+                    block_type = "paragraph"
                 results.append(
                     DocumentBlock(
                         block_id=block.id,
-                        block_type="heading" if block.is_heading else "paragraph",
+                        block_type=block_type,
                         text_content=block.content_text
                         or f"[内容块 '{block.id}' 生成缺失]",
                         heading_level=block.heading_level,
@@ -907,6 +926,13 @@ class BatchedGenerationStrategy(GenerationStrategy):
                     data["max_length"] = block.max_length
                 if block.example:
                     data["example"] = block.example
+            if block.is_table:
+                if block.table_schema:
+                    data["table_schema"] = block.table_schema
+                if block.attrs.get("header_row") is not None:
+                    data["header_row"] = block.attrs["header_row"]
+                if block.attrs.get("header_column") is not None:
+                    data["header_column"] = block.attrs["header_column"]
             result.append(data)
         return result
 
@@ -932,10 +958,16 @@ class BatchedGenerationStrategy(GenerationStrategy):
             if not block.is_template:
                 continue
             if block.id not in result_ids:
+                if block.is_table:
+                    block_type = "table"
+                elif block.is_heading:
+                    block_type = "heading"
+                else:
+                    block_type = "paragraph"
                 results.append(
                     DocumentBlock(
                         block_id=block.id,
-                        block_type="heading" if block.is_heading else "paragraph",
+                        block_type=block_type,
                         text_content=f"[内容块 '{block.id}' 生成缺失]",
                         heading_level=block.heading_level,
                     )

@@ -42,7 +42,7 @@ class TemplateBlock:
     parent_block_id: Optional[str]  # 父block ID
     block_type: str  # "heading" | "paragraph" | "list" | "table" | "code" | "image" | "diagram"
     heading_level: int  # 标题层级
-    order_no: int  # 排序号
+    order_no: str  # 排序号（workspace 已改为 VARCHAR fractional indexing）
     content_text: str  # 纯文本内容（对应 workspace contentText）
     attrs: Dict[str, Any] = field(default_factory=dict)  # 模板属性
     source_refs: List[Dict[str, Any]] = field(default_factory=list)  # 源码来源引用（对应 workspace sourceRefs）
@@ -90,6 +90,19 @@ class TemplateBlock:
     def example(self) -> Optional[str]:
         """获取参考示例."""
         return self.attrs.get("example")
+
+    @property
+    def is_table(self) -> bool:
+        """是否为表格类型内容块."""
+        return self.block_type == "table"
+
+    @property
+    def table_schema(self) -> Optional[Dict[str, Any]]:
+        """获取表格结构定义.
+
+        从 attrs.table_schema 读取，用于向 LLM 传递列定义、表头配置等预设结构。
+        """
+        return self.attrs.get("table_schema")
 
     @property
     def is_image_block(self) -> bool:

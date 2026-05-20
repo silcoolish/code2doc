@@ -291,7 +291,7 @@ class WorkspaceServiceAdapter:
                     parent_block_id=item.get("parentBlockId"),
                     block_type=item.get("blockType", "paragraph"),
                     heading_level=item.get("headingLevel", 0),
-                    order_no=item.get("orderNo", 0),
+                    order_no=item.get("orderNo", "") or "",
                     content_text=item.get("contentText", ""),
                     attrs=attrs,
                     source_refs=item.get("sourceRefs", []),

@@ -60,7 +60,14 @@
       "PowerShell($env:APP_NAME; $env:DASHSCOPE_API_KEY; $env:LLM_PROVIDER)",
       "PowerShell(Get-ChildItem -Path \"D:\\\\WorkSpace\\\\code2doc\\\\doc_handle_agent\" -Recurse -File | Where-Object { $_.Extension -in @\\('.py','.md','.json','.yaml','.yml','.txt','.toml'\\) } | Select-String -Pattern \"batch_get_image_urls\" | Select-Object -First 30)",
       "PowerShell(Get-ChildItem -Path \"D:\\\\WorkSpace\\\\code2doc\\\\knowledge_base_service\" -Recurse -File | Where-Object { $_.Extension -in @\\('.py','.md','.json','.yaml','.yml','.txt','.toml'\\) } | Select-String -Pattern \"batch_get_image_urls\" | Select-Object -First 30)",
-      "Bash(findstr -i \"flowchart_image_dir static_files_path\")"
+      "Bash(findstr -i \"flowchart_image_dir static_files_path\")",
+      "Bash(npx skills *)",
+      "Bash(python3 -c \"import cairosvg; print\\('cairosvg available'\\)\")",
+      "Bash(python3 *)",
+      "PowerShell(python gen_arch.py)",
+      "PowerShell(Get-Command *)",
+      "PowerShell(npm install *)",
+      "PowerShell(node svg2png.js)"
     ]
   }
 }

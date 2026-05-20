@@ -1,5 +1,6 @@
 """内容生成器 - 负责构建提示词和解析响应."""
 
+import json
 from typing import Any, Dict, List, Tuple
 
 from app.domain.content_generator_agent import ContentGeneratorAgent
@@ -189,15 +190,25 @@ class ContentGenerator:
         results: List[DocumentBlock] = []
 
         for block in blocks:
-            if block.is_template:
-                content = f"[内容生成失败: {block.content_text}]"
+            if block.is_table:
+                block_type = "table"
+                if block.attrs.get("table"):
+                    content = json.dumps(block.attrs["table"], ensure_ascii=False)
+                elif block.is_template:
+                    content = f"[内容生成失败: {block.content_text}]"
+                else:
+                    content = block.content_text or ""
+            elif block.is_heading:
+                block_type = "heading"
+                content = f"[内容生成失败: {block.content_text}]" if block.is_template else (block.content_text or "")
             else:
-                content = block.content_text or ""
+                block_type = "paragraph"
+                content = f"[内容生成失败: {block.content_text}]" if block.is_template else (block.content_text or "")
 
             results.append(
                 DocumentBlock(
                     block_id=block.id,
-                    block_type="heading" if block.is_heading else "paragraph",
+                    block_type=block_type,
                     text_content=content,
                     heading_level=block.heading_level,
                 )
