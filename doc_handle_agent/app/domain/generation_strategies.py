@@ -55,12 +55,14 @@ class GenerationStrategy(ABC):
         self,
         blocks: List[TemplateBlock],
         repo_id: str,
+        on_progress: Optional[Callable[[int, int], None]] = None,
     ) -> List[DocumentBlock]:
         """执行生成策略.
 
         Args:
             blocks: 完整block列表
             repo_id: 仓库ID
+            on_progress: 可选的进度回调函数，参数为(current, total)
 
         Returns:
             DocumentBlock 列表

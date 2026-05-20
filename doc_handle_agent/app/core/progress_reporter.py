@@ -1,7 +1,6 @@
 """Progress reporter for hierarchical progress tracking."""
 
 import asyncio
-import logging
 
 from app.utils.logger import get_logger
 

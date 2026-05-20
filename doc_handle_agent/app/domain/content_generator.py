@@ -121,7 +121,9 @@ class ContentGenerator:
                 "strategy_fallback_signal",
                 strategy=strategy_name,
             )
-            return await self._fallback_to_next_strategy(strategy_name, blocks, repo_id)
+            return await self._fallback_to_next_strategy(
+                strategy_name, blocks, repo_id, on_progress=on_progress
+            )
         except Exception as e:
             logger.error(
                 "strategy_execution_failed",
@@ -137,6 +139,7 @@ class ContentGenerator:
         failed_strategy_name: str,
         blocks: List[TemplateBlock],
         repo_id: str,
+        on_progress: Optional[Callable[[int, int], None]] = None,
     ) -> List[DocumentBlock]:
         """降级到下一个策略.
 
@@ -158,13 +161,15 @@ class ContentGenerator:
             return self._build_error_results(blocks)
 
         try:
-            return await strategy.execute(blocks, repo_id)
+            return await strategy.execute(blocks, repo_id, on_progress=on_progress)
         except FallbackSignalError:
             logger.warning(
                 "fallback_strategy_signal",
                 strategy=strategy.name,
             )
-            return await self._fallback_to_next_strategy(strategy.name, blocks, repo_id)
+            return await self._fallback_to_next_strategy(
+                strategy.name, blocks, repo_id, on_progress=on_progress
+            )
         except Exception as e:
             logger.error(
                 "fallback_strategy_failed",
