@@ -30,6 +30,21 @@ class TestDocumentEngineProgress:
         result = engine.get_progress("flow_2")
 
         assert result["progress"] == 55
+        assert result["current_step"] == 4
+
+    def test_get_progress_failed_state(self):
+        engine = DocumentEngine()
+        state = create_initial_state(repo_id="r1", template_id="t1")
+        state["status"] = GenerationStatus.FAILED.value
+        state["error"] = "Something went wrong"
+        engine._task_states["flow_4"] = state
+
+        result = engine.get_progress("flow_4")
+
+        assert result["progress"] == 0
+        assert result["current_step"] == 0
+        assert result["status"] == "failed"
+        assert "Something went wrong" in result["message"]
 
     def test_get_progress_completed_state(self):
         engine = DocumentEngine()
