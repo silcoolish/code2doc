@@ -84,10 +84,28 @@ class DocumentGenerator:
         return workflow.compile()
 
     def _wrap_node(self, node: WorkflowNode):
-        """包装节点执行函数，在执行前记录当前节点."""
+        """包装节点执行函数，在执行前记录当前节点并注入 ProgressReporter."""
 
         async def wrapped(state: AgentState) -> AgentState:
             state["current_node"] = node.name
+
+            # 注入 ProgressReporter
+            from app.core.document_engine import DocumentEngine
+            from app.core.progress_reporter import ProgressReporter
+
+            node_index = DocumentEngine._NODE_ORDER.index(node.name)
+            completed_weight = sum(
+                DocumentEngine._NODE_WEIGHTS[DocumentEngine._NODE_ORDER[i]]
+                for i in range(node_index)
+            )
+            reporter = ProgressReporter(
+                state=state,
+                node_name=node.name,
+                node_weight=DocumentEngine._NODE_WEIGHTS[node.name],
+                completed_weight=completed_weight,
+            )
+            state["__progress_reporter"] = reporter
+
             return await node.execute(state)
 
         return wrapped
