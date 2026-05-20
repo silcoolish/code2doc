@@ -237,6 +237,16 @@ class DocumentEngine:
         "store_block_list": 95,
     }
 
+    _NODE_WEIGHTS = {
+        "list_template_block": 0.05,
+        "outline_confirmation": 0.05,
+        "select_strategy": 0.05,
+        "generate_blocks": 0.55,
+        "create_document": 0.10,
+        "process_image_blocks": 0.15,
+        "store_block_list": 0.05,
+    }
+
     def get_progress(self, flow_id: str) -> Dict:
         """获取生成进度.
 
@@ -291,15 +301,21 @@ class DocumentEngine:
 
         # 根据当前节点计算进度
         total_steps = len(self._NODE_ORDER)
-        if current_node and current_node in self._NODE_ORDER:
-            current_step = self._NODE_ORDER.index(current_node) + 1
-            progress = self._NODE_PROGRESS_MAP.get(current_node, 0)
-            node_name_cn = self._NODE_NAME_MAP.get(current_node, current_node)
-            message = f"正在{node_name_cn}..."
+
+        if "progress" in state and state["progress"] is not None:
+            current_step = self._NODE_ORDER.index(current_node) + 1 if current_node else 0
+            progress = state["progress"]
+            message = state.get("message", "")
         else:
-            current_step = 0
-            progress = 0
-            message = state.get("message", "等待开始生成...")
+            if current_node and current_node in self._NODE_ORDER:
+                current_step = self._NODE_ORDER.index(current_node) + 1
+                progress = self._NODE_PROGRESS_MAP.get(current_node, 0)
+                node_name_cn = self._NODE_NAME_MAP.get(current_node, current_node)
+                message = f"正在{node_name_cn}..."
+            else:
+                current_step = 0
+                progress = 0
+                message = state.get("message", "等待开始生成...")
 
         return {
             "flow_id": flow_id,

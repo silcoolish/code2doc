@@ -48,6 +48,10 @@ class AgentState(TypedDict):
     # 当前执行的节点名称
     current_node: Optional[str]
 
+    # 细粒度进度
+    progress: Optional[float]
+    __progress_reporter: Optional[Any]
+
     # 策略选择结果
     selected_strategy: Optional[str]  # 选中的策略名称
     estimated_tokens: int  # 预估token数
@@ -96,4 +100,6 @@ def create_initial_state(
         "selected_strategy": None,
         "estimated_tokens": 0,
         "current_node": None,
+        "progress": None,
+        "__progress_reporter": None,
     }
