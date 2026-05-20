@@ -38,6 +38,7 @@ class ListTemplateBlockNode(WorkflowNode):
         3. 更新状态
         """
         template_id = state["template_id"]
+        reporter = state.get("__progress_reporter")
         logger.info(
             "workflow_node",
             node=self.name,
@@ -46,13 +47,19 @@ class ListTemplateBlockNode(WorkflowNode):
         )
 
         try:
+            if reporter:
+                await reporter.report_percent(0, "正在获取模板内容块列表...")
+
             with log_timing("list_template_blocks", template_id=template_id):
                 blocks = await self.workspace_adapter.get_template_blocks(template_id)
 
             state["blocks"] = blocks
             state["total_blocks"] = len(blocks)
             state["status"] = GenerationStatus.GENERATING.value
-            state["message"] = f"获取完成，共{len(blocks)}个内容块待生成"
+            if reporter:
+                await reporter.report_percent(100, f"获取完成，共{len(blocks)}个内容块待生成")
+            else:
+                state["message"] = f"获取完成，共{len(blocks)}个内容块待生成"
 
             logger.info(
                 "list_template_block_success",

@@ -50,9 +50,14 @@ class OutlineConfirmationNode(WorkflowNode):
         if not blocks:
             return state
 
+        reporter = state.get("__progress_reporter")
+
         try:
             state["status"] = GenerationStatus.PARSING.value
             state["message"] = "正在确认文档大纲..."
+
+            if reporter:
+                await reporter.report_percent(0, "正在确认文档大纲...")
 
             with log_timing("outline_confirmation", block_count=len(blocks)):
                 sorted_blocks = sorted(blocks, key=lambda b: b.order_no)
@@ -66,7 +71,10 @@ class OutlineConfirmationNode(WorkflowNode):
 
                 state["blocks"] = expanded_blocks
                 state["total_blocks"] = len(expanded_blocks)
-                state["message"] = f"大纲确认完成，共{len(expanded_blocks)}个内容块"
+                if reporter:
+                    await reporter.report_percent(100, f"大纲确认完成，共{len(expanded_blocks)}个内容块")
+                else:
+                    state["message"] = f"大纲确认完成，共{len(expanded_blocks)}个内容块"
 
             logger.info(
                 "outline_confirmation_success",

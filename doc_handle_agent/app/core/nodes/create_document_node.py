@@ -41,10 +41,14 @@ class CreateDocumentNode(WorkflowNode):
             return state
 
         doc_blocks = state.get("doc_blocks", [])
+        reporter = state.get("__progress_reporter")
 
         try:
             state["status"] = GenerationStatus.BUILDING.value
             state["message"] = "正在创建文档..."
+
+            if reporter:
+                await reporter.report_percent(0, "正在创建文档...")
 
             title = self._extract_title(state)
             state["title"] = title
@@ -66,7 +70,10 @@ class CreateDocumentNode(WorkflowNode):
 
             document_id = save_response.document_id
             state["document_id"] = document_id
-            state["message"] = "文档创建成功"
+            if reporter:
+                await reporter.report_percent(100, "文档创建成功")
+            else:
+                state["message"] = "文档创建成功"
 
             logger.info(
                 "create_document_success",

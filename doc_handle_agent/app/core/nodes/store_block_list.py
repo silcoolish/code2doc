@@ -49,6 +49,10 @@ class StoreBlockListNode(WorkflowNode):
             state["status"] = GenerationStatus.BUILDING.value
             state["message"] = "正在构建最终文档..."
 
+            reporter = state.get("__progress_reporter")
+            if reporter:
+                await reporter.report_percent(0, "正在构建最终文档...")
+
             doc_blocks = state.get("doc_blocks", [])
             if not doc_blocks:
                 logger.warning("no_doc_blocks_in_state")
@@ -75,7 +79,10 @@ class StoreBlockListNode(WorkflowNode):
             document_id = save_response.document_id
             state["document_id"] = document_id
             state["status"] = GenerationStatus.BUILDING.value
-            state["message"] = "文档已保存，正在收尾..."
+            if reporter:
+                await reporter.report_percent(100, "文档已保存")
+            else:
+                state["message"] = "文档已保存，正在收尾..."
 
             logger.info(
                 "store_block_list_success",

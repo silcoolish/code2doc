@@ -32,23 +32,33 @@ class SelectStrategyNode(WorkflowNode):
             return state
 
         blocks = state.get("blocks", [])
+        reporter = state.get("__progress_reporter")
+
         if not blocks:
             state["selected_strategy"] = "full_context"
             state["estimated_tokens"] = 0
             state["message"] = "无可生成内容块，跳过策略选择"
+            if reporter:
+                await reporter.report_percent(100, "无可生成内容块，跳过策略选择")
             return state
 
         try:
+            if reporter:
+                await reporter.report_percent(0, "正在选择内容生成策略...")
+
             with log_timing("select_strategy", block_count=len(blocks)):
                 strategy_name, estimated_tokens = self.content_generator.select_strategy(blocks)
 
             state["selected_strategy"] = strategy_name
             state["estimated_tokens"] = estimated_tokens
-            state["message"] = (
-                f"策略已选择: {strategy_name}, "
-                f"预估token: {estimated_tokens}, "
-                f"共{len(blocks)}个内容块"
-            )
+            if reporter:
+                await reporter.report_percent(100, f"策略已选择: {strategy_name}")
+            else:
+                state["message"] = (
+                    f"策略已选择: {strategy_name}, "
+                    f"预估token: {estimated_tokens}, "
+                    f"共{len(blocks)}个内容块"
+                )
 
             logger.info(
                 "select_strategy_success",
