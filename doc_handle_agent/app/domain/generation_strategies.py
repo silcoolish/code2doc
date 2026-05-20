@@ -4,7 +4,7 @@ import json
 from abc import ABC, abstractmethod
 
 from json_repair import repair_json
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from app.domain.content_generator_agent import ContentGeneratorAgent
 from app.domain.prompts import (
@@ -421,12 +421,14 @@ class FullContextStrategy(GenerationStrategy):
         self,
         blocks: List[TemplateBlock],
         repo_id: str,
+        on_progress: Optional[Callable[[int, int], None]] = None,
     ) -> List[DocumentBlock]:
         """执行完整上下文策略.
 
         Args:
             blocks: 完整block列表
             repo_id: 仓库ID
+            on_progress: 可选的进度回调函数（单批次策略忽略此参数）
 
         Returns:
             DocumentBlock 列表
@@ -527,6 +529,7 @@ class BatchedGenerationStrategy(GenerationStrategy):
         self,
         blocks: List[TemplateBlock],
         repo_id: str,
+        on_progress: Optional[Callable[[int, int], None]] = None,
     ) -> List[DocumentBlock]:
         """执行分批生成策略.
 
@@ -538,6 +541,7 @@ class BatchedGenerationStrategy(GenerationStrategy):
         Args:
             blocks: 完整block列表
             repo_id: 仓库ID
+            on_progress: 可选的进度回调函数，参数为(current, total)
 
         Returns:
             DocumentBlock 列表
@@ -626,6 +630,10 @@ class BatchedGenerationStrategy(GenerationStrategy):
                     block = block_map.get(result.block_id)
                     if block:
                         block.content_text = result.text_content
+
+            # 触发进度回调
+            if on_progress:
+                on_progress(len(generated_ids), len(template_blocks))
 
             i = next_i
 

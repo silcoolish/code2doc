@@ -1,7 +1,7 @@
 """内容生成器 - 负责构建提示词和解析响应."""
 
 import json
-from typing import Any, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from app.domain.content_generator_agent import ContentGeneratorAgent
 from app.domain.generation_strategies import (
@@ -76,6 +76,7 @@ class ContentGenerator:
         strategy_name: str,
         blocks: List[TemplateBlock],
         repo_id: str,
+        on_progress: Optional[Callable[[int, int], None]] = None,
     ) -> List[DocumentBlock]:
         """按指定策略执行生成.
 
@@ -83,6 +84,7 @@ class ContentGenerator:
             strategy_name: 策略名称
             blocks: block列表
             repo_id: 仓库ID
+            on_progress: 可选的进度回调函数，参数为(current, total)
 
         Returns:
             DocumentBlock 列表
@@ -107,7 +109,7 @@ class ContentGenerator:
         strategy = strategy_cls(self.agent)
 
         try:
-            results = await strategy.execute(blocks, repo_id)
+            results = await strategy.execute(blocks, repo_id, on_progress=on_progress)
             logger.info(
                 "execute_strategy_complete",
                 strategy_name=strategy_name,
