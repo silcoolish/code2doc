@@ -1,5 +1,6 @@
 """内容生成节点."""
 
+import asyncio
 import json
 from typing import List
 
@@ -46,14 +47,44 @@ class GenerateBlocksNode(WorkflowNode):
 
         try:
             state["status"] = GenerationStatus.GENERATING.value
-            state["message"] = f"正在使用 {strategy_name} 策略生成内容..."
 
-            with log_timing("generate_blocks", strategy=strategy_name, total_blocks=len(blocks)):
-                results = await self.content_generator.execute_strategy(
-                    strategy_name=strategy_name,
-                    blocks=blocks,
-                    repo_id=state["repo_id"],
+            reporter = state.get("__progress_reporter")
+            if reporter:
+                await reporter.report_percent(
+                    0, f"正在使用 {strategy_name} 策略生成内容..."
                 )
+
+                def on_progress(current: int, total: int):
+                    asyncio.create_task(
+                        reporter.report_step(
+                            current,
+                            total,
+                            f"正在生成第 {current}/{total} 个内容块...",
+                        )
+                    )
+
+                with log_timing(
+                    "generate_blocks", strategy=strategy_name, total_blocks=len(blocks)
+                ):
+                    results = await self.content_generator.execute_strategy(
+                        strategy_name=strategy_name,
+                        blocks=blocks,
+                        repo_id=state["repo_id"],
+                        on_progress=on_progress,
+                    )
+
+                await reporter.report_percent(100, "内容生成完成")
+            else:
+                state["message"] = f"正在使用 {strategy_name} 策略生成内容..."
+
+                with log_timing(
+                    "generate_blocks", strategy=strategy_name, total_blocks=len(blocks)
+                ):
+                    results = await self.content_generator.execute_strategy(
+                        strategy_name=strategy_name,
+                        blocks=blocks,
+                        repo_id=state["repo_id"],
+                    )
 
             # 构建文档blocks
             doc_blocks = self._build_document_blocks(blocks, results)
