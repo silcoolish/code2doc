@@ -86,18 +86,25 @@ class ProcessImageBlocksNode(WorkflowNode):
             return state
 
         repo_id = state.get("repo_id", "")
+        reporter = state.get("__progress_reporter")
         try:
             state["status"] = GenerationStatus.GENERATING.value
-            state["message"] = "正在处理图片资源..."
+            if reporter:
+                await reporter.report_percent(0, "正在处理图片资源...")
+            else:
+                state["message"] = "正在处理图片资源..."
 
             with log_timing("process_image_blocks", block_count=len(doc_blocks)):
                 updated_blocks = await self._process_blocks(
                     doc_blocks,
                     document_id=document_id,
                     repo_id=repo_id,
+                    reporter=reporter,
                 )
 
             state["doc_blocks"] = updated_blocks
+            if reporter:
+                await reporter.report_percent(100, "图片资源处理完成")
 
             logger.info(
                 "process_image_blocks_complete",
@@ -123,6 +130,7 @@ class ProcessImageBlocksNode(WorkflowNode):
         doc_blocks: List[Dict[str, Any]],
         document_id: str,
         repo_id: str,
+        reporter: Any = None,
     ) -> List[Dict[str, Any]]:
         """处理文档块列表中的图片块.
 
@@ -130,16 +138,26 @@ class ProcessImageBlocksNode(WorkflowNode):
             doc_blocks: 文档块列表
             document_id: 文档 ID
             repo_id: 仓库 ID
+            reporter: 进度报告器（可选）
 
         Returns:
             更新后的文档块列表
         """
         updated_blocks: List[Dict[str, Any]] = []
+        image_blocks = [b for b in doc_blocks if b.get("blockType") == "image"]
+        processed_count = 0
 
         for block in doc_blocks:
             if block.get("blockType") == "image":
                 processed = await self._process_image_block(block, document_id, repo_id)
                 updated_blocks.append(processed)
+                processed_count += 1
+                if reporter:
+                    await reporter.report_step(
+                        processed_count,
+                        len(image_blocks),
+                        f"正在处理第 {processed_count}/{len(image_blocks)} 个图片资源...",
+                    )
             else:
                 updated_blocks.append(block)
 
