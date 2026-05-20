@@ -1,6 +1,6 @@
 """Agent工作流定义."""
 
-from typing import Any, Dict
+from typing import Any, Callable, Dict, Optional
 
 from langgraph.graph import END, StateGraph
 
@@ -31,6 +31,7 @@ class DocumentGenerator:
         mcp_client: MCPClient,
         content_generator: ContentGenerator,
         workspace_adapter: WorkspaceServiceAdapter = None,
+        on_state_change: Optional[Callable[[AgentState], None]] = None,
     ):
         """初始化文档生成器.
 
@@ -38,10 +39,12 @@ class DocumentGenerator:
             mcp_client: MCP客户端
             content_generator: 内容生成器
             workspace_adapter: workspace服务适配器
+            on_state_change: 状态变更回调，每次节点执行后调用
         """
         self.mcp_client = mcp_client
         self.content_generator = content_generator
         self.workspace_adapter = workspace_adapter or WorkspaceServiceAdapter()
+        self.on_state_change = on_state_change
         self.workflow = self._build_workflow()
 
     def _build_workflow(self) -> StateGraph:
@@ -106,7 +109,13 @@ class DocumentGenerator:
             )
             state["__progress_reporter"] = reporter
 
-            return await node.execute(state)
+            result = await node.execute(state)
+
+            # 同步状态变更到外部监听器（解决LangGraph浅拷贝导致进度不同步的问题）
+            if self.on_state_change:
+                self.on_state_change(result)
+
+            return result
 
         return wrapped
 

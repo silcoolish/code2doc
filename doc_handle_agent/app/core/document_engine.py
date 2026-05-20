@@ -156,10 +156,15 @@ class DocumentEngine:
                 workspace_adapter = WorkspaceServiceAdapter()
 
                 # 创建文档生成器
+                def on_state_change(state: AgentState):
+                    """每次节点执行后将状态同步回 _task_states，确保进度实时可见."""
+                    self._task_states[flow_id] = state
+
                 document_generator = DocumentGenerator(
                     mcp_client=mcp_client,
                     content_generator=content_generator,
                     workspace_adapter=workspace_adapter,
+                    on_state_change=on_state_change,
                 )
 
                 # 执行工作流
