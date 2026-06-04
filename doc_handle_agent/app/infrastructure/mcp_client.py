@@ -11,6 +11,24 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+def _normalize_tool_parameters(parameters: Any) -> Dict[str, Any]:
+    """将 MCP 工具参数规范化为 OpenAI-compatible 要求的 JSON Schema"""
+    if not isinstance(parameters, dict):
+        # 无参工具也必须声明为 object schema，否则 DeepSeek 会拒绝 type:null
+        return {"type": "object", "properties": {}}
+
+    normalized = dict(parameters)
+    if normalized.get("type") != "object":
+        # Chat Completions 的 function parameters 只能是 object
+        normalized["type"] = "object"
+    if not isinstance(normalized.get("properties"), dict):
+        # properties 缺失或为 null 时按无参工具处理
+        normalized["properties"] = {}
+    if "required" in normalized and not isinstance(normalized.get("required"), list):
+        normalized["required"] = []
+    return normalized
+
+
 class MCPClient:
     """MCP客户端封装 - 基于HTTP REST API."""
 
@@ -174,7 +192,7 @@ class MCPClient:
                 "function": {
                     "name": tool["name"],
                     "description": tool["description"],
-                    "parameters": tool.get("parameters", {}),
+                    "parameters": _normalize_tool_parameters(tool.get("parameters")),
                 },
             })
 

@@ -131,6 +131,9 @@ class ContentGeneratorAgent:
         # 根据模型名称判断使用哪个API
         if "qwen" in self.model_name.lower() or settings.llm_provider == "qwen":
             return await self._fetch_dashscope_context_limit()
+        elif "deepseek" in self.model_name.lower() or settings.llm_provider == "deepseek":
+            # DeepSeek OpenAI-compatible 接口不稳定提供模型上下文元数据，直接使用内置保守默认值
+            return self._get_default_context_limit(self.model_name)
         elif "claude" in self.model_name.lower():
             return await self._fetch_anthropic_context_limit()
         elif "gpt" in self.model_name.lower() or "openai" in self.model_name.lower():
