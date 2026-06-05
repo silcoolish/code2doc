@@ -2,6 +2,7 @@
 
 import logging
 import os
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -268,9 +269,12 @@ if __name__ == "__main__":
     import uvicorn
 
     app_settings = get_settings()
+    is_frozen = getattr(sys, "frozen", False)
+    app_target = app if is_frozen else "app.main:app"
     uvicorn.run(
-        "app.main:app",
+        app_target,
         host=app_settings.host,
         port=app_settings.port,
-        reload=app_settings.debug,
+        reload=app_settings.debug and not is_frozen,
+        workers=1,
     )
