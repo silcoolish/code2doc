@@ -58,6 +58,39 @@ class KnowledgeBaseTools:
                 return label
         return labels[0] if labels else "Unknown"
 
+    async def _search_nodes_by_name_as_fallback(
+        self,
+        repo_id: str,
+        query_text: str,
+        node_types: List[str],
+        top_k: int,
+    ) -> List[Dict[str, Any]]:
+        """语义搜索不可用时按名称模糊查找节点."""
+        try:
+            name_results = await self.graph_db.search_nodes_by_name(
+                repo_id=repo_id,
+                name=query_text,
+                node_types=node_types,
+                fuzzy=True,
+                top_k=top_k,
+            )
+        except Exception as e:
+            logger.warning(f"Name fallback search failed for {query_text}: {e}")
+            return []
+        fallback_results: List[Dict[str, Any]] = []
+        for nr in name_results:
+            fallback_results.append({
+                "node_id": nr.get("id"),
+                "name": nr.get("name"),
+                "node_type": self._normalize_node_type(nr.get("types", [])),
+                "distance": 0.0,
+                "_is_name_fallback": True,
+                "summary": nr.get("summary", ""),
+                "file_path": nr.get("file_path", ""),
+                "docstring": nr.get("docstring", ""),
+            })
+        return fallback_results
+
     # ------------------------------------------------------------------ #
     # 仓库统计
     # ------------------------------------------------------------------ #
@@ -255,11 +288,24 @@ class KnowledgeBaseTools:
             if search_mode == "semantic":
                 query_vector = semantic_embeddings.get(idx)
                 if query_vector is None:
+                    fallback_results = await self._search_nodes_by_name_as_fallback(
+                        repo_id=repo_id,
+                        query_text=query_text,
+                        node_types=node_types,
+                        top_k=top_k,
+                    )
                     batch_results.append({
                         "query": query_text,
                         "search_mode": "semantic",
+                        "node_types": node_types,
                         "error": "Failed to generate embedding",
-                        "results": [],
+                        "results": [
+                            {
+                                k: v for k, v in record.items()
+                                if k in result_keys and not k.startswith("_")
+                            }
+                            for record in fallback_results
+                        ],
                     })
                     continue
 
@@ -288,6 +334,13 @@ class KnowledgeBaseTools:
                             all_results.append(record)
                     except Exception as e:
                         logger.warning(f"Semantic search failed for {node_type}: {e}")
+                        fallback_results = await self._search_nodes_by_name_as_fallback(
+                            repo_id=repo_id,
+                            query_text=query_text,
+                            node_types=[node_type],
+                            top_k=top_k,
+                        )
+                        all_results.extend(fallback_results)
 
             else:  # search_mode == "name"
                 fuzzy = query_params.get("fuzzy", True)
@@ -313,14 +366,23 @@ class KnowledgeBaseTools:
                 except Exception as e:
                     logger.warning(f"Name search failed for '{query_text}': {e}")
 
-            # 语义搜索按距离排序；名称搜索已经是匹配结果
+            # 语义搜索优先保留向量结果，名称兜底只用于补充缺口
             if search_mode == "semantic":
-                all_results.sort(key=lambda x: x.get("distance", 0), reverse=True)
+                all_results.sort(
+                    key=lambda x: (
+                        not x.get("_is_name_fallback", False),
+                        x.get("distance") or 0,
+                    ),
+                    reverse=True,
+                )
 
             # 过滤字段
             filtered_results = []
             for result in all_results[:top_k]:
-                filtered = {k: v for k, v in result.items() if k in result_keys}
+                filtered = {
+                    k: v for k, v in result.items()
+                    if k in result_keys and not k.startswith("_")
+                }
                 filtered_results.append(filtered)
 
             batch_results.append({

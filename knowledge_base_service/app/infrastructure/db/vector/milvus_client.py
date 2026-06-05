@@ -11,6 +11,7 @@ from pymilvus import (
     utility,
     Collection,
 )
+from pymilvus.exceptions import MilvusException
 
 from app.config import get_settings
 from app.infrastructure.db.vector.base_client import VectorDatabaseClient
@@ -27,16 +28,20 @@ class MilvusClient(VectorDatabaseClient):
     _instance: Optional["MilvusClient"] = None
     _client: Optional[AsyncMilvusClient] = None
     _dimensions: int = 3072
+    _loaded_collections: set[str]
 
     def __new__(cls) -> "MilvusClient":
         """单例模式."""
         if cls._instance is None:
             cls._instance = super().__new__(cls)
+            cls._instance._loaded_collections = set()
         return cls._instance
 
     async def connect(self) -> None:
         """建立数据库连接."""
         if self._client is None:
+            # 新连接不能复用旧 collection 加载状态
+            self._loaded_collections.clear()
             settings = get_settings()
             self._dimensions = settings.embedding_dimensions
 
@@ -56,6 +61,7 @@ class MilvusClient(VectorDatabaseClient):
             # Milvus 客户端无需显式关闭
             self._client = None
             logger.info("Milvus connection closed")
+        self._loaded_collections.clear()
 
     async def _init_collection(self) -> None:
         """初始化 collection."""
@@ -257,14 +263,31 @@ class MilvusClient(VectorDatabaseClient):
         try:
             output_fields = ["id", "name", "node_id", "repo", "repo_id", "type", "summary"]
 
-            results = await self._client.search(
-                collection_name=collection_name,
-                data=[query_vector],
-                limit=top_k,
-                output_fields=output_fields,
-                filter=filter_expr,
-                search_params=search_params,
-            )
+            await self._ensure_collection_loaded(collection_name)
+            try:
+                results = await self._search_loaded_collection(
+                    collection_name=collection_name,
+                    query_vector=query_vector,
+                    top_k=top_k,
+                    output_fields=output_fields,
+                    filter_expr=filter_expr,
+                    search_params=search_params,
+                )
+            except Exception as search_error:
+                if not self._is_collection_not_loaded_error(search_error):
+                    raise
+                logger.warning(
+                    f"Collection {collection_name} was released before search, reloading and retrying"
+                )
+                await self._ensure_collection_loaded(collection_name, force=True)
+                results = await self._search_loaded_collection(
+                    collection_name=collection_name,
+                    query_vector=query_vector,
+                    top_k=top_k,
+                    output_fields=output_fields,
+                    filter_expr=filter_expr,
+                    search_params=search_params,
+                )
 
             # 格式化结果
             formatted_results = []
@@ -286,6 +309,46 @@ class MilvusClient(VectorDatabaseClient):
         except Exception as e:
             logger.error(f"Search failed in {collection_name}: {e}")
             raise
+
+    async def _ensure_collection_loaded(
+        self,
+        collection_name: str,
+        force: bool = False,
+    ) -> None:
+        """确保 collection 已加载到 Milvus 查询内存."""
+        if self._client is None:
+            await self.connect()
+        if not force and collection_name in self._loaded_collections:
+            return
+        await self._client.load_collection(collection_name)
+        self._loaded_collections.add(collection_name)
+        logger.info(f"Loaded collection for search: {collection_name}")
+
+    async def _search_loaded_collection(
+        self,
+        collection_name: str,
+        query_vector: List[float],
+        top_k: int,
+        output_fields: List[str],
+        filter_expr: Optional[str],
+        search_params: Dict[str, Any],
+    ):
+        """执行已加载 collection 上的向量搜索."""
+        return await self._client.search(
+            collection_name=collection_name,
+            data=[query_vector],
+            limit=top_k,
+            output_fields=output_fields,
+            filter=filter_expr,
+            search_params=search_params,
+        )
+
+    @staticmethod
+    def _is_collection_not_loaded_error(error: Exception) -> bool:
+        """判断是否为 Milvus collection 未加载错误."""
+        if isinstance(error, MilvusException) and getattr(error, "code", None) == 101:
+            return True
+        return "collection not loaded" in str(error).lower()
 
     async def delete_by_repo(
         self,
@@ -338,6 +401,7 @@ class MilvusClient(VectorDatabaseClient):
 
             # 释放 collection
             await self._client.release_collection(collection_name)
+            self._loaded_collections.discard(collection_name)
 
             return deleted
         except Exception as e:

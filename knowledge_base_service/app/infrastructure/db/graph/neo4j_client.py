@@ -955,8 +955,15 @@ class Neo4jClient(GraphDatabaseClient):
         Returns:
             依赖关系列表，每项包含 source, target, relationships, distance 字段
         """
-        query = """
-        MATCH path = (n {id: $node_id})-[r*1..$depth]-(m)
+        try:
+            safe_depth = int(depth)
+        except (TypeError, ValueError):
+            safe_depth = 1
+        safe_depth = max(1, min(safe_depth, 5))
+
+        # Neo4j 不支持在变长关系范围中直接使用参数，只能写入受控整数字面量
+        query = f"""
+        MATCH path = (n {{id: $node_id}})-[r*1..{safe_depth}]-(m)
         WHERE n <> m
         RETURN n.id as source_id, labels(n) as source_labels,
                m.id as target_id, labels(m) as target_labels,
@@ -966,7 +973,7 @@ class Neo4jClient(GraphDatabaseClient):
         """
         results = await self._execute_query(
             query,
-            {"node_id": node_id, "depth": depth},
+            {"node_id": node_id},
             database,
         )
 
