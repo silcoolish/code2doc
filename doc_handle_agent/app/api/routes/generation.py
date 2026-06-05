@@ -1,6 +1,5 @@
 """文档生成API路由."""
 
-from datetime import datetime
 from typing import List
 
 from fastapi import APIRouter, HTTPException
@@ -62,7 +61,7 @@ async def generate_document(
             repo_id=request.repo_id,
             template_id=request.template_id,
             document_id=state.get("document_id"),
-            created_at=datetime.now().isoformat(),
+            created_at=state.get("started_at") or "",
         )
 
     except ValueError as e:

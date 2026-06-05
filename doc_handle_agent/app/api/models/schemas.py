@@ -38,6 +38,9 @@ class GenerationProgressResponse(BaseModel):
     current_step: int = Field(..., description="当前步骤")
     total_steps: int = Field(..., description="总步骤")
     message: str = Field(..., description="状态消息")
+    started_at: Optional[str] = Field(None, description="开始时间")
+    updated_at: Optional[str] = Field(None, description="最近更新时间")
+    finished_at: Optional[str] = Field(None, description="结束时间")
     error: Optional[str] = Field(None, description="错误信息")
 
 

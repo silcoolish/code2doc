@@ -51,6 +51,9 @@ class AgentState(TypedDict):
     # 细粒度进度
     progress: Optional[float]
     __progress_reporter: Optional[Any]
+    started_at: Optional[str]
+    updated_at: Optional[str]
+    finished_at: Optional[str]
 
     # 策略选择结果
     selected_strategy: Optional[str]  # 选中的策略名称
@@ -102,4 +105,7 @@ def create_initial_state(
         "current_node": None,
         "progress": None,
         "__progress_reporter": None,
+        "started_at": None,
+        "updated_at": None,
+        "finished_at": None,
     }

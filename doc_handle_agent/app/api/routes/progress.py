@@ -43,6 +43,9 @@ async def get_generation_progress(
         current_step=progress["current_step"],
         total_steps=progress["total_steps"],
         message=progress["message"],
+        started_at=progress.get("started_at"),
+        updated_at=progress.get("updated_at"),
+        finished_at=progress.get("finished_at"),
         error=progress.get("error"),
     )
 

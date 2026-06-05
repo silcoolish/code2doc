@@ -18,6 +18,11 @@ from app.utils.timing import log_timing
 logger = get_logger(__name__)
 
 
+def build_current_timestamp() -> str:
+    """返回带时区的当前 ISO 时间字符串."""
+    return datetime.now().astimezone().isoformat()
+
+
 def cleanup_temp_files(repo_id: str) -> None:
     """清理临时目录下对应仓库的文件.
 
@@ -103,8 +108,12 @@ class DocumentEngine:
             repo_id=repo_id,
             template_id=template_id,
         )
+        started_at = build_current_timestamp()
         initial_state["status"] = GenerationStatus.PARSING.value
         initial_state["message"] = "等待开始生成..."
+        initial_state["started_at"] = started_at
+        initial_state["updated_at"] = started_at
+        initial_state["finished_at"] = None
 
         # 保存初始状态
         self._task_states[flow_id] = initial_state
@@ -158,6 +167,7 @@ class DocumentEngine:
                 # 创建文档生成器
                 def on_state_change(state: AgentState):
                     """每次节点执行后将状态同步回 _task_states，确保进度实时可见."""
+                    state["updated_at"] = build_current_timestamp()
                     self._task_states[flow_id] = state
 
                 document_generator = DocumentGenerator(
@@ -174,6 +184,8 @@ class DocumentEngine:
                 if final_state.get("status") != GenerationStatus.FAILED.value:
                     final_state["status"] = GenerationStatus.COMPLETED.value
                     final_state["message"] = "文档生成完成"
+                final_state["updated_at"] = build_current_timestamp()
+                final_state["finished_at"] = final_state["updated_at"]
 
                 # 保存最终状态
                 self._task_states[flow_id] = final_state
@@ -199,6 +211,8 @@ class DocumentEngine:
             failed_state["status"] = GenerationStatus.FAILED.value
             failed_state["error"] = str(e)
             failed_state["message"] = f"生成失败: {str(e)}"
+            failed_state["updated_at"] = build_current_timestamp()
+            failed_state["finished_at"] = failed_state["updated_at"]
             self._task_states[flow_id] = failed_state
 
         finally:
@@ -288,6 +302,9 @@ class DocumentEngine:
                 "total_steps": len(self._NODE_ORDER),
                 "message": "文档生成完成",
                 "document_id": state.get("document_id"),
+                "started_at": state.get("started_at"),
+                "updated_at": state.get("updated_at"),
+                "finished_at": state.get("finished_at"),
                 "error": None,
             }
 
@@ -301,6 +318,9 @@ class DocumentEngine:
                 "total_steps": len(self._NODE_ORDER),
                 "message": f"文档生成失败: {error}" if error else "文档生成失败",
                 "document_id": state.get("document_id"),
+                "started_at": state.get("started_at"),
+                "updated_at": state.get("updated_at"),
+                "finished_at": state.get("finished_at"),
                 "error": error,
             }
 
@@ -331,6 +351,9 @@ class DocumentEngine:
             "total_steps": total_steps,
             "message": message,
             "document_id": state.get("document_id"),
+            "started_at": state.get("started_at"),
+            "updated_at": state.get("updated_at"),
+            "finished_at": state.get("finished_at"),
             "error": error,
         }
 
@@ -376,6 +399,8 @@ class DocumentEngine:
         if flow_id in self._task_states:
             self._task_states[flow_id]["status"] = GenerationStatus.FAILED.value
             self._task_states[flow_id]["message"] = "生成已取消"
+            self._task_states[flow_id]["updated_at"] = build_current_timestamp()
+            self._task_states[flow_id]["finished_at"] = self._task_states[flow_id]["updated_at"]
 
         logger.info(
             "generation_cancelled",
