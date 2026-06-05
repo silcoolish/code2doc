@@ -1,6 +1,7 @@
 """内容生成策略 - 定义不同上下文处理策略的实现."""
 
 import json
+import re
 from abc import ABC, abstractmethod
 
 from json_repair import repair_json
@@ -16,6 +17,10 @@ from app.utils.logger import get_logger
 from app.utils.token_estimator import TokenEstimator
 
 logger = get_logger(__name__)
+
+MISSING_BLOCK_PLACEHOLDER_PATTERN = re.compile(
+    r"^\[内容块\s+'[^']+'\s+生成缺失\]$"
+)
 
 
 class FallbackSignalError(RuntimeError):
@@ -84,12 +89,7 @@ class GenerationStrategy(ABC):
         results: List[DocumentBlock] = []
 
         for block in static_blocks:
-            if block.is_table:
-                block_type = "table"
-            elif block.is_heading:
-                block_type = "heading"
-            else:
-                block_type = "paragraph"
+            block_type = self._resolve_block_type(block)
             results.append(
                 DocumentBlock(
                     block_id=block.id,
@@ -100,6 +100,44 @@ class GenerationStrategy(ABC):
             )
 
         return results
+
+    @staticmethod
+    def _resolve_block_type(block: TemplateBlock) -> str:
+        """解析 block 的结果类型."""
+        if block.is_table:
+            return "table"
+        if block.is_heading:
+            return "heading"
+        return block.block_type or "paragraph"
+
+    @staticmethod
+    def _is_missing_placeholder_content(content: Optional[str]) -> bool:
+        """判断是否为缺失内容占位符."""
+        if not isinstance(content, str):
+            return False
+        return bool(MISSING_BLOCK_PLACEHOLDER_PATTERN.match(content.strip()))
+
+    @staticmethod
+    def _normalize_generated_content(
+        block_type: Optional[str],
+        content: Any,
+    ) -> Any:
+        """按块类型清洗生成内容."""
+        if not isinstance(content, str):
+            return content
+
+        if block_type == "image":
+            return content.strip()
+        return content
+
+    def _build_missing_result(self, block: TemplateBlock) -> DocumentBlock:
+        """构建缺失内容兜底结果."""
+        return DocumentBlock(
+            block_id=block.id,
+            block_type=self._resolve_block_type(block),
+            text_content=f"[内容块 '{block.id}' 生成缺失]",
+            heading_level=block.heading_level,
+        )
 
     def _extract_json_from_response(self, raw_content: str) -> str | None:
         """从响应中提取JSON内容.
@@ -380,6 +418,7 @@ class GenerationStrategy(ABC):
                 content = item.get("content_text")
                 block_type = item.get("block_type")
                 heading_level = item.get("heading_level")
+                content = self._normalize_generated_content(block_type, content)
 
                 results.append(
                     DocumentBlock(
@@ -495,21 +534,17 @@ class FullContextStrategy(GenerationStrategy):
                     block_id=block.id,
                     fallback_to_default=True,
                 )
-                if block.is_table:
-                    block_type = "table"
-                elif block.is_heading:
-                    block_type = "heading"
-                else:
-                    block_type = "paragraph"
-                results.append(
-                    DocumentBlock(
-                        block_id=block.id,
-                        block_type=block_type,
-                        text_content=block.content_text
-                        or f"[内容块 '{block.id}' 生成缺失]",
-                        heading_level=block.heading_level,
+                if block.content_text and not self._is_missing_placeholder_content(block.content_text):
+                    results.append(
+                        DocumentBlock(
+                            block_id=block.id,
+                            block_type=self._resolve_block_type(block),
+                            text_content=block.content_text,
+                            heading_level=block.heading_level,
+                        )
                     )
-                )
+                else:
+                    results.append(self._build_missing_result(block))
 
         return results
 
@@ -651,14 +686,7 @@ class BatchedGenerationStrategy(GenerationStrategy):
             if block.id in result_map:
                 all_results.append(result_map[block.id])
             else:
-                all_results.append(
-                    DocumentBlock(
-                        block_id=block.id,
-                        block_type="heading" if block.is_heading else "paragraph",
-                        text_content=f"[内容块 '{block.id}' 生成缺失]",
-                        heading_level=block.heading_level,
-                    )
-                )
+                all_results.append(self._build_missing_result(block))
 
         # 统计缺失的模板 block
         template_block_ids = {b.id for b in template_blocks}
@@ -860,21 +888,55 @@ class BatchedGenerationStrategy(GenerationStrategy):
             )
             raise FallbackSignalError("Agent returned fallback signal")
 
-        return self._parse_response(raw_content, batch)
+        results = self._parse_response(raw_content, batch, fill_missing_placeholders=False)
+
+        for result in results:
+            if not result.block_id:
+                continue
+            block = next((item for item in batch if item.id == result.block_id), None)
+            if block:
+                block.content_text = result.text_content
+
+        missing_blocks = self._get_missing_template_blocks(batch, results)
+        if not missing_blocks:
+            return self._fill_missing_template_results(batch, results)
+
+        # 首轮批次可能被模型漏回部分模板块，逐个重试能避免直接落缺失占位
+        retry_results = await self._retry_missing_blocks(
+            batch=batch,
+            repo_id=repo_id,
+            batch_num=batch_num,
+            generated_ids=generated_ids,
+            missing_blocks=missing_blocks,
+            existing_results=results,
+        )
+
+        for result in retry_results:
+            if not result.block_id:
+                continue
+            block = next((item for item in batch if item.id == result.block_id), None)
+            if block:
+                block.content_text = result.text_content
+
+        return self._fill_missing_template_results(batch, results + retry_results)
 
     def _build_task_message(
         self,
         batch: List[TemplateBlock],
         repo_id: str,
         generated_ids: Optional[Set[str]] = None,
+        active_template_ids: Optional[Set[str]] = None,
     ) -> str:
         """构建批次任务消息.
 
         已生成的 block 会被当作 static 处理，避免 LLM 重复生成。
+        active_template_ids 用于缺失块重试，限制本轮只生成目标模板块
         """
         generated_ids = generated_ids or set()
         template_count = sum(
-            1 for b in batch if b.is_template and b.id not in generated_ids
+            1
+            for b in batch
+            if self._should_generate_in_batch(b, generated_ids, active_template_ids)
         )
         static_count = len(batch) - template_count
         desc = (
@@ -882,34 +944,61 @@ class BatchedGenerationStrategy(GenerationStrategy):
             f"{static_count} 个静态块）。请为模板块生成内容，静态块保持原样。"
         )
 
-        payload = self._serialize_batch_blocks(batch, generated_ids)
+        retry_scope = ""
+        if active_template_ids is not None:
+            retry_scope = (
+                f"本次只生成以下模板块: {', '.join(sorted(active_template_ids))}。"
+                "其他内容块仅作为上下文保留原样，返回的 JSON 数组中只保留这些目标模板块，不要回传无关 static 块。"
+            )
+
+        payload = self._serialize_batch_blocks(batch, generated_ids, active_template_ids)
         blocks_json = json.dumps(payload, ensure_ascii=False, indent=2)
 
         parts = [
             f"仓库ID: {repo_id}",
             "",
             desc,
+        ]
+        if retry_scope:
+            parts.extend(["", retry_scope])
+        parts.extend([
             "",
             "## 内容块列表",
             "",
             "```json",
             blocks_json,
             "```",
-        ]
+        ])
         return "\n".join(parts)
+
+    @staticmethod
+    def _should_generate_in_batch(
+        block: TemplateBlock,
+        generated_ids: Set[str],
+        active_template_ids: Optional[Set[str]] = None,
+    ) -> bool:
+        """判断当前批次中某个块是否需要生成."""
+        if not block.is_template or block.id in generated_ids:
+            return False
+        if active_template_ids is None:
+            return True
+        return block.id in active_template_ids
 
     def _serialize_batch_blocks(
         self,
         blocks: List[TemplateBlock],
         generated_ids: Optional[Set[str]] = None,
+        active_template_ids: Optional[Set[str]] = None,
     ) -> List[Dict[str, Any]]:
         """将block列表序列化为LLM所需的精简格式.
 
         已生成的 block 会被当作 static 处理，避免 LLM 重复生成内容。
+        active_template_ids 存在时，仅目标模板块暴露为 template
 
         Args:
             blocks: 原始block列表
             generated_ids: 已生成完毕的 block ID 集合
+            active_template_ids: 本轮允许生成的模板 block ID 集合
 
         Returns:
             精简后的字典列表
@@ -917,15 +1006,19 @@ class BatchedGenerationStrategy(GenerationStrategy):
         generated_ids = generated_ids or set()
         result: List[Dict[str, Any]] = []
         for block in blocks:
-            is_generated = block.id in generated_ids
+            should_generate = self._should_generate_in_batch(
+                block,
+                generated_ids,
+                active_template_ids,
+            )
             data: Dict[str, Any] = {
                 "id": block.id,
                 "block_type": block.block_type,
                 "heading_level": block.heading_level,
                 "content_text": block.content_text,
-                "template": "static" if is_generated else ("template" if block.is_template else "static"),
+                "template": "template" if should_generate else "static",
             }
-            if block.is_template and not is_generated:
+            if should_generate:
                 if block.prompt:
                     data["prompt"] = block.prompt
                 if block.image_id:
@@ -950,40 +1043,204 @@ class BatchedGenerationStrategy(GenerationStrategy):
         self,
         raw_content: str,
         batch: List[TemplateBlock],
+        fill_missing_placeholders: bool = True,
     ) -> List[DocumentBlock]:
         """解析批次响应，只提取 template 块的结果，static 块使用原始内容.
 
         Args:
             raw_content: 原始响应内容
             batch: 批次block列表（含 static 和 template）
+            fill_missing_placeholders: 是否为未返回的模板块补缺失占位
 
         Returns:
             DocumentBlock 列表
         """
         results = self._parse_blocks_from_response(raw_content)
-        result_ids = {r.block_id for r in results if r.block_id}
+        template_ids = {block.id for block in batch if block.is_template}
+        filtered_results = [
+            result
+            for result in results
+            if result.block_id in template_ids
+        ]
 
-        # 只为 template 块填充结果；static 块在 execute 中由 _build_static_results 覆盖
+        if not fill_missing_placeholders:
+            return filtered_results
+
+        return self._fill_missing_template_results(batch, filtered_results)
+
+    def _get_missing_template_blocks(
+        self,
+        batch: List[TemplateBlock],
+        results: List[DocumentBlock],
+    ) -> List[TemplateBlock]:
+        """找出当前批次中仍未生成成功的模板块."""
+        result_ids = {result.block_id for result in results if result.block_id}
+        return [
+            block
+            for block in batch
+            if block.is_template and block.id not in result_ids
+        ]
+
+    def _fill_missing_template_results(
+        self,
+        batch: List[TemplateBlock],
+        results: List[DocumentBlock],
+    ) -> List[DocumentBlock]:
+        """为当前批次仍缺失的模板块补占位结果."""
+        result_ids = {result.block_id for result in results if result.block_id}
+        filled_results = list(results)
+
         for block in batch:
-            if not block.is_template:
+            if not block.is_template or block.id in result_ids:
                 continue
-            if block.id not in result_ids:
-                if block.is_table:
-                    block_type = "table"
-                elif block.is_heading:
-                    block_type = "heading"
-                else:
-                    block_type = "paragraph"
-                results.append(
-                    DocumentBlock(
-                        block_id=block.id,
-                        block_type=block_type,
-                        text_content=f"[内容块 '{block.id}' 生成缺失]",
-                        heading_level=block.heading_level,
+            filled_results.append(self._build_missing_result(block))
+
+        return filled_results
+
+    def _build_retry_batch(
+        self,
+        batch: List[TemplateBlock],
+        missing_block: TemplateBlock,
+    ) -> List[TemplateBlock]:
+        """为缺失块重试构建最小上下文批次."""
+        try:
+            target_index = next(
+                index for index, block in enumerate(batch) if block.id == missing_block.id
+            )
+        except StopIteration:
+            return [missing_block]
+
+        block_map = {block.id: block for block in batch}
+        selected_ids: Set[str] = set()
+        retry_batch: List[TemplateBlock] = []
+
+        ancestor_ids = self._get_ancestor_ids(target_index, batch)
+        for ancestor_id in ancestor_ids:
+            ancestor_block = block_map.get(ancestor_id)
+            if ancestor_block and ancestor_block.id not in selected_ids:
+                retry_batch.append(ancestor_block)
+                selected_ids.add(ancestor_block.id)
+
+        previous_context: List[TemplateBlock] = []
+        previous_index = target_index - 1
+        while previous_index >= 0:
+            previous_block = batch[previous_index]
+            if previous_block.is_heading:
+                break
+            if previous_block.id not in selected_ids:
+                previous_context.append(previous_block)
+            previous_index -= 1
+            if len(previous_context) >= 2:
+                break
+
+        for previous_block in reversed(previous_context):
+            retry_batch.append(previous_block)
+            selected_ids.add(previous_block.id)
+
+        if missing_block.id not in selected_ids:
+            retry_batch.append(missing_block)
+            selected_ids.add(missing_block.id)
+
+        next_index = target_index + 1
+        next_context_count = 0
+        while next_index < len(batch):
+            next_block = batch[next_index]
+            if next_block.is_heading:
+                break
+            if next_block.id not in selected_ids:
+                retry_batch.append(next_block)
+                selected_ids.add(next_block.id)
+                next_context_count += 1
+            next_index += 1
+            if next_context_count >= 2:
+                break
+
+        return retry_batch
+
+    async def _retry_missing_blocks(
+        self,
+        batch: List[TemplateBlock],
+        repo_id: str,
+        batch_num: int,
+        generated_ids: Optional[Set[str]],
+        missing_blocks: List[TemplateBlock],
+        existing_results: List[DocumentBlock],
+    ) -> List[DocumentBlock]:
+        """逐个重试批次中缺失的模板块."""
+        retry_results: List[DocumentBlock] = []
+        retry_generated_ids = set(generated_ids or set())
+        retry_generated_ids.update(
+            result.block_id for result in existing_results if result.block_id
+        )
+
+        for missing_block in missing_blocks:
+            logger.warning(
+                "retry_missing_block",
+                batch_num=batch_num,
+                block_id=missing_block.id,
+            )
+            try:
+                retry_batch = self._build_retry_batch(batch, missing_block)
+                task_message = self._build_task_message(
+                    batch=retry_batch,
+                    repo_id=repo_id,
+                    generated_ids=retry_generated_ids,
+                    active_template_ids={missing_block.id},
+                )
+                raw_content = await self.agent.generate_with_tools(
+                    system_prompt=BATCH_CONTEXT_STRATEGY_PROMPT,
+                    task_message=task_message,
+                    repo_id=repo_id,
+                    task_name="batch_retry",
+                    max_iterations=10,
+                    excluded_tools=self.EXCLUDED_TOOLS,
+                )
+                if self._is_fallback_signal(raw_content):
+                    logger.warning(
+                        "retry_missing_block_fallback_signal",
+                        batch_num=batch_num,
+                        block_id=missing_block.id,
                     )
+                    continue
+
+                parsed_retry_results = self._parse_response(
+                    raw_content,
+                    retry_batch,
+                    fill_missing_placeholders=False,
+                )
+                target_retry_results = [
+                    result
+                    for result in parsed_retry_results
+                    if result.block_id == missing_block.id
+                ]
+                if not target_retry_results:
+                    logger.warning(
+                        "retry_missing_block_empty",
+                        batch_num=batch_num,
+                        block_id=missing_block.id,
+                    )
+                    continue
+
+                retry_result = target_retry_results[0]
+                retry_results.append(retry_result)
+                if retry_result.block_id:
+                    retry_generated_ids.add(retry_result.block_id)
+                    resolved_block = next(
+                        (item for item in batch if item.id == retry_result.block_id),
+                        None,
+                    )
+                    if resolved_block:
+                        resolved_block.content_text = retry_result.text_content
+            except Exception as ex:
+                logger.warning(
+                    "retry_missing_block_failed",
+                    batch_num=batch_num,
+                    block_id=missing_block.id,
+                    error_type=type(ex).__name__,
+                    error=str(ex),
                 )
 
-        return results
+        return retry_results
 
 
 class StrategySelector:

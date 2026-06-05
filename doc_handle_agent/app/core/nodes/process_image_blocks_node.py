@@ -6,6 +6,7 @@
 同时检查并上传同名的 drawio 资源文件。
 """
 
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
@@ -30,6 +31,9 @@ MAX_FILE_SIZE = 50 * 1024 * 1024
 # HTTP 下载重试配置
 DOWNLOAD_MAX_RETRIES = 3
 DOWNLOAD_RETRY_DELAY = 1.0
+MISSING_BLOCK_PLACEHOLDER_PATTERN = re.compile(
+    r"^\[内容块\s+'[^']+'\s+生成缺失\]$"
+)
 
 
 class ProcessImageBlocksNode(WorkflowNode):
@@ -498,6 +502,8 @@ class ProcessImageBlocksNode(WorkflowNode):
         if not content:
             return None
         stripped = content.strip()
+        if MISSING_BLOCK_PLACEHOLDER_PATTERN.match(stripped):
+            return None
         return stripped if stripped else None
 
     @staticmethod
@@ -517,6 +523,8 @@ class ProcessImageBlocksNode(WorkflowNode):
             return ""
 
         stripped = content.strip()
+        if MISSING_BLOCK_PLACEHOLDER_PATTERN.match(stripped):
+            return ""
         # 排除纯 URL
         if stripped.startswith(("http://", "https://")):
             return ""

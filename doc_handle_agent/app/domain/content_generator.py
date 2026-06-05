@@ -209,7 +209,7 @@ class ContentGenerator:
                 block_type = "heading"
                 content = f"[内容生成失败: {block.content_text}]" if block.is_template else (block.content_text or "")
             else:
-                block_type = "paragraph"
+                block_type = block.block_type or "paragraph"
                 content = f"[内容生成失败: {block.content_text}]" if block.is_template else (block.content_text or "")
 
             results.append(
