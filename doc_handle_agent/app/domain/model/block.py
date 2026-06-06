@@ -198,6 +198,7 @@ class DocumentBlock:
     text_content: str  # 文本内容
     heading_level: int = 0  # 标题层级
     block_id: Optional[str] = None  # 关联的模板block ID
+    source_refs: List[Dict[str, Any]] = field(default_factory=list)  # 生成结果携带的源码引用
 
     @property
     def is_heading(self) -> bool:
@@ -216,4 +217,5 @@ class DocumentBlock:
             "text_content": self.text_content,
             "heading_level": self.heading_level,
             "block_id": self.block_id,
+            "source_refs": self.source_refs,
         }

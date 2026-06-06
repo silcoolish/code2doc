@@ -635,6 +635,9 @@ class KnowledgeBaseTools:
                 image_id = node.get("image", "")
                 node_name = node.get("name", "")
                 node_type = node.get("type", "")
+                file_path = node.get("filePath") or node.get("path", "")
+                start_line = node.get("startLine") or 1
+                end_line = node.get("endLine") or start_line
 
                 if not image_id:
                     image_results.append({"node_id": node_id, "node_name": node_name, "node_type": node_type, "success": False, "error": "No image available"})
@@ -644,6 +647,16 @@ class KnowledgeBaseTools:
                     "node_id": node_id,
                     "node_name": node_name,
                     "node_type": node_type,
+                    "file_path": file_path,
+                    "start_line": start_line,
+                    "end_line": end_line,
+                    "source_ref": {
+                        "sourceId": node_id,
+                        "symbolName": node_name,
+                        "filePath": file_path,
+                        "lineStart": start_line,
+                        "lineEnd": end_line,
+                    },
                     "success": True,
                     "image_id": image_id,
                 })

@@ -126,6 +126,8 @@ class GenerateBlocksNode(WorkflowNode):
             block = next((b for b in blocks if b.id == result.block_id), None)
             if block:
                 block.content_text = result.text_content
+                if result.source_refs:
+                    block.source_refs = result.source_refs
                 if block.is_table and result.text_content:
                     try:
                         table_data = json.loads(result.text_content)

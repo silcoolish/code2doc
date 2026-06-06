@@ -8,7 +8,7 @@
 1. 根据模板内容块的提示词生成模板内容块的内容
 2. 不新增删除内容快
 3. 不修改内容块其他属性
-4. 重要: 如果内容块类型为图片，则通过 `batch_get_image_ids` 工具获取对应的图片ID，并将图片ID作为该内容块的 `content_text`
+4. 重要: 如果内容块类型为图片，则通过 `batch_get_image_ids` 工具获取对应的图片ID，并将图片ID作为该内容块的 `content_text`；同时把工具返回的 `source_ref` 写入该内容块的 `sourceRefs` 数组，保留流程图条目本身的源码定位能力
 5. 重要: 如果内容块类型为表格 (`block_type="table"`)，则 `content_text` 必须输出 JSON 格式的表格结构数据，不要输出 Markdown 表格或其他格式。JSON 格式要求如下：
    ```json
    {

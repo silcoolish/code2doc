@@ -418,6 +418,9 @@ class GenerationStrategy(ABC):
                 content = item.get("content_text")
                 block_type = item.get("block_type")
                 heading_level = item.get("heading_level")
+                source_refs = item.get("sourceRefs") or item.get("source_refs") or []
+                if not isinstance(source_refs, list):
+                    source_refs = []
                 content = self._normalize_generated_content(block_type, content)
 
                 results.append(
@@ -426,6 +429,7 @@ class GenerationStrategy(ABC):
                         block_type=block_type,
                         text_content=content,
                         heading_level=heading_level,
+                        source_refs=source_refs,
                     )
                 )
 
