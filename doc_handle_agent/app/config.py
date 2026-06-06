@@ -55,6 +55,7 @@ class Settings(BaseSettings):
 
     # 日志配置
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+    console_log_level: str = Field(default="INFO", alias="CONSOLE_LOG_LEVEL")
 
     @property
     def template_path(self) -> Path:

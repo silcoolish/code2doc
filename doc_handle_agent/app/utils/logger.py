@@ -40,8 +40,8 @@ def setup_logging() -> None:
     )
     file_handler.setFormatter(json_formatter)
 
-    # 控制台处理器：debug 模式使用 log_level，否则只输出 WARNING+
-    console_level = log_level if settings.debug else logging.WARNING
+    # 控制台级别由配置控制，配置异常时回退到文件日志级别
+    console_level = getattr(logging, settings.console_log_level.upper(), log_level)
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(console_level)
     console_handler.setFormatter(logging.Formatter("%(message)s"))
