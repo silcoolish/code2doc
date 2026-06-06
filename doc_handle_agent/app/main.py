@@ -2,6 +2,7 @@
 
 import uuid
 from contextlib import asynccontextmanager
+import sys
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -124,10 +125,12 @@ if __name__ == "__main__":
     import uvicorn
 
     settings = get_settings()
+    is_frozen = getattr(sys, "frozen", False)
 
     uvicorn.run(
-        "app.main:app",
+        app if is_frozen else "app.main:app",
         host=settings.app_host,
         port=settings.app_port,
-        reload=settings.debug,
+        reload=settings.debug and not is_frozen,
+        workers=1,
     )
