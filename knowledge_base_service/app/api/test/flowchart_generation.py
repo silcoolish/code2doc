@@ -6,14 +6,13 @@
 
 import logging
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from app.config import get_settings
+from app.config import get_settings, resolve_runtime_path
 from app.core.pipeline import PipelineContext
 from app.core.stages import FlowchartGenerationStage
 from app.domain.models.pipeline import PipelineStage, PipelineStatus, StageResult
@@ -22,9 +21,6 @@ from app.infrastructure.db import get_graph_db_client
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-# app 目录，用于定位 data 等相对路径资源
-APP_DIR = Path(__file__).resolve().parents[2]
 
 
 class TestFlowchartGenerationRequest(BaseModel):
@@ -260,12 +256,7 @@ async def get_flowchart_generation_status(repo_id: str) -> Dict[str, Any]:
         if total_methods > 0:
             overall_completion = round((total_with_image / total_methods) * 100, 2)
 
-        # 检查图片目录是否存在（基于 app 目录解析相对路径）
-        flowchart_dir = settings.flowchart_image_dir
-        if flowchart_dir.startswith("/"):
-            image_dir = Path(flowchart_dir) / repo_id / "image"
-        else:
-            image_dir = APP_DIR / flowchart_dir / repo_id / "image"
+        image_dir = resolve_runtime_path(settings.flowchart_image_dir) / repo_id / "image"
         image_files = []
         if image_dir.exists():
             # 获取前10个图片文件（支持png和svg）
@@ -362,11 +353,7 @@ async def get_methods_with_flowchart(
         )
 
         methods = []
-        flowchart_dir = settings.flowchart_image_dir
-        if flowchart_dir.startswith("/"):
-            image_dir = Path(flowchart_dir) / repo_id / "image"
-        else:
-            image_dir = APP_DIR / flowchart_dir / repo_id / "image"
+        image_dir = resolve_runtime_path(settings.flowchart_image_dir) / repo_id / "image"
 
         for record in methods_results:
             method_data = {k: v for k, v in record.items() if v is not None}
@@ -416,11 +403,7 @@ async def get_flowchart_image(repo_id: str, image_id: str):
     """
     try:
         settings = get_settings()
-        flowchart_dir = settings.flowchart_image_dir
-        if flowchart_dir.startswith("/"):
-            image_dir = Path(flowchart_dir) / repo_id / "image"
-        else:
-            image_dir = APP_DIR / flowchart_dir / repo_id / "image"
+        image_dir = resolve_runtime_path(settings.flowchart_image_dir) / repo_id / "image"
 
         # 尝试查找 png 或 svg 格式的图片
         image_path = image_dir / f"{image_id}.png"

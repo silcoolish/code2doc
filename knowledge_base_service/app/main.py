@@ -1,19 +1,15 @@
 """FastAPI 应用入口."""
 
 import logging
-import os
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
-
-# 获取项目根目录（基于当前文件位置）
-BASE_DIR = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from app.config import get_settings
+from app.config import PROJECT_ROOT, get_settings, resolve_runtime_path
 from app.infrastructure.db import get_graph_db_client, get_vector_db_client
 from app.api.routes import initialization, progress, reset, settings
 from app.api.test import (
@@ -133,13 +129,7 @@ async def lifespan(app: FastAPI):
 
 def _resolve_static_path(app_settings) -> Path:
     """解析静态文件目录路径."""
-    if app_settings.static_files_path.startswith("./"):
-        relative_path = app_settings.static_files_path[2:]
-        return BASE_DIR / relative_path
-    elif app_settings.static_files_path.startswith("/"):
-        return Path(app_settings.static_files_path)
-    else:
-        return BASE_DIR / app_settings.static_files_path
+    return resolve_runtime_path(app_settings.static_files_path)
 
 
 def create_app() -> FastAPI:
@@ -197,7 +187,7 @@ def create_app() -> FastAPI:
     if not static_url.startswith("/"):
         static_url = "/" + static_url
 
-    logger.info(f"BASE_DIR: {BASE_DIR}")
+    logger.info(f"PROJECT_ROOT: {PROJECT_ROOT}")
     logger.info(f"Static files configured: URL={static_url}, Directory={static_dir}")
 
     app.mount(

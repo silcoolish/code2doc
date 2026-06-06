@@ -7,10 +7,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from app.config import resolve_runtime_path
+
 logger = logging.getLogger(__name__)
 
 # CSV文件路径
-DATA_DIR = Path(__file__).parent.parent.parent / "data"
+DATA_DIR = resolve_runtime_path("data")
 REPO_STATUS_CSV = DATA_DIR / "repo_initialization.csv"
 
 # CSV表头

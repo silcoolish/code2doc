@@ -2,13 +2,12 @@
 
 import logging
 import shutil
-from pathlib import Path
 from typing import Any, Dict
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from app.config import get_settings
+from app.config import get_settings, resolve_runtime_path
 from app.core.pipeline import get_orchestrator
 from app.core.pipeline_logger import get_pipeline_log_manager
 from app.infrastructure.csv_storage import get_repo_status_storage
@@ -105,7 +104,7 @@ async def reset_initialization(repo_id: str) -> ResetResponse:
         # 5. 删除 data 目录下对应仓库的所有 img 文件
         try:
             settings = get_settings()
-            image_dir = Path(settings.flowchart_image_dir) / repo_id
+            image_dir = resolve_runtime_path(settings.flowchart_image_dir) / repo_id
             if image_dir.exists():
                 # 删除整个仓库的 image 目录
                 shutil.rmtree(image_dir)

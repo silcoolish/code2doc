@@ -1,12 +1,32 @@
 """配置管理模块."""
 
 from pathlib import Path
+import sys
 from typing import List, Optional
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-PROJECT_ROOT = Path(__file__).parent.parent
+
+def get_project_root() -> Path:
+    """获取运行时项目根目录."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
+PROJECT_ROOT = get_project_root()
+
+
+def resolve_runtime_path(path_value: str) -> Path:
+    """解析运行时路径，打包态相对 exe 目录，源码态相对项目根目录."""
+    normalized = path_value.strip()
+    if normalized.startswith("./"):
+        normalized = normalized[2:]
+    path = Path(normalized)
+    if path.is_absolute():
+        return path
+    return PROJECT_ROOT / path
 
 
 class Settings(BaseSettings):
@@ -110,7 +130,7 @@ class Settings(BaseSettings):
 
     # Static Files Settings
     public_base_url: str = Field(default="http://localhost:8000")  # 公共服务基础URL
-    static_files_path: str = Field(default="app/data")  # 相对于项目根目录，不要以./开头
+    static_files_path: str = Field(default="data")  # 相对于运行时项目根目录
     static_files_url: str = Field(default="/static")  # 静态文件URL前缀
 
     # Module Detection Strategy Settings

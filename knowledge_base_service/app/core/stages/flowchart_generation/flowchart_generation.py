@@ -24,15 +24,12 @@ from uuid import uuid4
 import aiohttp
 
 from app.config import get_settings
+from app.config import resolve_runtime_path
 from app.core.pipeline import PipelineContext, PipelineStageHandler
 from app.domain.models.pipeline import PipelineStage, PipelineStatus, StageResult
 from app.infrastructure.db import GraphDatabaseClient, get_graph_db_client
 
 logger = logging.getLogger(__name__)
-
-# 获取 app 目录（基于当前文件位置：app/core/stages/flowchart_generation/flowchart_generation.py）
-# 图片保存到 app/data 下
-BASE_DIR = Path(__file__).resolve().parents[3]
 
 
 class FlowchartGenerationStage(PipelineStageHandler):
@@ -72,15 +69,7 @@ class FlowchartGenerationStage(PipelineStageHandler):
             repo_id = getattr(context, 'repo_id', context.repo_name)
 
             # 确保图片目录存在
-            # 使用相对于项目根目录的路径
-            flowchart_dir = self.settings.flowchart_image_dir
-            if flowchart_dir.startswith("./"):
-                flowchart_dir = flowchart_dir[2:]
-            if flowchart_dir.startswith("/"):
-                image_base = Path(flowchart_dir)
-            else:
-                image_base = BASE_DIR / flowchart_dir
-
+            image_base = resolve_runtime_path(self.settings.flowchart_image_dir)
             image_dir = image_base / repo_id / "image"
             image_dir.mkdir(parents=True, exist_ok=True)
             logger.info(f"Flowchart image directory: {image_dir}")
