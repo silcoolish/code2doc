@@ -24,6 +24,25 @@ async def test_report_step_maps_to_global_progress() -> None:
 
 
 @pytest.mark.asyncio
+async def test_report_step_publishes_updated_state() -> None:
+    """Progress updates should be visible to external task snapshots."""
+    state = create_initial_state(repo_id="r1", template_id="t1")
+    snapshots = []
+    reporter = ProgressReporter(
+        state=state,
+        node_name="node_a",
+        node_weight=0.5,
+        completed_weight=0.2,
+        on_update=lambda updated_state: snapshots.append(updated_state.copy()),
+    )
+
+    await reporter.report_step(current=1, total=2, message="halfway")
+
+    assert snapshots[-1]["progress"] == 45.0
+    assert snapshots[-1]["message"] == "halfway"
+
+
+@pytest.mark.asyncio
 async def test_report_percent_maps_to_global_progress() -> None:
     """Percent-based progress should map correctly to global progress."""
     state = create_initial_state(repo_id="r1", template_id="t1")

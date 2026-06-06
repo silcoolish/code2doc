@@ -1,6 +1,7 @@
 """Progress reporter for hierarchical progress tracking."""
 
 import asyncio
+from typing import Callable, Optional
 
 from app.utils.logger import get_logger
 
@@ -16,6 +17,7 @@ class ProgressReporter:
         node_name: str,
         node_weight: float,
         completed_weight: float,
+        on_update: Optional[Callable[[dict], None]] = None,
     ) -> None:
         """Initialize the reporter.
 
@@ -24,11 +26,13 @@ class ProgressReporter:
             node_name: Name of the current node.
             node_weight: Share of global progress for this node (0-1).
             completed_weight: Sum of all previous nodes' weights.
+            on_update: Optional callback for publishing state changes.
         """
         self.state = state
         self.node_name = node_name
         self.node_weight = node_weight
         self.completed_weight = completed_weight
+        self.on_update = on_update
         self._lock = asyncio.Lock()
 
     async def report_step(self, current: int, total: int, message: str | None = None) -> None:
@@ -67,5 +71,7 @@ class ProgressReporter:
                 self.state["progress"] = min(100.0, max(0.0, round(progress * 100, 2)))
                 if message is not None:
                     self.state["message"] = message
+                if self.on_update:
+                    self.on_update(self.state)
         except Exception:
             logger.warning("Failed to update progress state", exc_info=True)

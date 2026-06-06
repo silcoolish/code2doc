@@ -106,8 +106,11 @@ class DocumentGenerator:
                 node_name=node.name,
                 node_weight=DocumentEngine._NODE_WEIGHTS[node.name],
                 completed_weight=completed_weight,
+                on_update=self.on_state_change,
             )
             state["__progress_reporter"] = reporter
+            if self.on_state_change:
+                self.on_state_change(state)
 
             result = await node.execute(state)
 
