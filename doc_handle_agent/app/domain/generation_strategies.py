@@ -562,6 +562,20 @@ class BatchedGenerationStrategy(GenerationStrategy):
     适用场景：文档规模较大，即使过滤静态block后仍然超出模型上下文限制。
     """
 
+    def __init__(
+        self,
+        agent: ContentGeneratorAgent,
+        max_batch_size: int = 20,
+    ):
+        """初始化分批生成策略.
+
+        Args:
+            agent: 内容生成器Agent实例
+            max_batch_size: 每批最大模板 block 数量（静态/标题 block 不计入限制）
+        """
+        super().__init__(agent)
+        self.max_batch_size = max_batch_size
+
     @property
     def name(self) -> str:
         return "batched_generation"
@@ -754,9 +768,6 @@ class BatchedGenerationStrategy(GenerationStrategy):
 
         return ancestors
 
-    # 每批最大模板 block 数量（静态/标题 block 不计入限制）
-    MAX_TEMPLATE_BLOCKS_PER_BATCH = 20
-
     def _build_next_batch(
         self,
         blocks: List[TemplateBlock],
@@ -810,7 +821,7 @@ class BatchedGenerationStrategy(GenerationStrategy):
             # 检查待生成的模板 block 是否超出限制
             current_templates = _count_templates_to_generate(batch)
             adding_templates = _count_templates_to_generate(blocks_to_add)
-            if batch and current_templates + adding_templates > self.MAX_TEMPLATE_BLOCKS_PER_BATCH:
+            if batch and current_templates + adding_templates > self.max_batch_size:
                 break
 
             # 按原始顺序插入祖先
@@ -1253,13 +1264,19 @@ class StrategySelector:
     根据预估的token数和模型上下文限制选择最适合的生成策略。
     """
 
-    def __init__(self, agent: ContentGeneratorAgent):
+    def __init__(
+        self,
+        agent: ContentGeneratorAgent,
+        max_batch_size: int = 20,
+    ):
         """初始化策略选择器.
 
         Args:
             agent: 内容生成器Agent实例
+            max_batch_size: 分批策略每批最大模板 block 数量
         """
         self.agent = agent
+        self.max_batch_size = max_batch_size
 
     # 每 1K token 预估生成耗时（秒），用于时间预算判定
     TIME_PER_1K_TOKENS = 3.0
@@ -1309,4 +1326,4 @@ class StrategySelector:
             estimated_time_sec=round(estimated_time_sec, 1),
             timeout_limit=timeout_limit,
         )
-        return BatchedGenerationStrategy(self.agent), full_context_tokens
+        return BatchedGenerationStrategy(self.agent, self.max_batch_size), full_context_tokens

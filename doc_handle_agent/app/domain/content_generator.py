@@ -17,6 +17,7 @@ from app.domain.model import (
 from app.domain.static_list_provider import StaticListProvider
 from app.infrastructure.mcp_client import MCPClient
 from app.utils.logger import get_logger
+from app.config import get_settings
 
 logger = get_logger(__name__)
 
@@ -43,9 +44,13 @@ class ContentGenerator:
             mcp_client: MCP客户端实例
             llm_client: 可选的LLM客户端，如果为None则创建默认客户端
         """
+        settings = get_settings()
         self.agent = ContentGeneratorAgent(mcp_client, llm_client)
-        self.strategy_selector = StrategySelector(self.agent)
+        self.strategy_selector = StrategySelector(
+            self.agent, max_batch_size=settings.batch_max_size
+        )
         self.static_list_provider = StaticListProvider(mcp_client)
+        self._batch_max_size = settings.batch_max_size
         logger.info("content_generator_initialized")
 
     async def initialize(self) -> None:
@@ -106,7 +111,10 @@ class ContentGenerator:
             logger.error("unknown_strategy", strategy_name=strategy_name)
             return self._build_error_results(blocks)
 
-        strategy = strategy_cls(self.agent)
+        if strategy_cls is BatchedGenerationStrategy:
+            strategy = strategy_cls(self.agent, max_batch_size=self._batch_max_size)
+        else:
+            strategy = strategy_cls(self.agent)
 
         try:
             results = await strategy.execute(blocks, repo_id, on_progress=on_progress)
@@ -154,7 +162,9 @@ class ContentGenerator:
         # 根据失败的策略选择降级策略
         if failed_strategy_name == "full_context":
             logger.warning("falling_back_to_batched_generation")
-            strategy = BatchedGenerationStrategy(self.agent)
+            strategy = BatchedGenerationStrategy(
+                self.agent, max_batch_size=self._batch_max_size
+            )
         else:
             # 分批策略也失败，返回错误结果
             logger.error("all_strategies_failed")

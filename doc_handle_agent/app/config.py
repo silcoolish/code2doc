@@ -57,6 +57,9 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     console_log_level: str = Field(default="INFO", alias="CONSOLE_LOG_LEVEL")
 
+    # 分批生成策略配置
+    batch_max_size: int = Field(default=20, alias="BATCH_MAX_SIZE")
+
     @property
     def template_path(self) -> Path:
         """获取模板目录路径."""
