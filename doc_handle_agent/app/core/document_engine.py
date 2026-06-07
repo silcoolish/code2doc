@@ -180,10 +180,22 @@ class DocumentEngine:
                 # 执行工作流
                 final_state = await document_generator.run(initial_state)
 
-                # 工作流正常结束后统一标记为完成（仅当未失败时）
-                if final_state.get("status") != GenerationStatus.FAILED.value:
+                # 节点内部可能已经吞掉异常并把 error 写回 state。
+                # 这里只信最终状态，不再无条件把任务改写成 completed。
+                if (
+                    final_state.get("status") != GenerationStatus.FAILED.value
+                    and not final_state.get("error")
+                ):
                     final_state["status"] = GenerationStatus.COMPLETED.value
                     final_state["message"] = "文档生成完成"
+                else:
+                    final_state["status"] = GenerationStatus.FAILED.value
+                    if not final_state.get("message"):
+                        final_state["message"] = (
+                            f"生成失败: {final_state.get('error')}"
+                            if final_state.get("error")
+                            else "生成失败"
+                        )
                 final_state["updated_at"] = build_current_timestamp()
                 final_state["finished_at"] = final_state["updated_at"]
 

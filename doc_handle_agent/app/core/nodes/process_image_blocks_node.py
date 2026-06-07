@@ -6,6 +6,7 @@
 同时检查并上传同名的 drawio 资源文件。
 """
 
+import json
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -499,12 +500,100 @@ class ProcessImageBlocksNode(WorkflowNode):
             图片引用（URL 或 image_id）或 None
         """
         content = block.get("contentText", "")
-        if not content:
+        content_ref = ProcessImageBlocksNode._extract_reference_from_value(content)
+        if content_ref:
+            return content_ref
+
+        attrs = block.get("attrs") if isinstance(block.get("attrs"), dict) else {}
+        for key in ("image_id", "imageId", "src", "url"):
+            attr_ref = ProcessImageBlocksNode._extract_reference_from_value(
+                attrs.get(key)
+            )
+            if attr_ref:
+                return attr_ref
+
+        return None
+
+    @staticmethod
+    def _extract_reference_from_value(value: Any) -> Optional[str]:
+        """从字符串或结构化值中提取真实图片引用."""
+        if value is None:
             return None
-        stripped = content.strip()
-        if MISSING_BLOCK_PLACEHOLDER_PATTERN.match(stripped):
+
+        if isinstance(value, dict):
+            # 兼容 LLM 直接回传工具结果 JSON 的情况，优先提取真正可下载的字段，
+            # 避免把“函数流程图”这类标题文本误当成图片资源。
+            for key in ("image_id", "imageId", "image_url", "imageUrl", "url", "src"):
+                ref = ProcessImageBlocksNode._extract_reference_from_value(value.get(key))
+                if ref:
+                    return ref
+            images = value.get("images")
+            if isinstance(images, list):
+                for item in images:
+                    ref = ProcessImageBlocksNode._extract_reference_from_value(item)
+                    if ref:
+                        return ref
             return None
-        return stripped if stripped else None
+
+        if isinstance(value, list):
+            for item in value:
+                ref = ProcessImageBlocksNode._extract_reference_from_value(item)
+                if ref:
+                    return ref
+            return None
+
+        if not isinstance(value, str):
+            return None
+
+        stripped = value.strip()
+        if not stripped or MISSING_BLOCK_PLACEHOLDER_PATTERN.match(stripped):
+            return None
+
+        parsed_ref = ProcessImageBlocksNode._extract_reference_from_json_text(stripped)
+        if parsed_ref:
+            return parsed_ref
+
+        markdown_match = re.search(r"!\[[^\]]*\]\(([^)\s]+)\)", stripped)
+        if markdown_match:
+            ref = markdown_match.group(1).strip()
+            if ProcessImageBlocksNode._is_valid_image_reference(ref):
+                return ref
+
+        url_match = re.search(r"https?://[^\s)\"']+", stripped)
+        if url_match:
+            ref = url_match.group(0).rstrip(".,;，。；")
+            if ProcessImageBlocksNode._is_valid_image_reference(ref):
+                return ref
+
+        return (
+            stripped
+            if ProcessImageBlocksNode._is_valid_image_reference(stripped)
+            else None
+        )
+
+    @staticmethod
+    def _extract_reference_from_json_text(text: str) -> Optional[str]:
+        """解析 LLM 可能原样返回的工具 JSON，提取 image_id/image_url."""
+        if not text.startswith(("{", "[")):
+            return None
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+        return ProcessImageBlocksNode._extract_reference_from_value(data)
+
+    @staticmethod
+    def _is_valid_image_reference(value: str) -> bool:
+        """判断字符串是否像可下载图片 URL 或知识库图片 ID."""
+        if not isinstance(value, str):
+            return False
+        stripped = value.strip()
+        if not stripped or any(ch.isspace() for ch in stripped):
+            return False
+        parsed = urlparse(stripped)
+        path = parsed.path if parsed.scheme in ("http", "https") else stripped
+        lower = path.lower()
+        return lower.endswith((".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp"))
 
     @staticmethod
     def _extract_caption(block: Dict[str, Any]) -> str:
