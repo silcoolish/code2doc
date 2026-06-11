@@ -38,6 +38,9 @@ class StoreBlockListNode(WorkflowNode):
         1. 构建文档blocks（包含生成的内容）
         2. 调用workspace_service创建/保存文档
         """
+        if state.get("error"):
+            return state
+
         logger.info(
             "workflow_node",
             node=self.name,
@@ -55,7 +58,9 @@ class StoreBlockListNode(WorkflowNode):
 
             doc_blocks = state.get("doc_blocks", [])
             if not doc_blocks:
-                logger.warning("no_doc_blocks_in_state")
+                # create_document 只创建占位文档；这里如果拿不到最终块，继续保存会把
+                # 任务伪装成成功，因此直接失败交给上层处理。
+                raise RuntimeError("No document blocks generated to persist")
 
             # 清空 block id，交由 workspace 服务生成
             for block in doc_blocks:
@@ -68,6 +73,7 @@ class StoreBlockListNode(WorkflowNode):
                 target_key="__project__",
                 title=title,
                 blocks=doc_blocks,
+                template_id=state.get("template_id"),
             )
 
             with log_timing("save_document", block_count=len(doc_blocks)):

@@ -40,7 +40,6 @@ class CreateDocumentNode(WorkflowNode):
         if state.get("error"):
             return state
 
-        doc_blocks = state.get("doc_blocks", [])
         reporter = state.get("__progress_reporter")
 
         try:
@@ -60,6 +59,7 @@ class CreateDocumentNode(WorkflowNode):
                 target_key="__project__",
                 title=title,
                 blocks=[],
+                template_id=state.get("template_id"),
             )
 
             with log_timing("create_document", repo_id=state["repo_id"]):
