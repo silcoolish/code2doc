@@ -14,8 +14,6 @@ from app.api.models.schemas import (
 )
 from app.core.document_engine import get_document_engine
 from app.domain.rewrite_agent import RewriteAgent
-from app.infrastructure.mcp_client import MCPClient
-from app.infrastructure.workspace.workspace_adapter import WorkspaceServiceAdapter
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -118,8 +116,8 @@ async def get_system_status() -> SystemStatusResponse:
 async def rewrite_block(request: RewriteBlockRequest) -> RewriteBlockResponse:
     """改写文档条目.
 
-    接收改写请求，调用 RewriteAgent 生成改写建议文本。
-    不执行写入操作，只返回建议内容。
+    接收改写请求，调用 RewriteAgent 生成可直接应用的正文。
+    不执行写入操作，具体应用方式由前端选择。
 
     Args:
         request: 改写请求
@@ -137,19 +135,13 @@ async def rewrite_block(request: RewriteBlockRequest) -> RewriteBlockResponse:
         action=request.action,
     )
 
-    if not request.block_id or not request.prompt:
-        raise HTTPException(status_code=400, detail="block_id and prompt are required")
+    if not request.block_id:
+        raise HTTPException(status_code=400, detail="block_id is required")
 
     try:
-        workspace_adapter = WorkspaceServiceAdapter()
-
-        async with MCPClient() as mcp_client:
-            agent = RewriteAgent(
-                mcp_client=mcp_client,
-                workspace_adapter=workspace_adapter,
-            )
-            response = await agent.rewrite(request)
-            return response
+        agent = RewriteAgent()
+        response = await agent.rewrite(request)
+        return response
 
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
