@@ -7,15 +7,15 @@
 - `id`: 内容块唯一标识
 - `block_type`: 块类型，`"heading"` 表示标题，`"paragraph"` 表示正文，`"image"` 表示图片，`"table"` 表示表格
 - `heading_level`: 标题层级（1-9），正文和图片为 0
-- `content_text`: 内容文本。对于静态块是现有内容，对于模板块是标题/主题摘要。对于 `table` 类型，此字段必须是一个 JSON 字符串，格式如下：
+- `content_text`: 内容文本。对于静态块是现有内容，对于模板块是标题/主题摘要。对于 `table` 类型，只生成单元格内容，不要生成完整表格结构。此字段使用对象格式，格式如下：
   ```json
   {
-    "columns": [{ "id": "col1", "label": "列名" }],
-    "rows": [{ "id": "row1", "cells": { "col1": { "text": "内容" } } }],
-    "headerRow": true,
-    "headerColumn": false
+    "rows": [
+      ["第一列内容", "第二列内容", "第三列内容"]
+    ]
   }
   ```
+  后端会根据输入的 `table_schema.columns` 自动装配 `columns`、`cells`、`headerRow`、`headerColumn`
 - `template`: `"static"` 表示静态内容，`"template"` 表示需要生成的模板内容
 - `prompt`: 模板内容块的生成提示词（仅 `template="template"` 时有效）
 - `min_length`: 最小字数限制（可选）

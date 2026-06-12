@@ -195,7 +195,7 @@ class DocumentBlock:
     """
 
     block_type: str  # "heading" | "paragraph" | "image" | 其他扩展类型
-    text_content: str  # 文本内容
+    text_content: Any  # 文本内容，表格块在落库前阶段也可能暂存 rows 对象
     heading_level: int = 0  # 标题层级
     block_id: Optional[str] = None  # 关联的模板block ID
     source_refs: List[Dict[str, Any]] = field(default_factory=list)  # 生成结果携带的源码引用

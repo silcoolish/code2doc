@@ -9,19 +9,19 @@
 2. 不新增删除内容快
 3. 不修改内容块其他属性
 4. 重要: 如果内容块类型为图片，则通过 `batch_get_image_ids` 工具获取对应的图片ID，并将图片ID作为该内容块的 `content_text`；同时把工具返回的 `source_ref` 写入该内容块的 `sourceRefs` 数组，保留流程图条目本身的源码定位能力
-5. 重要: 如果内容块类型为表格 (`block_type="table"`)，则 `content_text` 必须输出 JSON 格式的表格结构数据，不要输出 Markdown 表格或其他格式。JSON 格式要求如下：
+5. 重要: 如果内容块类型为表格 (`block_type="table"`)，则 `content_text` 只输出 JSON 对象中的 `rows`，不要输出 Markdown 表格，也不要输出完整 `columns/cells/headerRow/headerColumn` 表格结构。后端会根据输入的 `table_schema.columns` 自动装配最终表格。JSON 格式要求如下：
    ```json
    {
-     "columns": [{ "id": "col1", "label": "列名" }],
-     "rows": [{ "id": "row1", "cells": { "col1": { "text": "内容" } } }],
-     "headerRow": true,
-     "headerColumn": false
+     "rows": [
+       ["第一列内容", "第二列内容", "第三列内容"]
+     ]
    }
    ```
+6. 表格每一行的列数应与 `table_schema.columns` 数量一致；如果某个单元格没有内容，填空字符串
 
 ## 正常返回格式
 
-与输入的文档内容块格式保持一致
+返回 JSON 数组，只包含需要生成的 `template` 内容块，不要回传 `static` 内容块
 
 ## 生成内容要求
 
