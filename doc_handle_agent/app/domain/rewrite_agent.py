@@ -26,9 +26,7 @@ _PRESET_LABELS = {
     "professional": "更专业",
     "academic": "更学术",
     "formal": "更正式",
-    "relaxed": "更轻松",
-    "literary": "更有文采",
-    "internet": "更有网感",
+    "readable": "更易读",
 }
 _PRESET_INSTRUCTIONS = {
     "polish": "请润色当前内容，保留原意并提升表达准确度与可读性。",
@@ -37,9 +35,7 @@ _PRESET_INSTRUCTIONS = {
     "professional": "请将当前内容改写得更专业，保持术语准确、表达克制。",
     "academic": "请将当前内容改写得更学术，语言严谨、论述完整。",
     "formal": "请将当前内容改写得更正式，适合技术文档或汇报场景。",
-    "relaxed": "请将当前内容改写得更轻松自然，但不要损失关键信息。",
-    "literary": "请将当前内容改写得更有文采，同时保持原意和技术准确性。",
-    "internet": "请将当前内容改写得更有网感，但不要削弱技术信息和专业性。",
+    "readable": "请将当前内容改写得更易读，表达更顺、更容易理解，但不要损失关键信息。",
 }
 
 
