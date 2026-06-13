@@ -19,6 +19,14 @@ _DEFAULT_REWRITE_INSTRUCTION = (
     "请在不改变原始技术含义的前提下改写当前内容，"
     "优先提升准确性、可读性、结构完整度和上下文连贯性。"
 )
+_SELECTION_REWRITE_RULE = (
+    "当前是选中文本改写。当前条目内容只作为上下文参考，"
+    "只改写选中文本本身，最终只输出可替换选中文本的内容，不要输出整块内容。"
+)
+_SHORT_SELECTION_REWRITE_RULE = (
+    "选中文本很短时，把它当成词语或短语处理。"
+    "最终输出也必须是词语或短语，不要扩写成句子、段落或说明。"
+)
 _PRESET_LABELS = {
     "polish": "润色",
     "expand": "扩写",
@@ -104,6 +112,10 @@ class RewriteAgent:
     def _build_effective_prompt(self, request: RewriteBlockRequest) -> str:
         preset = self._resolve_preset(request.preset)
         base_instruction = _PRESET_INSTRUCTIONS.get(preset, _DEFAULT_REWRITE_INSTRUCTION)
+        if request.target_type == "selection" and request.selected_text:
+            base_instruction = f"{base_instruction}\n\n{_SELECTION_REWRITE_RULE}"
+            if len(request.selected_text.strip()) <= 8:
+                base_instruction = f"{base_instruction}\n\n{_SHORT_SELECTION_REWRITE_RULE}"
         extra_instruction = request.prompt.strip() if request.prompt else ""
         if not extra_instruction:
             return base_instruction
@@ -127,13 +139,21 @@ class RewriteAgent:
             f"条目ID: {request.block_id}",
         ]
 
+        is_selection_rewrite = request.target_type == "selection" and bool(request.selected_text)
         if request.block_text:
-            parts.append(f"当前条目内容:\n{request.block_text}")
+            block_label = "当前条目上下文" if is_selection_rewrite else "当前条目内容"
+            parts.append(f"{block_label}:\n{request.block_text}")
 
         if request.selected_text:
-            parts.append(f"选中文本: {request.selected_text}")
+            selected_label = "需要改写的选中文本" if is_selection_rewrite else "选中文本"
+            parts.append(f"{selected_label}:\n{request.selected_text}")
             if request.selection_start is not None and request.selection_end is not None:
                 parts.append(f"选区范围: {request.selection_start}-{request.selection_end}")
+
+        if is_selection_rewrite:
+            parts.append("输出范围: 只输出选中文本改写后的替换内容")
+            if len(request.selected_text.strip()) <= 8:
+                parts.append("短选区限制: 只输出一个词语或短语，不要输出完整句子")
 
         preset = self._resolve_preset(request.preset)
         if preset:
