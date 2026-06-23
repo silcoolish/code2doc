@@ -334,14 +334,122 @@ class GenerationStrategy(ABC):
                 if block.example:
                     data["example"] = block.example
             if block.is_table:
-                if block.table_schema:
-                    data["table_schema"] = block.table_schema
-                if block.attrs.get("header_row") is not None:
-                    data["header_row"] = block.attrs["header_row"]
-                if block.attrs.get("header_column") is not None:
-                    data["header_column"] = block.attrs["header_column"]
+                table_schema = self._build_table_prompt_schema(block)
+                if table_schema:
+                    data["table_schema"] = table_schema
             result.append(data)
         return result
+
+    def _build_table_prompt_schema(self, block: TemplateBlock) -> Dict[str, Any]:
+        """构建给 LLM 使用的轻量表格结构"""
+        schema_source = block.table_schema if isinstance(block.table_schema, dict) else {}
+        table_source = block.attrs.get("table")
+        table = table_source if isinstance(table_source, dict) else {}
+
+        # 优先取 table 外壳里的列定义，避免当前配置被别的来源覆盖
+        columns_source = self._first_list(
+            table.get("columns"),
+            schema_source.get("columns"),
+        )
+        rows_source = self._first_list(
+            table.get("rows"),
+            schema_source.get("rows"),
+        )
+        columns = self._build_table_prompt_columns(columns_source, rows_source)
+        header_row = self._read_bool_value(
+            table.get("headerRow"),
+            table.get("header_row"),
+            schema_source.get("headerRow"),
+            schema_source.get("header_row"),
+            block.attrs.get("headerRow"),
+            block.attrs.get("header_row"),
+            default=False,
+        )
+        header_column = self._read_bool_value(
+            table.get("headerColumn"),
+            table.get("header_column"),
+            schema_source.get("headerColumn"),
+            schema_source.get("header_column"),
+            block.attrs.get("headerColumn"),
+            block.attrs.get("header_column"),
+            default=False,
+        )
+
+        return {
+            "columns": columns,
+            "headerRow": header_row,
+            "headerColumn": header_column,
+            "expectedRows": len(rows_source) if rows_source else None,
+            "output": 'content_text 只返回 {"rows":[["单元格1","单元格2"]]}，不要返回 columns/cells/headerRow/headerColumn',
+        }
+
+    @staticmethod
+    def _first_list(*values: Any) -> List[Any]:
+        """返回第一个列表值"""
+        for value in values:
+            if isinstance(value, list):
+                return value
+        return []
+
+    @staticmethod
+    def _read_bool_value(*values: Any, default: bool) -> bool:
+        """读取布尔配置，兼容 true/false 字符串"""
+        for value in values:
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                lowered = value.lower()
+                if lowered in {"true", "1", "yes"}:
+                    return True
+                if lowered in {"false", "0", "no"}:
+                    return False
+        return default
+
+    def _build_table_prompt_columns(
+        self,
+        columns_source: List[Any],
+        rows_source: List[Any],
+    ) -> List[Dict[str, Any]]:
+        """提取表格列定义，避免把完整表格结构交给模型生成"""
+        columns: List[Dict[str, Any]] = []
+        for index, column in enumerate(columns_source):
+            column_id = f"col-{index + 1}"
+            label = ""
+            if isinstance(column, str):
+                label = column
+            elif isinstance(column, dict):
+                column_id = (
+                    str(column.get("id") or column.get("key") or column_id)
+                )
+                label = str(
+                    column.get("label")
+                    or column.get("title")
+                    or column.get("name")
+                    or ""
+                )
+            columns.append({"id": column_id, "label": label})
+
+        if columns:
+            return columns
+
+        inferred_count = 0
+        for row in rows_source:
+            if isinstance(row, list):
+                inferred_count = max(inferred_count, len(row))
+            elif isinstance(row, dict):
+                cells = row.get("cells")
+                if isinstance(cells, dict):
+                    inferred_count = max(inferred_count, len(cells))
+                else:
+                    inferred_count = max(inferred_count, len(row))
+
+        if inferred_count <= 0:
+            inferred_count = 3
+
+        return [
+            {"id": f"col-{index + 1}", "label": ""}
+            for index in range(inferred_count)
+        ]
 
     def _build_task_message(
         self,
@@ -903,7 +1011,12 @@ class BatchedGenerationStrategy(GenerationStrategy):
             )
             raise FallbackSignalError("Agent returned fallback signal")
 
-        results = self._parse_response(raw_content, batch, fill_missing_placeholders=False)
+        results = self._parse_response(
+            raw_content,
+            batch,
+            generated_ids=generated_ids,
+            fill_missing_placeholders=False,
+        )
 
         for result in results:
             if not result.block_id:
@@ -912,11 +1025,19 @@ class BatchedGenerationStrategy(GenerationStrategy):
             if block:
                 block.content_text = result.text_content
 
-        missing_blocks = self._get_missing_template_blocks(batch, results)
+        missing_blocks = self._get_missing_template_blocks(
+            batch,
+            results,
+            generated_ids=generated_ids,
+        )
         if not missing_blocks:
-            return self._fill_missing_template_results(batch, results)
+            return self._fill_missing_template_results(
+                batch,
+                results,
+                generated_ids=generated_ids,
+            )
 
-        # 首轮批次可能被模型漏回部分模板块，逐个重试能避免直接落缺失占位
+        # 首轮批次可能被模型漏回部分模板块，合并重试避免单块串行放大耗时
         retry_results = await self._retry_missing_blocks(
             batch=batch,
             repo_id=repo_id,
@@ -933,7 +1054,11 @@ class BatchedGenerationStrategy(GenerationStrategy):
             if block:
                 block.content_text = result.text_content
 
-        return self._fill_missing_template_results(batch, results + retry_results)
+        return self._fill_missing_template_results(
+            batch,
+            results + retry_results,
+            generated_ids=generated_ids,
+        )
 
     def _build_task_message(
         self,
@@ -948,11 +1073,12 @@ class BatchedGenerationStrategy(GenerationStrategy):
         active_template_ids 用于缺失块重试，限制本轮只生成目标模板块
         """
         generated_ids = generated_ids or set()
-        template_count = sum(
-            1
-            for b in batch
-            if self._should_generate_in_batch(b, generated_ids, active_template_ids)
+        target_template_ids = self._get_batch_target_ids(
+            batch,
+            generated_ids,
+            active_template_ids,
         )
+        template_count = len(target_template_ids)
         static_count = len(batch) - template_count
         desc = (
             f"共 {len(batch)} 个内容块（含 {template_count} 个模板块、"
@@ -964,6 +1090,11 @@ class BatchedGenerationStrategy(GenerationStrategy):
             retry_scope = (
                 f"本次只生成以下模板块: {', '.join(sorted(active_template_ids))}。"
                 "其他内容块仅作为上下文保留原样，返回的 JSON 数组中只保留这些目标模板块，不要回传无关 static 块。"
+            )
+        else:
+            retry_scope = (
+                f"本次只生成以下模板块: {', '.join(sorted(target_template_ids))}。"
+                "返回的 JSON 数组只包含这些模板块，不要回传 static 块。"
             )
 
         payload = self._serialize_batch_blocks(batch, generated_ids, active_template_ids)
@@ -998,6 +1129,23 @@ class BatchedGenerationStrategy(GenerationStrategy):
         if active_template_ids is None:
             return True
         return block.id in active_template_ids
+
+    def _get_batch_target_ids(
+        self,
+        batch: List[TemplateBlock],
+        generated_ids: Set[str],
+        active_template_ids: Optional[Set[str]] = None,
+    ) -> Set[str]:
+        """收口当前批次真正需要模型生成的模板块 ID"""
+        return {
+            block.id
+            for block in batch
+            if self._should_generate_in_batch(
+                block,
+                generated_ids,
+                active_template_ids,
+            )
+        }
 
     def _serialize_batch_blocks(
         self,
@@ -1045,12 +1193,9 @@ class BatchedGenerationStrategy(GenerationStrategy):
                 if block.example:
                     data["example"] = block.example
             if block.is_table:
-                if block.table_schema:
-                    data["table_schema"] = block.table_schema
-                if block.attrs.get("header_row") is not None:
-                    data["header_row"] = block.attrs["header_row"]
-                if block.attrs.get("header_column") is not None:
-                    data["header_column"] = block.attrs["header_column"]
+                table_schema = self._build_table_prompt_schema(block)
+                if table_schema:
+                    data["table_schema"] = table_schema
             result.append(data)
         return result
 
@@ -1058,6 +1203,8 @@ class BatchedGenerationStrategy(GenerationStrategy):
         self,
         raw_content: str,
         batch: List[TemplateBlock],
+        generated_ids: Optional[Set[str]] = None,
+        active_template_ids: Optional[Set[str]] = None,
         fill_missing_placeholders: bool = True,
     ) -> List[DocumentBlock]:
         """解析批次响应，只提取 template 块的结果，static 块使用原始内容.
@@ -1070,43 +1217,69 @@ class BatchedGenerationStrategy(GenerationStrategy):
         Returns:
             DocumentBlock 列表
         """
+        generated_ids = generated_ids or set()
         results = self._parse_blocks_from_response(raw_content)
-        template_ids = {block.id for block in batch if block.is_template}
+        target_template_ids = self._get_batch_target_ids(
+            batch,
+            generated_ids,
+            active_template_ids,
+        )
         filtered_results = [
             result
             for result in results
-            if result.block_id in template_ids
+            if result.block_id in target_template_ids
         ]
 
         if not fill_missing_placeholders:
             return filtered_results
 
-        return self._fill_missing_template_results(batch, filtered_results)
+        return self._fill_missing_template_results(
+            batch,
+            filtered_results,
+            generated_ids=generated_ids,
+            active_template_ids=active_template_ids,
+        )
 
     def _get_missing_template_blocks(
         self,
         batch: List[TemplateBlock],
         results: List[DocumentBlock],
+        generated_ids: Optional[Set[str]] = None,
+        active_template_ids: Optional[Set[str]] = None,
     ) -> List[TemplateBlock]:
         """找出当前批次中仍未生成成功的模板块."""
+        generated_ids = generated_ids or set()
         result_ids = {result.block_id for result in results if result.block_id}
+        target_template_ids = self._get_batch_target_ids(
+            batch,
+            generated_ids,
+            active_template_ids,
+        )
         return [
             block
             for block in batch
-            if block.is_template and block.id not in result_ids
+            if block.id in target_template_ids and block.id not in result_ids
         ]
 
     def _fill_missing_template_results(
         self,
         batch: List[TemplateBlock],
         results: List[DocumentBlock],
+        generated_ids: Optional[Set[str]] = None,
+        active_template_ids: Optional[Set[str]] = None,
     ) -> List[DocumentBlock]:
         """为当前批次仍缺失的模板块补占位结果."""
+        generated_ids = generated_ids or set()
         result_ids = {result.block_id for result in results if result.block_id}
+        target_template_ids = self._get_batch_target_ids(
+            batch,
+            generated_ids,
+            active_template_ids,
+        )
         filled_results = list(results)
 
         for block in batch:
-            if not block.is_template or block.id in result_ids:
+            if block.id not in target_template_ids or block.id in result_ids:
                 continue
             filled_results.append(self._build_missing_result(block))
 
@@ -1172,6 +1345,30 @@ class BatchedGenerationStrategy(GenerationStrategy):
 
         return retry_batch
 
+    def _build_merged_retry_batch(
+        self,
+        batch: List[TemplateBlock],
+        missing_blocks: List[TemplateBlock],
+    ) -> List[TemplateBlock]:
+        """为多个缺失块构建一次合并重试上下文"""
+        selected_ids: Set[str] = set()
+        retry_batch: List[TemplateBlock] = []
+
+        def add_block(block: TemplateBlock) -> None:
+            if block.id in selected_ids:
+                return
+            retry_batch.append(block)
+            selected_ids.add(block.id)
+
+        for missing_block in missing_blocks:
+            for block in self._build_retry_batch(batch, missing_block):
+                add_block(block)
+
+        # 多个缺失块共享上下文时按原顺序重排，避免重试提示词来回跳跃
+        index_map = {block.id: index for index, block in enumerate(batch)}
+        retry_batch.sort(key=lambda item: index_map.get(item.id, len(batch)))
+        return retry_batch
+
     async def _retry_missing_blocks(
         self,
         batch: List[TemplateBlock],
@@ -1181,79 +1378,82 @@ class BatchedGenerationStrategy(GenerationStrategy):
         missing_blocks: List[TemplateBlock],
         existing_results: List[DocumentBlock],
     ) -> List[DocumentBlock]:
-        """逐个重试批次中缺失的模板块."""
+        """合并重试批次中缺失的模板块"""
         retry_results: List[DocumentBlock] = []
         retry_generated_ids = set(generated_ids or set())
         retry_generated_ids.update(
             result.block_id for result in existing_results if result.block_id
         )
 
-        for missing_block in missing_blocks:
-            logger.warning(
-                "retry_missing_block",
-                batch_num=batch_num,
-                block_id=missing_block.id,
+        active_template_ids = {block.id for block in missing_blocks}
+        logger.warning(
+            "retry_missing_blocks_merged",
+            batch_num=batch_num,
+            block_ids=sorted(active_template_ids),
+        )
+        try:
+            # 这里只补一次，避免回到逐块串行重试
+            retry_batch = self._build_merged_retry_batch(batch, missing_blocks)
+            task_message = self._build_task_message(
+                batch=retry_batch,
+                repo_id=repo_id,
+                generated_ids=retry_generated_ids,
+                active_template_ids=active_template_ids,
             )
-            try:
-                retry_batch = self._build_retry_batch(batch, missing_block)
-                task_message = self._build_task_message(
-                    batch=retry_batch,
-                    repo_id=repo_id,
-                    generated_ids=retry_generated_ids,
-                    active_template_ids={missing_block.id},
-                )
-                raw_content = await self.agent.generate_with_tools(
-                    system_prompt=BATCH_CONTEXT_STRATEGY_PROMPT,
-                    task_message=task_message,
-                    repo_id=repo_id,
-                    task_name="batch_retry",
-                    max_iterations=10,
-                    excluded_tools=self.EXCLUDED_TOOLS,
-                )
-                if self._is_fallback_signal(raw_content):
-                    logger.warning(
-                        "retry_missing_block_fallback_signal",
-                        batch_num=batch_num,
-                        block_id=missing_block.id,
-                    )
-                    continue
-
-                parsed_retry_results = self._parse_response(
-                    raw_content,
-                    retry_batch,
-                    fill_missing_placeholders=False,
-                )
-                target_retry_results = [
-                    result
-                    for result in parsed_retry_results
-                    if result.block_id == missing_block.id
-                ]
-                if not target_retry_results:
-                    logger.warning(
-                        "retry_missing_block_empty",
-                        batch_num=batch_num,
-                        block_id=missing_block.id,
-                    )
-                    continue
-
-                retry_result = target_retry_results[0]
-                retry_results.append(retry_result)
-                if retry_result.block_id:
-                    retry_generated_ids.add(retry_result.block_id)
-                    resolved_block = next(
-                        (item for item in batch if item.id == retry_result.block_id),
-                        None,
-                    )
-                    if resolved_block:
-                        resolved_block.content_text = retry_result.text_content
-            except Exception as ex:
+            raw_content = await self.agent.generate_with_tools(
+                system_prompt=BATCH_CONTEXT_STRATEGY_PROMPT,
+                task_message=task_message,
+                repo_id=repo_id,
+                task_name="batch_retry",
+                max_iterations=8,
+                excluded_tools=self.EXCLUDED_TOOLS,
+            )
+            if self._is_fallback_signal(raw_content):
                 logger.warning(
-                    "retry_missing_block_failed",
+                    "retry_missing_blocks_fallback_signal",
                     batch_num=batch_num,
-                    block_id=missing_block.id,
-                    error_type=type(ex).__name__,
-                    error=str(ex),
+                    block_ids=sorted(active_template_ids),
                 )
+                return retry_results
+
+            parsed_retry_results = self._parse_response(
+                raw_content,
+                retry_batch,
+                generated_ids=retry_generated_ids,
+                active_template_ids=active_template_ids,
+                fill_missing_placeholders=False,
+            )
+            seen_retry_ids: Set[str] = set()
+            for retry_result in parsed_retry_results:
+                if retry_result.block_id not in active_template_ids:
+                    continue
+                if retry_result.block_id in seen_retry_ids:
+                    continue
+                retry_results.append(retry_result)
+                seen_retry_ids.add(retry_result.block_id)
+                retry_generated_ids.add(retry_result.block_id)
+                resolved_block = next(
+                    (item for item in batch if item.id == retry_result.block_id),
+                    None,
+                )
+                if resolved_block:
+                    resolved_block.content_text = retry_result.text_content
+
+            missing_retry_ids = active_template_ids - seen_retry_ids
+            if missing_retry_ids:
+                logger.warning(
+                    "retry_missing_blocks_partial",
+                    batch_num=batch_num,
+                    missing_block_ids=sorted(missing_retry_ids),
+                )
+        except Exception as ex:
+            logger.warning(
+                "retry_missing_blocks_failed",
+                batch_num=batch_num,
+                block_ids=sorted(active_template_ids),
+                error_type=type(ex).__name__,
+                error=str(ex),
+            )
 
         return retry_results
 

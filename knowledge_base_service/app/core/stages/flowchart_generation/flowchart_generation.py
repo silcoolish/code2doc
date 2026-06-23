@@ -115,7 +115,7 @@ class FlowchartGenerationStage(PipelineStageHandler):
                 logger.warning("No valid file contents found")
                 return StageResult(
                     stage=self.stage,
-                    status=PipelineStatus.COMPLETED,
+                    status=PipelineStatus.FAILED,
                     message="No valid file contents found",
                     metadata={
                         "total_methods": total_methods,
@@ -170,6 +170,9 @@ class FlowchartGenerationStage(PipelineStageHandler):
 
             generated_count = batch_result.get("generated_count", 0)
             failed_count = batch_result.get("failed_count", 0)
+            requested_generation_count = sum(
+                len(file_data["methods"]) for file_data in files_to_process.values()
+            )
 
             # 保存结果到上下文
             context.data["flowchart_generation"] = {
@@ -188,9 +191,17 @@ class FlowchartGenerationStage(PipelineStageHandler):
                 f"{skipped_count} skipped, {failed_count} failed"
             )
 
+            stage_status = PipelineStatus.COMPLETED
+            # 全部失败时阻断流水线，避免仓库状态误标为完成
+            if requested_generation_count > 0 and generated_count == 0 and failed_count > 0:
+                stage_status = PipelineStatus.FAILED
+                context.stage_msg = (
+                    f"流程图生成失败：{requested_generation_count} 个方法全部生成失败"
+                )
+
             return StageResult(
                 stage=self.stage,
-                status=PipelineStatus.COMPLETED,
+                status=stage_status,
                 message=f"Flowchart generation completed: {generated_count} generated, "
                         f"{skipped_count} skipped, {failed_count} failed",
                 metadata={
@@ -466,6 +477,11 @@ class FlowchartGenerationStage(PipelineStageHandler):
                                 pass
                             except Exception:
                                 pass
+                            result["source_path"] = self._normalize_result_source_path(
+                                result.get("source_path", ""),
+                                repo_path,
+                                batch_files.keys(),
+                            )
 
                     # 解析API结果，获取 method_id -> {image_id, archive_path} 映射
                     result_updates = self._parse_batch_results(
@@ -554,6 +570,44 @@ class FlowchartGenerationStage(PipelineStageHandler):
 
         logger.info(f"Batch {batch_index}/{total_batches} completed: {generated_count} generated, {failed_count} failed")
         return {"generated_count": generated_count, "failed_count": failed_count}
+
+    def _normalize_result_source_path(
+        self,
+        source_path: str,
+        repo_path: str,
+        known_file_paths,
+    ) -> str:
+        """将流程图服务返回的 source_path 归一化为仓库相对路径
+
+        流程图服务会去掉绝对路径开头的 /，例如 /opt/repo/src/a.c 会变成
+        opt/repo/src/a.c。这里兼容这种安全归档路径，避免后续按 src/a.c 匹配失败
+        """
+        normalized = str(source_path or "").replace("\\", "/").strip()
+        if not normalized:
+            return ""
+
+        known_paths = [
+            str(path).replace("\\", "/").strip("/")
+            for path in known_file_paths
+            if str(path or "").strip()
+        ]
+        normalized_no_leading = normalized.strip("/")
+
+        if normalized_no_leading in known_paths:
+            return normalized_no_leading
+
+        repo_normalized = str(repo_path or "").replace("\\", "/").strip("/")
+        if repo_normalized and normalized_no_leading.startswith(f"{repo_normalized}/"):
+            rel_path = normalized_no_leading[len(repo_normalized) + 1:]
+            if rel_path:
+                return rel_path
+
+        # 最后按最长后缀匹配，兼容绝对路径被服务端裁剪后的返回值
+        for candidate in sorted(known_paths, key=len, reverse=True):
+            if normalized_no_leading == candidate or normalized_no_leading.endswith(f"/{candidate}"):
+                return candidate
+
+        return normalized
 
     async def _call_flowchart_service_batch(
         self, items: List[Dict[str, str]]
@@ -866,11 +920,11 @@ class FlowchartGenerationStage(PipelineStageHandler):
             archive_paths = file_result.get("archive_paths", {})
 
             # 找到对应的文件路径
-            file_path = source_path if source_path else file_name
-            method_map = file_method_map.get(file_path, {})
-            # 回退：尝试用 file_name 查找
-            if not method_map and file_name:
-                method_map = file_method_map.get(file_name, {})
+            method_map = self._find_method_map_for_result(
+                source_path,
+                file_name,
+                file_method_map,
+            )
 
             for func in functions:
                 func_name = func.get("name", "")
@@ -928,6 +982,35 @@ class FlowchartGenerationStage(PipelineStageHandler):
                         )
 
         return method_image_map
+
+    def _find_method_map_for_result(
+        self,
+        source_path: str,
+        file_name: str,
+        file_method_map: Dict[str, Dict],
+    ) -> Dict:
+        """按 source_path/file_name 查找本批次方法映射"""
+        normalized_source = str(source_path or "").replace("\\", "/").strip("/")
+        normalized_name = str(file_name or "").replace("\\", "/").strip("/")
+
+        for key in (normalized_source, normalized_name):
+            if key and key in file_method_map:
+                return file_method_map[key]
+
+        for candidate in sorted(file_method_map.keys(), key=len, reverse=True):
+            normalized_candidate = str(candidate).replace("\\", "/").strip("/")
+            if (
+                normalized_source
+                and (
+                    normalized_source == normalized_candidate
+                    or normalized_source.endswith(f"/{normalized_candidate}")
+                )
+            ):
+                return file_method_map[candidate]
+            if normalized_name and Path(normalized_candidate).name == Path(normalized_name).name:
+                return file_method_map[candidate]
+
+        return {}
 
     def _generate_path_slug(self, file_path: str) -> str:
         """生成路径slug（用于文件名）.

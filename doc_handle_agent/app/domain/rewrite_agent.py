@@ -1,20 +1,50 @@
 """文档条目改写Agent."""
 
-import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from time import perf_counter
+from typing import Any, List, Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.api.models.schemas import RewriteBlockRequest, RewriteBlockResponse
 from app.domain.content_generator_agent import ContentGeneratorAgent
 from app.infrastructure.mcp_client import MCPClient
-from app.infrastructure.workspace.workspace_adapter import WorkspaceServiceAdapter
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 _PROMPT_PATH = Path(__file__).parent / "prompts" / "rewrite_block.md"
+
+_DEFAULT_REWRITE_INSTRUCTION = (
+    "请在不改变原始技术含义的前提下改写当前内容，"
+    "优先提升准确性、可读性、结构完整度和上下文连贯性。"
+)
+_SELECTION_REWRITE_RULE = (
+    "当前是选中文本改写。当前条目内容只作为上下文参考，"
+    "只改写选中文本本身，最终只输出可替换选中文本的内容，不要输出整块内容。"
+)
+_SHORT_SELECTION_REWRITE_RULE = (
+    "选中文本很短时，把它当成词语或短语处理。"
+    "最终输出也必须是词语或短语，不要扩写成句子、段落或说明。"
+)
+_PRESET_LABELS = {
+    "polish": "润色",
+    "expand": "扩写",
+    "shorten": "缩写",
+    "professional": "更专业",
+    "academic": "更学术",
+    "formal": "更正式",
+    "readable": "更易读",
+}
+_PRESET_INSTRUCTIONS = {
+    "polish": "请润色当前内容，保留原意并提升表达准确度与可读性。",
+    "expand": "请在不虚构信息的前提下扩写当前内容，补充必要细节、背景或衔接。",
+    "shorten": "请缩写当前内容，保留核心信息并让表达更紧凑清晰。",
+    "professional": "请将当前内容改写得更专业，保持术语准确、表达克制。",
+    "academic": "请将当前内容改写得更学术，语言严谨、论述完整。",
+    "formal": "请将当前内容改写得更正式，适合技术文档或汇报场景。",
+    "readable": "请将当前内容改写得更易读，表达更顺、更容易理解，但不要损失关键信息。",
+}
 
 
 def _strip_markdown_code_blocks(content: str) -> str:
@@ -27,54 +57,35 @@ def _strip_markdown_code_blocks(content: str) -> str:
         去除代码块标记后的文本
     """
     content = content.strip()
-    if content.startswith("```json"):
-        content = content[7:]
-    elif content.startswith("```"):
-        content = content[3:]
-    if content.endswith("```"):
-        content = content[:-3]
+    if not content.startswith("```"):
+        return content
+
+    lines = content.splitlines()
+    if lines and lines[0].startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    content = "\n".join(lines)
     return content.strip()
-
-_INTENT_CLASSIFICATION_PROMPT = (
-    "你是一个请求意图分类器。请根据用户的改写提示词，"
-    "判断该请求是否需要查询代码仓库信息才能准确完成。\n\n"
-    "分类规则：\n"
-    '- "text_only": 纯文本层面的改写，不需要代码知识。'
-    "例如：简化表达、翻译、润色、调整语气、扩写、缩写、格式调整、"
-    "修正错别字、语法优化、改写为更正式/口语化表达等。\n"
-    '- "code_aware": 需要基于代码仓库信息才能准确改写。'
-    "例如：提到具体类名、方法名、接口名、模块名；"
-    "要求根据实现补充文档；涉及技术细节与代码逻辑对齐；"
-    "要求补充参数说明、返回值说明、字段说明等。\n\n"
-    "只输出一个合法的JSON对象，不要包含 markdown 代码块标记，格式如下：\n"
-    '{{"intent": "text_only|code_aware", "reason": "一句话解释原因"}}'
-    "\n\n"
-    "用户提示词：{prompt}"
-)
-
 
 class RewriteAgent:
     """文档条目改写Agent.
 
-    基于 ContentGeneratorAgent 的工具调用能力，同时支持 workspace 查询工具和知识底座 MCP tools。
-    只返回改写建议文本，不执行写入操作。
+    只做当前块的纯文本改写，不连接 MCP，不执行写入操作。
     """
 
     def __init__(
         self,
-        mcp_client: MCPClient,
-        workspace_adapter: WorkspaceServiceAdapter,
+        mcp_client: Optional[MCPClient] = None,
         llm_client: Any = None,
     ):
         """初始化改写Agent.
 
         Args:
-            mcp_client: MCP客户端实例
-            workspace_adapter: Workspace服务适配器
+            mcp_client: MCP客户端实例，仅用于复用通用生成器，不会在改写流程中连接
             llm_client: 可选的LLM客户端
         """
-        self.agent = ContentGeneratorAgent(mcp_client, llm_client)
-        self.workspace = workspace_adapter
+        self.agent = ContentGeneratorAgent(mcp_client or MCPClient(), llm_client)
         self._system_prompt = self._load_system_prompt()
 
     def _load_system_prompt(self) -> str:
@@ -89,138 +100,38 @@ class RewriteAgent:
             logger.warning("rewrite_system_prompt_load_failed", path=str(_PROMPT_PATH), error=str(e))
             return (
                 "你是技术文档改写助手。根据用户提示词改写或续写文档条目，"
-                "输出JSON格式：{\"result_text\": \"...\", \"candidates\": [...], \"summary\": \"...\"}"
+                "最终只输出可直接应用到文档里的正文，不要输出JSON或解释说明。"
             )
 
-    async def _classify_intent(self, prompt: str) -> Tuple[str, str]:
-        """使用LLM判断改写意图.
+    def _resolve_preset(self, preset: Optional[str]) -> Optional[str]:
+        if not preset or not preset.strip():
+            return None
+        normalized_preset = preset.strip()
+        return normalized_preset if normalized_preset in _PRESET_INSTRUCTIONS else None
 
-        区分纯文本改写(text_only)和需要代码知识的改写(code_aware)。
+    def _build_effective_prompt(self, request: RewriteBlockRequest) -> str:
+        preset = self._resolve_preset(request.preset)
+        base_instruction = _PRESET_INSTRUCTIONS.get(preset, _DEFAULT_REWRITE_INSTRUCTION)
+        if request.target_type == "selection" and request.selected_text:
+            base_instruction = f"{base_instruction}\n\n{_SELECTION_REWRITE_RULE}"
+            if len(request.selected_text.strip()) <= 8:
+                base_instruction = f"{base_instruction}\n\n{_SHORT_SELECTION_REWRITE_RULE}"
+        extra_instruction = request.prompt.strip() if request.prompt else ""
+        if not extra_instruction:
+            return base_instruction
+        return f"{base_instruction}\n\n补充要求:\n{extra_instruction}"
 
-        Args:
-            prompt: 用户改写提示词
+    def _resolve_apply_modes(self, request: RewriteBlockRequest) -> List[str]:
+        if request.action == "continue":
+            return ["insert-after"]
+        if request.target_type == "selection" and request.selected_text:
+            return ["replace-selection", "replace-block", "insert-after"]
+        return ["replace-block", "insert-after"]
 
-        Returns:
-            (intent, reason) 元组
-        """
-        messages = [
-            SystemMessage(content="你是一名精准的意图分类器，只输出JSON格式结果。"),
-            HumanMessage(content=_INTENT_CLASSIFICATION_PROMPT.format(prompt=prompt)),
-        ]
-
-        try:
-            response = await self.agent.llm.ainvoke(messages)
-            content = response.content if hasattr(response, "content") else str(response)
-
-            content = _strip_markdown_code_blocks(content)
-
-            data = json.loads(content)
-            intent = data.get("intent", "code_aware")
-            reason = data.get("reason", "默认需要代码知识")
-
-            if intent not in ("text_only", "code_aware"):
-                intent = "code_aware"
-
-            return intent, reason
-        except Exception as e:
-            logger.warning("intent_classification_failed", error=str(e), prompt=prompt)
-            # 失败时保守起见，启用代码知识
-            return "code_aware", f"意图识别失败，默认启用代码知识: {str(e)}"
-
-    def _build_workspace_tools(self) -> List[Dict[str, Any]]:
-        """构建 workspace 查询工具的 function 定义.
-
-        Returns:
-            OpenAI function 格式的工具列表
-        """
-        return [
-            {
-                "type": "function",
-                "function": {
-                    "name": "get_block",
-                    "description": "获取单个文档条目的完整信息，包括内容、样式、属性等",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "document_id": {
-                                "type": "string",
-                                "description": "文档ID",
-                            },
-                            "block_id": {
-                                "type": "string",
-                                "description": "条目ID",
-                            },
-                        },
-                        "required": ["document_id", "block_id"],
-                    },
-                },
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "get_document_blocks",
-                    "description": "列取指定文档下的所有条目，用于了解文档整体结构和上下文",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "document_id": {
-                                "type": "string",
-                                "description": "文档ID",
-                            },
-                        },
-                        "required": ["document_id"],
-                    },
-                },
-            },
-        ]
-
-    async def _handle_workspace_tool(
-        self, tool_name: str, tool_args: Dict[str, Any]
+    def _build_task_message(
+        self, request: RewriteBlockRequest, effective_prompt: str
     ) -> str:
-        """处理 workspace 工具调用.
-
-        Args:
-            tool_name: 工具名称
-            tool_args: 工具参数
-
-        Returns:
-            工具调用结果字符串
-        """
-        try:
-            if tool_name == "get_block":
-                document_id = tool_args.get("document_id")
-                block_id = tool_args.get("block_id")
-                if not document_id or not block_id:
-                    return "参数错误: document_id 和 block_id 不能为空"
-                result = await self.workspace.get_block(document_id, block_id)
-                return json.dumps(result, ensure_ascii=False)
-
-            elif tool_name == "get_document_blocks":
-                document_id = tool_args.get("document_id")
-                if not document_id:
-                    return "参数错误: document_id 不能为空"
-                result = await self.workspace.get_document_blocks(document_id)
-                return json.dumps(result, ensure_ascii=False)
-
-            else:
-                return f"未知工具: {tool_name}"
-        except Exception as e:
-            logger.error(
-                "workspace_tool_failed",
-                tool_name=tool_name,
-                error=str(e),
-            )
-            return f"工具调用失败: {str(e)}"
-
-    def _build_task_message(self, request: RewriteBlockRequest) -> str:
-        """构建改写任务消息.
-
-        Args:
-            request: 改写请求
-
-        Returns:
-            任务消息文本
-        """
+        """构建改写任务消息."""
         parts = [
             f"仓库ID: {request.repo_id}",
             f"目标键: {request.target_key}",
@@ -228,15 +139,30 @@ class RewriteAgent:
             f"条目ID: {request.block_id}",
         ]
 
+        is_selection_rewrite = request.target_type == "selection" and bool(request.selected_text)
         if request.block_text:
-            parts.append(f"当前条目内容:\n{request.block_text}")
+            block_label = "当前条目上下文" if is_selection_rewrite else "当前条目内容"
+            parts.append(f"{block_label}:\n{request.block_text}")
 
         if request.selected_text:
-            parts.append(f"选中文本: {request.selected_text}")
+            selected_label = "需要改写的选中文本" if is_selection_rewrite else "选中文本"
+            parts.append(f"{selected_label}:\n{request.selected_text}")
             if request.selection_start is not None and request.selection_end is not None:
                 parts.append(f"选区范围: {request.selection_start}-{request.selection_end}")
 
-        parts.append(f"改写提示词: {request.prompt}")
+        if is_selection_rewrite:
+            parts.append("输出范围: 只输出选中文本改写后的替换内容")
+            if len(request.selected_text.strip()) <= 8:
+                parts.append("短选区限制: 只输出一个词语或短语，不要输出完整句子")
+
+        preset = self._resolve_preset(request.preset)
+        if preset:
+            parts.append(f"快捷改写模式: {_PRESET_LABELS[preset]}")
+
+        if request.prompt and request.prompt.strip():
+            parts.append(f"补充要求: {request.prompt.strip()}")
+
+        parts.append(f"执行要求:\n{effective_prompt}")
 
         if request.action:
             parts.append(f"改写动作: {request.action}")
@@ -245,123 +171,67 @@ class RewriteAgent:
             parts.append("深度思考: 是")
 
         if request.document_id:
-            parts.append(
-                f"文档ID: {request.document_id}\n"
-                "如需了解文档整体结构，可调用 get_document_blocks 工具。\n"
-                "如需获取目标条目完整信息，可调用 get_block 工具。"
-            )
+            parts.append(f"文档ID: {request.document_id}")
 
         return "\n\n".join(parts)
 
+    async def _generate_text_only(self, task_message: str) -> str:
+        messages = [
+            SystemMessage(content=self._system_prompt),
+            HumanMessage(content=task_message),
+        ]
+        started_at = perf_counter()
+        response = await self.agent.llm.ainvoke(messages)
+        content = response.content if hasattr(response, "content") else str(response)
+        logger.info(
+            "rewrite_llm_complete",
+            duration_ms=round((perf_counter() - started_at) * 1000),
+            result_length=len(content),
+        )
+        return content
+
     def _parse_response(
-        self, raw_content: str, action: Optional[str] = None
+        self, raw_content: str, request: RewriteBlockRequest
     ) -> RewriteBlockResponse:
-        """解析 LLM 输出为结构化响应.
-
-        Args:
-            raw_content: LLM 原始输出
-            action: 改写动作，用于确定 apply_modes
-
-        Returns:
-            RewriteBlockResponse
-        """
-        # 确定应用方式
-        if action == "continue":
-            apply_modes = ["insert", "append"]
-        else:
-            apply_modes = ["replace"]
-
-        # 尝试提取 JSON（LLM 可能包裹在 markdown 代码块中）
+        """把模型正文放进接口响应."""
+        apply_modes = self._resolve_apply_modes(request)
         content = _strip_markdown_code_blocks(raw_content)
 
-        try:
-            data = json.loads(content)
-            return RewriteBlockResponse(
-                result_text=data.get("result_text", ""),
-                result_markdown=data.get("result_text", ""),
-                candidates=data.get("candidates", []),
-                apply_modes=apply_modes,
-                summary=data.get("summary"),
-            )
-        except json.JSONDecodeError:
-            logger.warning("rewrite_response_parse_failed", raw_content=raw_content[:200])
-            # 回退：将整个输出作为 result_text
-            return RewriteBlockResponse(
-                result_text=raw_content,
-                result_markdown=raw_content,
-                candidates=[],
-                apply_modes=apply_modes,
-            )
+        return RewriteBlockResponse(
+            result_text=content,
+            result_markdown=content,
+            candidates=[],
+            apply_modes=apply_modes,
+        )
 
     async def rewrite(self, request: RewriteBlockRequest) -> RewriteBlockResponse:
-        """执行改写.
-
-        流程:
-        1. 使用LLM进行意图识别，判断是否需要代码知识
-        2. 纯文本改写(text_only)时排除所有MCP知识底座工具
-        3. 代码感知改写(code_aware)时保留全部工具
-
-        Args:
-            request: 改写请求
-
-        Returns:
-            改写响应
-        """
-        if not request.prompt or not request.prompt.strip():
-            raise ValueError("prompt cannot be empty")
+        """执行改写."""
+        started_at = perf_counter()
+        effective_prompt = self._build_effective_prompt(request)
+        preset = self._resolve_preset(request.preset)
+        custom_prompt = request.prompt.strip() if request.prompt else ""
 
         logger.info(
             "rewrite_start",
             repo_id=request.repo_id,
             block_id=request.block_id,
             action=request.action,
+            preset=preset,
+            has_custom_prompt=bool(custom_prompt),
             deep_think=request.deep_think,
         )
 
-        # 1. 意图识别
-        intent, reason = await self._classify_intent(request.prompt)
-        logger.info("rewrite_intent_classified", intent=intent, reason=reason)
-
-        # 2. 根据意图构建工具集
-        extra_tools = self._build_workspace_tools()
-        excluded_tools: Optional[List[str]] = None
-
-        if intent == "text_only":
-            try:
-                mcp_tools = self.agent.mcp_client.get_available_tools()
-                excluded_tools = [
-                    t.get("function", {}).get("name")
-                    for t in mcp_tools
-                    if t.get("function")
-                ]
-                logger.info(
-                    "rewrite_mcp_tools_excluded",
-                    excluded_count=len(excluded_tools),
-                )
-            except Exception as e:
-                logger.warning("rewrite_exclude_tools_failed", error=str(e))
-
-        task_message = self._build_task_message(request)
-
-        raw_content = await self.agent.generate_with_tools(
-            system_prompt=self._system_prompt,
-            task_message=task_message,
-            repo_id=request.repo_id,
-            task_name="rewrite",
-            max_iterations=10,
-            excluded_tools=excluded_tools,
-            extra_tools=extra_tools,
-            custom_tool_handler=self._handle_workspace_tool,
-        )
-
-        response = self._parse_response(raw_content, request.action)
+        task_message = self._build_task_message(request, effective_prompt)
+        raw_content = await self._generate_text_only(task_message)
+        response = self._parse_response(raw_content, request)
 
         logger.info(
             "rewrite_complete",
             repo_id=request.repo_id,
             block_id=request.block_id,
-            intent=intent,
+            preset=preset,
             result_length=len(response.result_text),
             candidate_count=len(response.candidates),
+            duration_ms=round((perf_counter() - started_at) * 1000),
         )
         return response

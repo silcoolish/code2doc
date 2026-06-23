@@ -35,3 +35,35 @@ def test_build_document_blocks_keeps_generated_source_refs():
 
     assert doc_blocks[0]["contentText"] == "main.flowchart.svg"
     assert doc_blocks[0]["sourceRefs"] == [source_ref]
+
+
+def test_build_generated_table_preserves_falsy_cell_values():
+    node = GenerateBlocksNode(content_generator=None)
+    block = TemplateBlock(
+        id="table-block",
+        parent_block_id=None,
+        block_type="table",
+        heading_level=0,
+        order_no="a",
+        content_text="",
+        attrs={
+            "templateType": "template",
+            "table": {
+                "columns": [
+                    {"id": "c1", "label": "数量"},
+                    {"id": "c2", "label": "启用"},
+                ],
+                "rows": [],
+                "headerRow": False,
+                "headerColumn": False,
+            },
+        },
+    )
+
+    table = node._build_generated_table(
+        block,
+        {"rows": [{"cells": {"c1": 0, "c2": False}}]},
+    )
+
+    assert table["rows"][0]["cells"]["c1"]["text"] == "0"
+    assert table["rows"][0]["cells"]["c2"]["text"] == "False"

@@ -5,7 +5,7 @@ import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
@@ -240,7 +240,10 @@ def create_app() -> FastAPI:
 
         if not file_path.exists():
             logger.error(f"File not found: {file_path}")
-            return {"error": "File not found", "path": str(file_path)}
+            raise HTTPException(
+                status_code=404,
+                detail={"error": "File not found", "path": str(file_path)},
+            )
 
         media_type = "image/svg+xml" if image_id.endswith(".svg") else "image/png"
         return FileResponse(
