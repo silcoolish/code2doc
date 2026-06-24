@@ -78,6 +78,7 @@ class DocumentEngine:
         repo_id: str,
         template_id: str,
         output_filename: Optional[str] = None,
+        workspace_auth_token: Optional[str] = None,
     ) -> str:
         """启动文档生成流程.
 
@@ -85,6 +86,7 @@ class DocumentEngine:
             repo_id: 仓库ID
             template_id: 文档模板ID
             output_filename: 输出文件名（向后兼容，不再使用）
+            workspace_auth_token: 回调workspace_service使用的登录态
 
         Returns:
             流程ID
@@ -107,6 +109,7 @@ class DocumentEngine:
         initial_state = create_initial_state(
             repo_id=repo_id,
             template_id=template_id,
+            workspace_auth_token=workspace_auth_token,
         )
         started_at = build_current_timestamp()
         initial_state["status"] = GenerationStatus.PARSING.value
@@ -162,7 +165,9 @@ class DocumentEngine:
                 await content_generator.initialize()
 
                 # 创建workspace适配器
-                workspace_adapter = WorkspaceServiceAdapter()
+                workspace_adapter = WorkspaceServiceAdapter(
+                    auth_token=initial_state.get("workspace_auth_token"),
+                )
 
                 # 创建文档生成器
                 def on_state_change(state: AgentState):

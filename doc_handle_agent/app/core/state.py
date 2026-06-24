@@ -23,6 +23,7 @@ class AgentState(TypedDict):
     # 输入参数
     repo_id: str
     template_id: str  # 模板ID（替代原来的template_path）
+    workspace_auth_token: Optional[str]  # 回调 workspace_service 使用的当前用户登录态
 
     # 解析结果 - 模板block列表（新结构）
     blocks: List[TemplateBlock]
@@ -73,6 +74,7 @@ def create_initial_state(
     repo_id: str,
     template_id: str,
     template_path: str = "",
+    workspace_auth_token: Optional[str] = None,
 ) -> AgentState:
     """创建初始状态.
 
@@ -80,6 +82,7 @@ def create_initial_state(
         repo_id: 仓库ID
         template_id: 模板ID
         template_path: 模板路径（保留向后兼容）
+        workspace_auth_token: 回调workspace_service使用的登录态
 
     Returns:
         初始Agent状态
@@ -87,6 +90,7 @@ def create_initial_state(
     return {
         "repo_id": repo_id,
         "template_id": template_id,
+        "workspace_auth_token": workspace_auth_token,
         "template_path": template_path,
         "blocks": [],
         "paragraphs": [],

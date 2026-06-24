@@ -116,19 +116,22 @@ class WorkspaceServiceAdapter:
     封装与workspace_service的所有交互。
     """
 
-    def __init__(self, base_url: Optional[str] = None):
+    def __init__(self, base_url: Optional[str] = None, auth_token: Optional[str] = None):
         """初始化适配器.
 
         Args:
             base_url: workspace服务基础URL，默认从配置读取
+            auth_token: 回调workspace服务使用的当前用户登录态
         """
         settings = get_settings()
         self.base_url = base_url or settings.workspace_service_url
+        self.auth_token = auth_token.strip() if auth_token and auth_token.strip() else None
         self.http = HttpUtils()
 
         logger.info(
             "workspace_adapter_initialized",
             base_url=self.base_url,
+            has_auth=bool(self.auth_token),
         )
 
     def _build_url(self, path: str) -> str:
@@ -143,6 +146,12 @@ class WorkspaceServiceAdapter:
         base = self.base_url.rstrip("/")
         path = path.lstrip("/")
         return f"{base}/{path}"
+
+    def _auth_headers(self) -> Optional[Dict[str, str]]:
+        """构建workspace回调鉴权头."""
+        if not self.auth_token:
+            return None
+        return {"Authorization": self.auth_token}
 
     async def get_block(self, document_id: str, block_id: str) -> Dict[str, Any]:
         """获取单个文档条目.
@@ -167,7 +176,7 @@ class WorkspaceServiceAdapter:
         )
 
         try:
-            response = await self.http.get(url)
+            response = await self.http.get(url, headers=self._auth_headers())
 
             if not response.get("success"):
                 error_msg = response.get("message", "Unknown error")
@@ -219,7 +228,7 @@ class WorkspaceServiceAdapter:
         )
 
         try:
-            response = await self.http.get(url)
+            response = await self.http.get(url, headers=self._auth_headers())
 
             if not response.get("success"):
                 error_msg = response.get("message", "Unknown error")
@@ -270,7 +279,7 @@ class WorkspaceServiceAdapter:
         )
 
         try:
-            response = await self.http.get(url)
+            response = await self.http.get(url, headers=self._auth_headers())
 
             if not response.get("success"):
                 error_msg = response.get("message", "Unknown error")
@@ -342,6 +351,7 @@ class WorkspaceServiceAdapter:
             response = await self.http.post(
                 url,
                 json_data=request.to_api_payload(),
+                headers=self._auth_headers(),
             )
 
             if response.get("success"):
@@ -410,6 +420,7 @@ class WorkspaceServiceAdapter:
             response = await self.http.post(
                 url,
                 json_data=request.to_api_payload(),
+                headers=self._auth_headers(),
             )
 
             if response.get("success"):
@@ -575,6 +586,7 @@ class WorkspaceServiceAdapter:
                 url,
                 files=files,
                 data=data,
+                headers=self._auth_headers(),
             )
 
             if response.get("success"):

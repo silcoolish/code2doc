@@ -1,8 +1,8 @@
 """文档生成API路由."""
 
-from typing import List
+from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Header, HTTPException
 
 from app.api.models.schemas import (
     GenerateDocumentRequest,
@@ -24,6 +24,7 @@ router = APIRouter(prefix="/documents", tags=["documents"])
 @router.post("/generate", response_model=GenerateDocumentResponse)
 async def generate_document(
     request: GenerateDocumentRequest,
+    authorization: Optional[str] = Header(default=None, alias="Authorization"),
 ) -> GenerateDocumentResponse:
     """启动文档生成流程.
 
@@ -40,6 +41,7 @@ async def generate_document(
         "api_generate_document",
         repo_id=request.repo_id,
         template_id=request.template_id,
+        has_workspace_auth=bool(authorization),
     )
 
     try:
@@ -48,6 +50,7 @@ async def generate_document(
         flow_id = await engine.start_generation(
             repo_id=request.repo_id,
             template_id=request.template_id,
+            workspace_auth_token=authorization,
         )
 
         # 获取初始状态
