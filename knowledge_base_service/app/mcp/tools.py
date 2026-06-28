@@ -58,6 +58,14 @@ class KnowledgeBaseTools:
                 return label
         return labels[0] if labels else "Unknown"
 
+    @staticmethod
+    def _truncate_text(value: Any, max_length: int) -> str:
+        """截断工具返回文本，避免大字段撑爆模型上下文."""
+        text = str(value or "").strip()
+        if len(text) <= max_length:
+            return text
+        return f"{text[:max_length]}..."
+
     async def _search_nodes_by_name_as_fallback(
         self,
         repo_id: str,
@@ -199,19 +207,38 @@ class KnowledgeBaseTools:
         if not results:
             return json.dumps({"repo_id": repo_id, "items": []}, indent=2, ensure_ascii=False)
 
+        max_items = 500
+        max_summary_length = 120
         items = []
+        seen_keys = set()
+        unique_total = 0
         for result in results:
+            path = result.get("path", "")
+            dedupe_key = path or result.get("id", "")
+            if dedupe_key in seen_keys:
+                continue
+            seen_keys.add(dedupe_key)
+            unique_total += 1
+            if len(items) >= max_items:
+                continue
             item = {
                 "id": result.get("id", ""),
-                "path": result.get("path", ""),
+                "path": path,
                 "type": self._normalize_node_type(result.get("labels", [])),
             }
             summary = result.get("summary")
             if summary:
-                item["summary"] = summary
+                item["summary"] = self._truncate_text(summary, max_summary_length)
             items.append(item)
 
-        return json.dumps({"repo_id": repo_id, "items": items}, indent=2, ensure_ascii=False)
+        return json.dumps({
+            "repo_id": repo_id,
+            "items": items,
+            "total_items": len(results),
+            "unique_items": unique_total,
+            "returned_items": len(items),
+            "truncated": unique_total > len(items),
+        }, indent=2, ensure_ascii=False)
 
     # ------------------------------------------------------------------ #
     # 统一搜索入口（合并语义搜索 + 名称搜索）
