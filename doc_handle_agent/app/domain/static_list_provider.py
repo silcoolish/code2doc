@@ -16,7 +16,7 @@ class ListItem:
     """列表项."""
 
     name: str
-    source_refs: List[str] = field(default_factory=list)
+    source_refs: List[Dict[str, Any]] = field(default_factory=list)
 
 
 class StaticListProvider:
@@ -87,8 +87,11 @@ class StaticListProvider:
         for node in nodes:
             node_id = node.get("node_id", "")
             name = node.get("name", "")
+            file_path = node.get("file_path", "")
             if name:
-                items.append(ListItem(name=name, source_refs=[node_id] if node_id else []))
+                item_name = self._build_item_name(name, file_path, node_types)
+                source_ref = self._build_source_ref(node_id, name, file_path)
+                items.append(ListItem(name=item_name, source_refs=[source_ref] if source_ref else []))
 
         logger.info(
             "static_list_get_all_nodes",
@@ -98,6 +101,26 @@ class StaticListProvider:
         )
 
         return items
+
+    @staticmethod
+    def _build_item_name(name: str, file_path: str, node_types: List[str]) -> str:
+        """构建列表项标题，Method 节点附带文件路径避免同名函数歧义."""
+        if "Method" in node_types and file_path:
+            return f"{name}（{file_path}）"
+        return name
+
+    @staticmethod
+    def _build_source_ref(node_id: str, name: str, file_path: str) -> Dict[str, Any]:
+        """构建 workspace sourceRefs 兼容的源码引用."""
+        if not node_id:
+            return {}
+        source_ref: Dict[str, Any] = {
+            "sourceId": node_id,
+            "symbolName": name,
+        }
+        if file_path:
+            source_ref["filePath"] = file_path
+        return source_ref
 
     def _parse_tool_result(self, tool_result: str) -> Dict[str, Any]:
         """解析工具返回结果.

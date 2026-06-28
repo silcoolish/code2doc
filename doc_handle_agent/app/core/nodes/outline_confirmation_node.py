@@ -3,7 +3,7 @@
 import copy
 import json
 import re
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from app.core.nodes.base import WorkflowNode
 from app.core.state import AgentState, GenerationStatus
@@ -114,8 +114,10 @@ class OutlineConfirmationNode(WorkflowNode):
                 children = self._get_child_blocks(blocks, i)
                 items = await self._generate_list_items(block, repo_id, parent_context)
 
-                for item_text in items:
-                    item_block = self._create_item_block(block, item_text)
+                for item in items:
+                    item_text = item.name if hasattr(item, "name") else str(item)
+                    item_source_refs = item.source_refs if hasattr(item, "source_refs") else []
+                    item_block = self._create_item_block(block, item_text, item_source_refs)
                     result.append(item_block)
 
                     expanded_children = await self._expand_blocks(
@@ -174,7 +176,7 @@ class OutlineConfirmationNode(WorkflowNode):
         block: TemplateBlock,
         repo_id: str,
         parent_context: str = "",
-    ) -> List[str]:
+    ) -> List[Any]:
         """为模板列表块生成列表项名称.
 
         优先使用 block.list_tool 调用静态工具获取全量列表；
@@ -190,7 +192,7 @@ class OutlineConfirmationNode(WorkflowNode):
                 list_items = await self.static_list_provider.get_list_items(
                     block.list_tool, repo_id
                 )
-                return [item.name for item in list_items]
+                return list_items
             except Exception as e:
                 logger.warning(
                     "static_list_tool_failed_falling_back_to_llm",
@@ -243,6 +245,7 @@ class OutlineConfirmationNode(WorkflowNode):
         self,
         original: TemplateBlock,
         content_text: str,
+        source_refs: Optional[List[Dict[str, Any]]] = None,
     ) -> TemplateBlock:
         """基于原始模板块创建列表展开项."""
         new_block = copy.deepcopy(original)
@@ -255,6 +258,9 @@ class OutlineConfirmationNode(WorkflowNode):
 
         if new_block.block_type == "heading":
             new_block.attrs["templateType"] = "static"
+
+        if source_refs:
+            new_block.source_refs = source_refs
 
         new_block.attrs["template_block_id"] = original.id
 
