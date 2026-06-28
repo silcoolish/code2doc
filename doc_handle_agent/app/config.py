@@ -46,6 +46,14 @@ class Settings(BaseSettings):
         default="http://localhost:18867",
         alias="WORKSPACE_SERVICE_URL",
     )
+    workspace_document_save_timeout: float = Field(
+        default=300.0,
+        alias="WORKSPACE_DOCUMENT_SAVE_TIMEOUT",
+    )
+    workspace_document_save_retries: int = Field(
+        default=0,
+        alias="WORKSPACE_DOCUMENT_SAVE_RETRIES",
+    )
 
     # 路径配置
     template_dir: str = Field(default="./templates", alias="TEMPLATE_DIR")

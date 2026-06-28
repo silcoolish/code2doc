@@ -128,6 +128,8 @@ class WorkspaceServiceAdapter:
         settings = get_settings()
         self.base_url = base_url or settings.workspace_service_url
         self.auth_token = auth_token.strip() if auth_token and auth_token.strip() else None
+        self.document_save_timeout = settings.workspace_document_save_timeout
+        self.document_save_retries = max(settings.workspace_document_save_retries, 0)
         self.http = HttpUtils()
 
         logger.info(
@@ -350,10 +352,22 @@ class WorkspaceServiceAdapter:
         )
 
         try:
+            timeout = self.document_save_timeout if request.blocks else HttpUtils.DEFAULT_TIMEOUT
+            max_retries = self.document_save_retries if request.blocks else HttpUtils.MAX_RETRIES
+            logger.info(
+                "save_document_http_policy",
+                repo_id=request.repo_id,
+                block_count=len(request.blocks),
+                timeout=timeout,
+                max_retries=max_retries,
+            )
+
             response = await self.http.post(
                 url,
                 json_data=request.to_api_payload(),
                 headers=self._auth_headers(),
+                timeout=timeout,
+                max_retries=max_retries,
             )
 
             if response.get("success"):

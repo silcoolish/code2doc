@@ -210,6 +210,7 @@ class HttpUtils:
         data: Optional[Dict[str, Any]] = None,
         headers: Optional[Dict[str, str]] = None,
         timeout: float = DEFAULT_TIMEOUT,
+        max_retries: int = MAX_RETRIES,
     ) -> Dict[str, Any]:
         """发送POST请求（带指数退避重试）."""
         default_headers = {
@@ -241,7 +242,13 @@ class HttpUtils:
                 timeout=timeout,
             )
 
-        return await HttpUtils._execute_request("POST", url, _request)
+        return await HttpUtils._execute_request(
+            "POST",
+            url,
+            _request,
+            max_retries=max_retries,
+            timeout=timeout,
+        )
 
     @staticmethod
     async def post_multipart(
