@@ -154,7 +154,7 @@ class GenerateBlocksNode(WorkflowNode):
             block_data = {
                 "id": block.id,
                 "parentBlockId": block.parent_block_id,
-                "blockType": block.block_type,
+                "blockType": "mermaid" if block.is_mermaid else block.block_type,
                 "headingLevel": block.heading_level,
                 "orderNo": block.order_no,
                 "contentText": block.content_text,

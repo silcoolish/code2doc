@@ -67,3 +67,30 @@ def test_build_generated_table_preserves_falsy_cell_values():
 
     assert table["rows"][0]["cells"]["c1"]["text"] == "0"
     assert table["rows"][0]["cells"]["c2"]["text"] == "False"
+
+
+def test_build_document_blocks_persists_mermaid_type_from_format():
+    node = GenerateBlocksNode(content_generator=None)
+    blocks = [
+        TemplateBlock(
+            id="diagram-block",
+            parent_block_id=None,
+            block_type="paragraph",
+            heading_level=0,
+            order_no="a",
+            content_text="",
+            attrs={"templateType": "template", "format": "mermaid"},
+        )
+    ]
+    results = [
+        DocumentBlock(
+            block_id="diagram-block",
+            block_type="mermaid",
+            text_content="flowchart LR\n  A --> B",
+        )
+    ]
+
+    doc_blocks = node._build_document_blocks(blocks, results)
+
+    assert doc_blocks[0]["blockType"] == "mermaid"
+    assert doc_blocks[0]["contentText"] == "flowchart LR\n  A --> B"

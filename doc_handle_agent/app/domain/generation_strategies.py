@@ -104,6 +104,8 @@ class GenerationStrategy(ABC):
     @staticmethod
     def _resolve_block_type(block: TemplateBlock) -> str:
         """解析 block 的结果类型."""
+        if block.is_mermaid:
+            return "mermaid"
         if block.is_table:
             return "table"
         if block.is_heading:
@@ -128,7 +130,23 @@ class GenerationStrategy(ABC):
 
         if block_type == "image":
             return content.strip()
+        if block_type == "mermaid":
+            return GenerationStrategy._strip_mermaid_fence(content)
         return content
+
+    @staticmethod
+    def _strip_mermaid_fence(content: str) -> str:
+        """去掉 Mermaid 代码围栏，保留可直接渲染的源码."""
+        stripped = content.strip()
+        if stripped.startswith("```mermaid"):
+            stripped = stripped[len("```mermaid"):].strip()
+            if stripped.endswith("```"):
+                stripped = stripped[:-3].strip()
+        elif stripped.startswith("```"):
+            stripped = stripped[3:].strip()
+            if stripped.endswith("```"):
+                stripped = stripped[:-3].strip()
+        return stripped
 
     def _build_missing_result(self, block: TemplateBlock) -> DocumentBlock:
         """构建缺失内容兜底结果."""
@@ -151,6 +169,17 @@ class GenerationStrategy(ABC):
 
         raw_content = raw_content.strip()
 
+        # 优先识别完整 JSON，避免 Mermaid 代码围栏被误当作外层响应围栏截断
+        stripped = raw_content.strip()
+        if stripped.startswith("["):
+            end = stripped.rfind("]")
+            if end > 0:
+                return stripped[: end + 1]
+        elif stripped.startswith("{"):
+            end = stripped.rfind("}")
+            if end > 0:
+                return stripped[: end + 1]
+
         # 查找JSON代码块
         if "```json" in raw_content:
             start = raw_content.find("```json") + 7
@@ -164,17 +193,6 @@ class GenerationStrategy(ABC):
             end = raw_content.find("```", start)
             if end > start:
                 return raw_content[start:end].strip()
-
-        # 尝试直接提取（如果内容以 [ 或 { 开头）
-        stripped = raw_content.strip()
-        if stripped.startswith("["):
-            end = stripped.rfind("]")
-            if end > 0:
-                return stripped[: end + 1]
-        elif stripped.startswith("{"):
-            end = stripped.rfind("}")
-            if end > 0:
-                return stripped[: end + 1]
 
         # 回退：查找JSON对象边界
         json_start = raw_content.find("{")
@@ -325,6 +343,8 @@ class GenerationStrategy(ABC):
             if block.is_template:
                 if block.prompt:
                     data["prompt"] = block.prompt
+                if block.output_format:
+                    data["format"] = block.output_format
                 if block.image_id:
                     data["image_id"] = block.image_id
                 if block.min_length is not None:
@@ -1184,6 +1204,8 @@ class BatchedGenerationStrategy(GenerationStrategy):
             if should_generate:
                 if block.prompt:
                     data["prompt"] = block.prompt
+                if block.output_format:
+                    data["format"] = block.output_format
                 if block.image_id:
                     data["image_id"] = block.image_id
                 if block.min_length is not None:

@@ -40,7 +40,7 @@ class TemplateBlock:
 
     id: str  # 唯一标识
     parent_block_id: Optional[str]  # 父block ID
-    block_type: str  # "heading" | "paragraph" | "list" | "table" | "code" | "image" | "diagram"
+    block_type: str  # "heading" | "paragraph" | "list" | "table" | "code" | "image" | "mermaid"
     heading_level: int  # 标题层级
     order_no: str  # 排序号（workspace 已改为 VARCHAR fractional indexing）
     content_text: str  # 纯文本内容（对应 workspace contentText）
@@ -90,6 +90,17 @@ class TemplateBlock:
     def example(self) -> Optional[str]:
         """获取参考示例."""
         return self.attrs.get("example")
+
+    @property
+    def output_format(self) -> Optional[str]:
+        """获取生成结果格式."""
+        value = self.attrs.get("format")
+        return str(value).strip() if value is not None else None
+
+    @property
+    def is_mermaid(self) -> bool:
+        """是否为 Mermaid 文本绘图块."""
+        return self.block_type == "mermaid" or self.output_format == "mermaid"
 
     @property
     def is_table(self) -> bool:
