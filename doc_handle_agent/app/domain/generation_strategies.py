@@ -1,5 +1,6 @@
 """内容生成策略 - 定义不同上下文处理策略的实现."""
 
+import asyncio
 import json
 import re
 from abc import ABC, abstractmethod
@@ -7,6 +8,7 @@ from abc import ABC, abstractmethod
 from json_repair import repair_json
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
+from app.config import get_settings
 from app.domain.content_generator_agent import ContentGeneratorAgent
 from app.domain.prompts import (
     FULL_CONTEXT_STRATEGY_PROMPT,
@@ -29,6 +31,11 @@ class FallbackSignalError(RuntimeError):
     当Agent返回 context_exceeded=true 时抛出，
     用于与策略执行中的其他异常区分，只捕获此异常才触发降级逻辑。
     """
+    pass
+
+
+class ContextOverflowError(RuntimeError):
+    """模型上下文超限异常."""
     pass
 
 
@@ -694,15 +701,20 @@ class BatchedGenerationStrategy(GenerationStrategy):
         self,
         agent: ContentGeneratorAgent,
         max_batch_size: int = 20,
+        function_batch_parallelism: Optional[int] = None,
     ):
         """初始化分批生成策略.
 
         Args:
             agent: 内容生成器Agent实例
             max_batch_size: 每批最大模板 block 数量（静态/标题 block 不计入限制）
+            function_batch_parallelism: 函数明细批次最大并发数
         """
         super().__init__(agent)
         self.max_batch_size = max_batch_size
+        if function_batch_parallelism is None:
+            function_batch_parallelism = get_settings().function_batch_parallelism
+        self.function_batch_parallelism = max(1, function_batch_parallelism)
 
     @property
     def name(self) -> str:
@@ -785,9 +797,110 @@ class BatchedGenerationStrategy(GenerationStrategy):
             )
 
             try:
-                batch_results = await self._process_batch(
-                    batch, repo_id, batch_num, generated_ids
+                parallel_blocker = self._get_function_batch_parallel_blocker(
+                    batch,
+                    templates_to_generate,
                 )
+                if parallel_blocker is None:
+                    function_batches: List[Tuple[int, int, int, List[TemplateBlock]]] = [
+                        (batch_num, i, next_i, batch)
+                    ]
+                    lookahead_i = next_i
+                    while (
+                        self.function_batch_parallelism > 1
+                        and len(function_batches) < self.function_batch_parallelism
+                        and lookahead_i < len(blocks)
+                    ):
+                        next_batch_num = batch_num + len(function_batches)
+                        lookahead_batch, lookahead_next_i = self._build_next_batch(
+                            blocks=blocks,
+                            start_idx=lookahead_i,
+                            block_map=block_map,
+                            index_map=index_map,
+                            generated_ids=generated_ids,
+                        )
+                        if not lookahead_batch:
+                            break
+                        lookahead_templates = [
+                            b for b in lookahead_batch if b.is_template and b.id not in generated_ids
+                        ]
+                        if not lookahead_templates:
+                            lookahead_i = lookahead_next_i
+                            continue
+                        lookahead_blocker = self._get_function_batch_parallel_blocker(
+                            lookahead_batch,
+                            lookahead_templates,
+                        )
+                        if lookahead_blocker is not None:
+                            self._log_function_parallel_skip(
+                                next_batch_num,
+                                lookahead_batch,
+                                lookahead_templates,
+                                lookahead_blocker,
+                            )
+                            break
+                        function_batches.append(
+                            (next_batch_num, lookahead_i, lookahead_next_i, lookahead_batch)
+                        )
+                        lookahead_i = lookahead_next_i
+
+                    if len(function_batches) > 1:
+                        logger.info(
+                            "processing_function_batches_parallel",
+                            batch_count=len(function_batches),
+                            parallelism=self.function_batch_parallelism,
+                            batch_nums=[item[0] for item in function_batches],
+                        )
+                        batch_result_groups = await asyncio.gather(
+                            *(
+                                self._process_batch_with_context_retry(
+                                    function_batch,
+                                    repo_id,
+                                    function_batch_num,
+                                    generated_ids,
+                                )
+                                for function_batch_num, _, _, function_batch in function_batches
+                            ),
+                            return_exceptions=True,
+                        )
+                        batch_results: List[DocumentBlock] = []
+                        for (function_batch_num, _, _, function_batch), result_group in zip(
+                            function_batches,
+                            batch_result_groups,
+                        ):
+                            if isinstance(result_group, Exception):
+                                logger.warning(
+                                    "parallel_function_batch_retry",
+                                    batch_num=function_batch_num,
+                                    error_type=type(result_group).__name__,
+                                    error=str(result_group),
+                                )
+                                batch_results.extend(
+                                    await self._process_batch_with_context_retry(
+                                        function_batch,
+                                        repo_id,
+                                        function_batch_num,
+                                        generated_ids,
+                                    )
+                                )
+                            else:
+                                batch_results.extend(result_group)
+                        batch_num = function_batches[-1][0]
+                        next_i = function_batches[-1][2]
+                    else:
+                        batch_results = await self._process_batch_with_context_retry(
+                            batch, repo_id, batch_num, generated_ids
+                        )
+                else:
+                    self._log_function_parallel_skip(
+                        batch_num,
+                        batch,
+                        templates_to_generate,
+                        parallel_blocker,
+                    )
+                    batch_results = await self._process_batch_with_context_retry(
+                        batch, repo_id, batch_num, generated_ids
+                    )
             except FallbackSignalError:
                 logger.warning(
                     "batch_fallback_signal",
@@ -802,8 +915,7 @@ class BatchedGenerationStrategy(GenerationStrategy):
                     error=str(e),
                     exc_info=True,
                 )
-                i = next_i
-                continue
+                raise
 
             # 替换模板内容并记录已生成 block
             for result in batch_results:
@@ -991,12 +1103,143 @@ class BatchedGenerationStrategy(GenerationStrategy):
                 return j
         return len(batch)
 
+    def _is_independent_function_batch(
+        self,
+        batch: List[TemplateBlock],
+        templates_to_generate: List[TemplateBlock],
+    ) -> bool:
+        """判断批次是否属于可并发的函数明细生成.
+
+        函数列表由 get_all_methods 展开后，函数标题块会带 source_refs；
+        标题下的说明/流程图等模板块只依赖该函数源码，不强依赖前后函数章节。
+        """
+        return self._get_function_batch_parallel_blocker(
+            batch,
+            templates_to_generate,
+        ) is None
+
+    def _get_function_batch_parallel_blocker(
+        self,
+        batch: List[TemplateBlock],
+        templates_to_generate: List[TemplateBlock],
+    ) -> Optional[str]:
+        """返回函数明细批次不能并发的原因，None 表示可并发."""
+        if not templates_to_generate:
+            return "empty_templates"
+
+        for template_block in templates_to_generate:
+            anchor = self._find_function_anchor(batch, template_block)
+            if not anchor:
+                return "missing_function_anchor"
+            if self._is_cross_context_template(template_block):
+                return "cross_context_template"
+        return None
+
+    def _log_function_parallel_skip(
+        self,
+        batch_num: int,
+        batch: List[TemplateBlock],
+        templates_to_generate: List[TemplateBlock],
+        reason: str,
+    ) -> None:
+        """记录函数明细批次未进入并发的原因."""
+        if not self._batch_looks_like_function_detail(batch):
+            return
+        logger.info(
+            "function_batch_parallel_skipped",
+            batch_num=batch_num,
+            reason=reason,
+            template_count=len(templates_to_generate),
+            batch_size=len(batch),
+            sample_template_ids=[block.id for block in templates_to_generate[:5]],
+        )
+
+    @staticmethod
+    def _batch_looks_like_function_detail(batch: List[TemplateBlock]) -> bool:
+        """判断批次是否处在函数级详细设计章节附近."""
+        for block in batch:
+            text = str(block.content_text or "").lower()
+            if "函数级详细设计" in text or "函数说明" in text:
+                return True
+            if block.is_heading and ("（" in text or "(" in text) and "/" in text:
+                return True
+        return False
+
+    def _find_function_anchor(
+        self,
+        batch: List[TemplateBlock],
+        block: TemplateBlock,
+    ) -> Optional[TemplateBlock]:
+        """查找模板块所属的函数标题锚点."""
+        try:
+            block_index = next(index for index, item in enumerate(batch) if item.id == block.id)
+        except StopIteration:
+            return None
+
+        for index in range(block_index - 1, -1, -1):
+            candidate = batch[index]
+            if not candidate.is_heading:
+                continue
+            return candidate if self._is_function_anchor(candidate) else None
+        return None
+
+    @staticmethod
+    def _is_function_anchor(block: TemplateBlock) -> bool:
+        """识别 get_all_methods 展开的函数标题块."""
+        if not block.is_heading:
+            return False
+
+        source_refs = block.source_refs or []
+        if not source_refs:
+            return False
+        for source_ref in source_refs:
+            values = [
+                source_ref.get("symbolType"),
+                source_ref.get("refType"),
+                source_ref.get("role"),
+                source_ref.get("nodeType"),
+                source_ref.get("type"),
+            ]
+            if any(str(value or "").strip().lower() in {"method", "function"} for value in values):
+                return True
+        anchor_text = f"{block.content_text or ''} {block.attrs.get('template_block_id') or ''}".lower()
+        return bool(block.attrs.get("template_block_id")) and any(
+            keyword in anchor_text
+            for keyword in ("函数", "方法", "function", "method")
+        )
+
+    @staticmethod
+    def _is_cross_context_template(block: TemplateBlock) -> bool:
+        """排除明显依赖全文叙述上下文的模板块."""
+        text = " ".join(
+            str(value or "")
+            for value in (
+                block.content_text,
+                block.prompt,
+                block.attrs.get("title"),
+                block.attrs.get("description"),
+            )
+        ).lower()
+        keywords = (
+            "总体",
+            "整体",
+            "架构",
+            "上下文",
+            "汇总",
+            "总结",
+            "overview",
+            "architecture",
+            "summary",
+        )
+        return any(keyword in text for keyword in keywords)
+
     async def _process_batch(
         self,
         batch: List[TemplateBlock],
         repo_id: str,
         batch_num: int,
         generated_ids: Optional[Set[str]] = None,
+        active_template_ids: Optional[Set[str]] = None,
     ) -> List[DocumentBlock]:
         """处理单个批次.
 
@@ -1012,7 +1255,12 @@ class BatchedGenerationStrategy(GenerationStrategy):
         Raises:
             FallbackSignalError: 当批次处理失败时
         """
-        task_message = self._build_task_message(batch, repo_id, generated_ids)
+        task_message = self._build_task_message(
+            batch,
+            repo_id,
+            generated_ids,
+            active_template_ids,
+        )
 
         raw_content = await self.agent.generate_with_tools(
             system_prompt=BATCH_CONTEXT_STRATEGY_PROMPT,
@@ -1035,6 +1283,7 @@ class BatchedGenerationStrategy(GenerationStrategy):
             raw_content,
             batch,
             generated_ids=generated_ids,
+            active_template_ids=active_template_ids,
             fill_missing_placeholders=False,
         )
 
@@ -1049,12 +1298,14 @@ class BatchedGenerationStrategy(GenerationStrategy):
             batch,
             results,
             generated_ids=generated_ids,
+            active_template_ids=active_template_ids,
         )
         if not missing_blocks:
             return self._fill_missing_template_results(
                 batch,
                 results,
                 generated_ids=generated_ids,
+                active_template_ids=active_template_ids,
             )
 
         # 首轮批次可能被模型漏回部分模板块，合并重试避免单块串行放大耗时
@@ -1078,6 +1329,98 @@ class BatchedGenerationStrategy(GenerationStrategy):
             batch,
             results + retry_results,
             generated_ids=generated_ids,
+            active_template_ids=active_template_ids,
+        )
+
+    async def _process_batch_with_context_retry(
+        self,
+        batch: List[TemplateBlock],
+        repo_id: str,
+        batch_num: int,
+        generated_ids: Optional[Set[str]] = None,
+        active_template_ids: Optional[Set[str]] = None,
+    ) -> List[DocumentBlock]:
+        """处理批次，遇到模型上下文超限时拆小目标块重试."""
+        generated_id_set = set(generated_ids or set())
+        target_ids = sorted(
+            self._get_batch_target_ids(
+                batch,
+                generated_id_set,
+                active_template_ids,
+            )
+        )
+        try:
+            return await self._process_batch(
+                batch,
+                repo_id,
+                batch_num,
+                generated_id_set,
+                active_template_ids,
+            )
+        except Exception as ex:
+            if not self._is_context_overflow_exception(ex):
+                raise
+            if len(target_ids) <= 1:
+                logger.error(
+                    "batch_context_overflow_single_target",
+                    batch_num=batch_num,
+                    target_ids=target_ids,
+                    error_type=type(ex).__name__,
+                    error=str(ex),
+                )
+                raise ContextOverflowError(
+                    "单个内容块生成上下文仍超过模型限制，请缩短模板提示词或减少工具返回的源码范围"
+                ) from ex
+
+            midpoint = max(1, len(target_ids) // 2)
+            split_target_groups = [
+                set(target_ids[:midpoint]),
+                set(target_ids[midpoint:]),
+            ]
+            logger.warning(
+                "batch_context_overflow_split_retry",
+                batch_num=batch_num,
+                target_count=len(target_ids),
+                split_sizes=[len(group) for group in split_target_groups],
+                error_type=type(ex).__name__,
+                error=str(ex),
+            )
+            split_results: List[DocumentBlock] = []
+            retry_generated_ids = set(generated_id_set)
+            for group_index, split_target_ids in enumerate(split_target_groups, start=1):
+                split_batch_num = int(f"{batch_num}{group_index}")
+                group_results = await self._process_batch_with_context_retry(
+                    batch=batch,
+                    repo_id=repo_id,
+                    batch_num=split_batch_num,
+                    generated_ids=retry_generated_ids,
+                    active_template_ids=split_target_ids,
+                )
+                split_results.extend(group_results)
+                retry_generated_ids.update(
+                    result.block_id for result in group_results if result.block_id
+                )
+            return split_results
+
+    @staticmethod
+    def _is_context_overflow_exception(ex: Exception) -> bool:
+        """识别 OpenAI 兼容接口返回的上下文超限错误."""
+        error_text = str(ex).lower()
+        context_markers = (
+            "maximum context length",
+            "context length",
+            "context window",
+            "max context",
+        )
+        overflow_markers = (
+            "requested",
+            "reduce the length",
+            "too many tokens",
+            "exceed",
+            "超过",
+        )
+        return any(marker in error_text for marker in context_markers) and any(
+            marker in error_text for marker in overflow_markers
         )
 
     def _build_task_message(

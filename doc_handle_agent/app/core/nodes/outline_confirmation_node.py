@@ -19,6 +19,11 @@ logger = get_logger(__name__)
 _EXPAND_PROGRESS_INTERVAL = 50
 _ORDER_KEY_LENGTH = 8
 _ORDER_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+_STATIC_LIST_NAMES = {
+    "get_all_methods": "函数列表",
+    "get_all_classes": "类列表",
+    "get_all_modules": "模块列表",
+}
 
 
 class OutlineConfirmationNode(WorkflowNode):
@@ -180,12 +185,8 @@ class OutlineConfirmationNode(WorkflowNode):
     def _build_list_expand_message(block: TemplateBlock, item_count: int) -> str:
         """构建列表展开进度文案."""
         list_name = block.content_text or block.list_tool or "列表"
-        if block.list_tool == "get_all_methods":
-            list_name = "函数列表"
-        elif block.list_tool == "get_all_classes":
-            list_name = "类列表"
-        elif block.list_tool == "get_all_modules":
-            list_name = "模块列表"
+        if block.list_tool:
+            list_name = OutlineConfirmationNode._get_static_list_name(block.list_tool)
         return f"已获取{item_count}个{list_name}条目，正在展开文档大纲..."
 
     @staticmethod
@@ -231,13 +232,19 @@ class OutlineConfirmationNode(WorkflowNode):
                 list_items = await self.static_list_provider.get_list_items(
                     block.list_tool, repo_id
                 )
+                if not list_items:
+                    list_name = self._get_static_list_name(block.list_tool)
+                    raise ValueError(
+                        f"{list_name}为空，请先完成知识库初始化后再生成文档"
+                    )
                 return list_items
             except Exception as e:
-                logger.warning(
-                    "static_list_tool_failed_falling_back_to_llm",
+                logger.error(
+                    "static_list_tool_failed",
                     list_tool=block.list_tool,
                     error=str(e),
                 )
+                raise
 
         raw_content = await self._call_llm_for_list_items(
             block.prompt or "",
@@ -256,6 +263,11 @@ class OutlineConfirmationNode(WorkflowNode):
             items = [block.prompt or "未命名项"]
 
         return items
+
+    @staticmethod
+    def _get_static_list_name(list_tool: str) -> str:
+        """获取静态列表工具的中文名称."""
+        return _STATIC_LIST_NAMES.get(list_tool, list_tool)
 
     async def _call_llm_for_list_items(
         self,

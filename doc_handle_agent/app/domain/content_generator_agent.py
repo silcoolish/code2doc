@@ -2,6 +2,7 @@
 
 import json
 import uuid
+from contextvars import ContextVar
 from typing import Any, Dict, List, Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
@@ -13,6 +14,7 @@ from app.utils.agent_logger import get_agent_logger
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
+_agent_logger_var: ContextVar[Any] = ContextVar("agent_logger", default=None)
 
 
 class ContentGeneratorAgent:
@@ -64,8 +66,8 @@ class ContentGeneratorAgent:
         self._cache_hits = 0
         self._cache_misses = 0
 
-        # 当前文档生成流程的专属 agent 日志记录器，在 generate_with_tools 中绑定
-        self._agent_logger = None
+        # 当前文档生成流程的专属 agent 日志记录器，通过 ContextVar 隔离并发批次
+        self._agent_logger_var = _agent_logger_var
 
     @property
     def context_limit(self) -> int:
@@ -359,13 +361,14 @@ class ContentGeneratorAgent:
         """
         # 生成会话唯一标识并创建专属日志记录器，绑定到当前流程
         session_id = str(uuid.uuid4())
-        self._agent_logger = get_agent_logger(
+        agent_logger = get_agent_logger(
             repo_id=repo_id, task_name=task_name, session_id=session_id
         )
+        logger_token = self._agent_logger_var.set(agent_logger)
 
         try:
             # 记录 agent 请求开始
-            self._agent_logger.log_agent_request(
+            agent_logger.log_agent_request(
                 session_id=session_id,
                 system_prompt=system_prompt,
                 task_message=task_message,
@@ -412,7 +415,7 @@ class ContentGeneratorAgent:
                 final_iteration = i + 1
 
                 # 记录 LLM 调用请求
-                self._agent_logger.log_llm_call(
+                agent_logger.log_llm_call(
                     session_id=session_id,
                     iteration=final_iteration,
                     messages=self._serialize_messages(messages),
@@ -438,7 +441,7 @@ class ContentGeneratorAgent:
                     ]
 
                 # 记录 LLM 响应
-                self._agent_logger.log_llm_response(
+                agent_logger.log_llm_response(
                     session_id=session_id,
                     iteration=final_iteration,
                     response_content=response_content,
@@ -455,7 +458,7 @@ class ContentGeneratorAgent:
                             tool_args["repo_id"] = repo_id
 
                         # 记录工具调用请求
-                        self._agent_logger.log_tool_call(
+                        agent_logger.log_tool_call(
                             session_id=session_id,
                             iteration=final_iteration,
                             tool_name=tool_name,
@@ -468,7 +471,7 @@ class ContentGeneratorAgent:
                                 result = await custom_tool_handler(tool_name, tool_args)
                             else:
                                 result = await self.call_tool(tool_name, tool_args)
-                            self._agent_logger.log_tool_response(
+                            agent_logger.log_tool_response(
                                 session_id=session_id,
                                 iteration=final_iteration,
                                 tool_name=tool_name,
@@ -477,7 +480,7 @@ class ContentGeneratorAgent:
                             )
                         except Exception as e:
                             result = f"工具调用失败: {str(e)}"
-                            self._agent_logger.log_tool_response(
+                            agent_logger.log_tool_response(
                                 session_id=session_id,
                                 iteration=final_iteration,
                                 tool_name=tool_name,
@@ -501,7 +504,7 @@ class ContentGeneratorAgent:
             final_content = final_response.content if hasattr(final_response, "content") else str(final_response)
 
             # 记录 agent 请求完成
-            self._agent_logger.log_agent_completion(
+            agent_logger.log_agent_completion(
                 session_id=session_id,
                 total_iterations=final_iteration,
                 final_content=final_content,
@@ -511,7 +514,7 @@ class ContentGeneratorAgent:
             return final_content
         finally:
             # 流程结束，解绑日志记录器
-            self._agent_logger = None
+            self._agent_logger_var.reset(logger_token)
 
     @staticmethod
     def _sanitize_tool_args(tool_args: Dict[str, Any]) -> Dict[str, Any]:
@@ -587,10 +590,11 @@ class ContentGeneratorAgent:
         # 构造缓存键（基于工具名和排序后的参数）
         cache_key = self._build_tool_cache_key(tool_name, tool_args)
 
+        agent_logger = self._agent_logger_var.get()
         if cache_key in self._tool_result_cache:
             self._cache_hits += 1
-            if self._agent_logger:
-                self._agent_logger.log_event(
+            if agent_logger:
+                agent_logger.log_event(
                     "tool_cache_hit",
                     tool_name=tool_name,
                     cache_hits=self._cache_hits,

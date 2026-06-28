@@ -15,6 +15,7 @@ class _StaticListProvider:
                     "sourceId": "method-vector-push-back",
                     "symbolName": "push_back",
                     "filePath": "TinySTL/Vector.impl.h",
+                    "symbolType": "Method",
                 }],
             )
         ]
@@ -23,6 +24,16 @@ class _StaticListProvider:
 class _ContentGenerator:
     agent = None
     static_list_provider = _StaticListProvider()
+
+
+class _EmptyStaticListProvider:
+    async def get_list_items(self, list_tool, repo_id):
+        return []
+
+
+class _EmptyContentGenerator:
+    agent = None
+    static_list_provider = _EmptyStaticListProvider()
 
 
 class _ProgressReporter:
@@ -72,6 +83,7 @@ async def test_outline_confirmation_expands_static_method_list_with_source_refs(
         "sourceId": "method-vector-push-back",
         "symbolName": "push_back",
         "filePath": "TinySTL/Vector.impl.h",
+        "symbolType": "Method",
     }]
 
 
@@ -100,6 +112,32 @@ async def test_outline_confirmation_reports_static_list_expand_progress():
     await node.execute(state)
 
     assert (35, "已获取1个函数列表条目，正在展开文档大纲...") in reporter.messages
+
+
+@pytest.mark.asyncio
+async def test_outline_confirmation_fails_when_static_method_list_empty():
+    node = OutlineConfirmationNode(_EmptyContentGenerator())
+    state = create_initial_state(repo_id="repo-1", template_id="tpl-1")
+    state["blocks"] = [
+        TemplateBlock(
+            id="method-list",
+            parent_block_id=None,
+            block_type="heading",
+            heading_level=3,
+            order_no="a",
+            content_text="函数详细设计项",
+            attrs={
+                "templateType": "template",
+                "isList": True,
+                "list_tool": "get_all_methods",
+            },
+        ),
+    ]
+
+    result = await node.execute(state)
+
+    assert result["error"] == "函数列表为空，请先完成知识库初始化后再生成文档"
+    assert result["message"] == "大纲确认失败: 函数列表为空，请先完成知识库初始化后再生成文档"
 
 
 def test_outline_confirmation_assigns_order_no_incrementally():

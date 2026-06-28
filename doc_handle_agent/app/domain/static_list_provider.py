@@ -90,7 +90,7 @@ class StaticListProvider:
             file_path = node.get("file_path", "")
             if name:
                 item_name = self._build_item_name(name, file_path, node_types)
-                source_ref = self._build_source_ref(node_id, name, file_path)
+                source_ref = self._build_source_ref(node_id, name, file_path, node_types)
                 items.append(ListItem(name=item_name, source_refs=[source_ref] if source_ref else []))
 
         logger.info(
@@ -110,7 +110,7 @@ class StaticListProvider:
         return name
 
     @staticmethod
-    def _build_source_ref(node_id: str, name: str, file_path: str) -> Dict[str, Any]:
+    def _build_source_ref(node_id: str, name: str, file_path: str, node_types: List[str]) -> Dict[str, Any]:
         """构建 workspace sourceRefs 兼容的源码引用."""
         if not node_id:
             return {}
@@ -118,6 +118,8 @@ class StaticListProvider:
             "sourceId": node_id,
             "symbolName": name,
         }
+        if node_types:
+            source_ref["symbolType"] = node_types[0]
         if file_path:
             source_ref["filePath"] = file_path
         return source_ref
