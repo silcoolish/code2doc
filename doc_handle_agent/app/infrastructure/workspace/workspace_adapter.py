@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import httpx
+
 from app.config import get_settings
 from app.domain.model.block import TemplateBlock
 from app.infrastructure.http import HttpUtils
@@ -538,6 +540,7 @@ class WorkspaceServiceAdapter:
         file_name: str,
         file_content: bytes,
         block_id: Optional[str] = None,
+        client: Optional[httpx.AsyncClient] = None,
     ) -> UploadResourceResponse:
         """上传资源文件（字节内容）.
 
@@ -548,6 +551,7 @@ class WorkspaceServiceAdapter:
             file_name: 文件名
             file_content: 文件字节内容
             block_id: 所属条目ID（可选）
+            client: 可选的共享 HTTP 客户端
 
         Returns:
             上传资源响应
@@ -587,6 +591,7 @@ class WorkspaceServiceAdapter:
                 files=files,
                 data=data,
                 headers=self._auth_headers(),
+                client=client,
             )
 
             if response.get("success"):

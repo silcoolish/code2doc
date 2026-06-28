@@ -8,8 +8,10 @@
 
 import json
 import re
+import asyncio
+import ast
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 from urllib.parse import urlparse
 
 import httpx
@@ -21,6 +23,7 @@ from app.infrastructure.workspace import (
     UploadResourceResponse,
     WorkspaceServiceAdapter,
 )
+from app.infrastructure.mcp_client import MCPClient
 from app.utils.logger import get_logger
 from app.utils.timing import log_timing
 
@@ -51,15 +54,21 @@ class ProcessImageBlocksNode(WorkflowNode):
     def __init__(
         self,
         workspace_adapter: Optional[WorkspaceServiceAdapter] = None,
+        mcp_client: Optional[MCPClient] = None,
     ):
         """初始化节点.
 
         Args:
             workspace_adapter: workspace 服务适配器，默认创建新实例
+            mcp_client: 已连接的 MCP 客户端，用于缺失图片 ID 时按 sourceRefs 兜底补图
         """
         self.workspace_adapter = workspace_adapter or WorkspaceServiceAdapter()
+        self.mcp_client = mcp_client
         settings = get_settings()
         self.kb_base_url = self._resolve_kb_base_url(settings.mcp_server_url)
+        self.download_parallelism = max(1, settings.image_download_parallelism)
+        self.upload_parallelism = max(1, settings.image_upload_parallelism)
+        self.process_drawio = settings.image_process_drawio
 
     @property
     def name(self) -> str:
@@ -99,13 +108,34 @@ class ProcessImageBlocksNode(WorkflowNode):
             else:
                 state["message"] = "正在处理图片资源..."
 
-            with log_timing("process_image_blocks", block_count=len(doc_blocks)):
-                updated_blocks = await self._process_blocks(
-                    doc_blocks,
-                    document_id=document_id,
-                    repo_id=repo_id,
-                    reporter=reporter,
-                )
+            async with httpx.AsyncClient(
+                limits=httpx.Limits(
+                    max_connections=max(self.download_parallelism * 2, 16),
+                    max_keepalive_connections=max(self.download_parallelism, 8),
+                ),
+                timeout=30.0,
+                follow_redirects=True,
+                trust_env=False,
+            ) as download_client, httpx.AsyncClient(
+                limits=httpx.Limits(
+                    max_connections=max(self.upload_parallelism * 2, 16),
+                    max_keepalive_connections=max(self.upload_parallelism, 8),
+                ),
+                timeout=30.0,
+                follow_redirects=True,
+                http1=True,
+                http2=False,
+                trust_env=False,
+            ) as upload_client:
+                with log_timing("process_image_blocks", block_count=len(doc_blocks)):
+                    updated_blocks = await self._process_blocks(
+                        doc_blocks,
+                        document_id=document_id,
+                        repo_id=repo_id,
+                        reporter=reporter,
+                        download_client=download_client,
+                        upload_client=upload_client,
+                    )
 
             state["doc_blocks"] = updated_blocks
             if reporter:
@@ -136,6 +166,8 @@ class ProcessImageBlocksNode(WorkflowNode):
         document_id: str,
         repo_id: str,
         reporter: Any = None,
+        download_client: Optional[httpx.AsyncClient] = None,
+        upload_client: Optional[httpx.AsyncClient] = None,
     ) -> List[Dict[str, Any]]:
         """处理文档块列表中的图片块.
 
@@ -144,35 +176,190 @@ class ProcessImageBlocksNode(WorkflowNode):
             document_id: 文档 ID
             repo_id: 仓库 ID
             reporter: 进度报告器（可选）
+            download_client: 本轮图片下载共享 HTTP 客户端
+            upload_client: 本轮资源上传共享 HTTP 客户端
 
         Returns:
             更新后的文档块列表
         """
-        updated_blocks: List[Dict[str, Any]] = []
-        image_blocks = [b for b in doc_blocks if b.get("blockType") == "image"]
+        doc_blocks = await self._fill_missing_image_refs_from_source_refs(doc_blocks, repo_id)
+        updated_blocks: List[Optional[Dict[str, Any]]] = [None] * len(doc_blocks)
+        image_entries = [
+            (index, block)
+            for index, block in enumerate(doc_blocks)
+            if block.get("blockType") == "image"
+        ]
         processed_count = 0
+        processed_lock = asyncio.Lock()
+        download_semaphore = asyncio.Semaphore(self.download_parallelism)
+        upload_semaphore = asyncio.Semaphore(self.upload_parallelism)
 
-        for block in doc_blocks:
-            if block.get("blockType") == "image":
-                processed = await self._process_image_block(block, document_id, repo_id)
-                updated_blocks.append(processed)
+        for index, block in enumerate(doc_blocks):
+            if block.get("blockType") != "image":
+                updated_blocks[index] = block
+
+        async def process_entry(index: int, block: Dict[str, Any]) -> None:
+            nonlocal processed_count
+            try:
+                processed = await self._process_image_block(
+                    block,
+                    document_id,
+                    repo_id,
+                    download_client=download_client,
+                    upload_client=upload_client,
+                    download_semaphore=download_semaphore,
+                    upload_semaphore=upload_semaphore,
+                )
+            except Exception as exc:
+                logger.error(
+                    "process_image_block_failed",
+                    block_id=block.get("id"),
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                    exc_info=True,
+                )
+                processed = block
+            updated_blocks[index] = processed
+            async with processed_lock:
                 processed_count += 1
                 if reporter:
                     await reporter.report_step(
                         processed_count,
-                        len(image_blocks),
-                        f"正在处理第 {processed_count}/{len(image_blocks)} 个图片资源...",
+                        len(image_entries),
+                        f"正在处理第 {processed_count}/{len(image_entries)} 个图片资源...",
                     )
-            else:
-                updated_blocks.append(block)
 
-        return updated_blocks
+        logger.info(
+            "process_image_blocks_batch",
+            total_blocks=len(doc_blocks),
+            image_count=len(image_entries),
+            download_parallelism=self.download_parallelism,
+            upload_parallelism=self.upload_parallelism,
+            process_drawio=self.process_drawio,
+        )
+
+        if image_entries:
+            await asyncio.gather(
+                *(process_entry(index, block) for index, block in image_entries)
+            )
+
+        return [block for block in updated_blocks if block is not None]
+
+    async def _fill_missing_image_refs_from_source_refs(
+        self,
+        doc_blocks: List[Dict[str, Any]],
+        repo_id: str,
+    ) -> List[Dict[str, Any]]:
+        """按源码引用为缺少 contentText 的图片块批量补充图片 ID."""
+        if not self.mcp_client:
+            return doc_blocks
+
+        pending_blocks = [
+            block for block in doc_blocks
+            if block.get("blockType") == "image"
+            and not self._extract_image_reference(block)
+            and self._extract_source_node_id(block)
+        ]
+        if not pending_blocks:
+            return doc_blocks
+
+        node_ids: List[str] = []
+        seen_node_ids: Set[str] = set()
+        for block in pending_blocks:
+            node_id = self._extract_source_node_id(block)
+            if node_id and node_id not in seen_node_ids:
+                node_ids.append(node_id)
+                seen_node_ids.add(node_id)
+
+        image_refs = await self._load_image_refs_by_node_id(repo_id, node_ids)
+        filled_count = 0
+        for block in pending_blocks:
+            node_id = self._extract_source_node_id(block)
+            image_ref = image_refs.get(node_id or "")
+            if image_ref:
+                block["contentText"] = image_ref
+                filled_count += 1
+
+        logger.info(
+            "image_refs_filled_from_source_refs",
+            pending_count=len(pending_blocks),
+            node_count=len(node_ids),
+            filled_count=filled_count,
+        )
+        return doc_blocks
+
+    async def _load_image_refs_by_node_id(
+        self,
+        repo_id: str,
+        node_ids: List[str],
+    ) -> Dict[str, str]:
+        """调用 batch_get_image_ids 获取节点到图片 ID 的映射."""
+        if not node_ids:
+            return {}
+        try:
+            raw_result = await self.mcp_client.call_tool(
+                "batch_get_image_ids",
+                {"repo_id": repo_id, "node_ids": node_ids},
+            )
+        except Exception as exc:
+            logger.warning(
+                "image_refs_load_failed",
+                repo_id=repo_id,
+                node_count=len(node_ids),
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            return {}
+
+        if isinstance(raw_result, dict):
+            payload = raw_result
+        else:
+            try:
+                payload = json.loads(raw_result)
+            except json.JSONDecodeError:
+                try:
+                    payload = ast.literal_eval(raw_result)
+                except (ValueError, SyntaxError):
+                    logger.warning(
+                        "image_refs_parse_failed",
+                        repo_id=repo_id,
+                        raw_result=str(raw_result)[:200],
+                    )
+                    return {}
+            except TypeError:
+                logger.warning(
+                    "image_refs_parse_failed",
+                    repo_id=repo_id,
+                    raw_result=str(raw_result)[:200],
+                )
+                return {}
+        if not isinstance(payload, dict):
+            logger.warning(
+                "image_refs_parse_failed",
+                repo_id=repo_id,
+                raw_result=str(raw_result)[:200],
+            )
+            return {}
+
+        refs: Dict[str, str] = {}
+        for item in payload.get("images", []):
+            if not isinstance(item, dict) or not item.get("success"):
+                continue
+            node_id = str(item.get("node_id") or "").strip()
+            image_id = self._extract_reference_from_value(item)
+            if node_id and image_id:
+                refs[node_id] = image_id
+        return refs
 
     async def _process_image_block(
         self,
         block: Dict[str, Any],
         document_id: str,
         repo_id: str,
+        download_client: Optional[httpx.AsyncClient] = None,
+        upload_client: Optional[httpx.AsyncClient] = None,
+        download_semaphore: Optional[asyncio.Semaphore] = None,
+        upload_semaphore: Optional[asyncio.Semaphore] = None,
     ) -> Dict[str, Any]:
         """处理单个图片块.
 
@@ -182,17 +369,23 @@ class ProcessImageBlocksNode(WorkflowNode):
             block: 原始图片块数据
             document_id: 文档 ID
             repo_id: 仓库 ID
+            download_client: 本轮图片下载共享 HTTP 客户端
+            upload_client: 本轮资源上传共享 HTTP 客户端
+            download_semaphore: 图片下载并发限制
+            upload_semaphore: 资源上传并发限制
 
         Returns:
             更新后的图片块数据
         """
         image_ref = self._extract_image_reference(block)
         if not image_ref:
+            content = block.get("contentText")
             logger.warning(
                 "image_reference_not_found",
-                block_content=block.get("contentText", "")[:100],
+                block_content=str(content or "")[:100],
+                source_node_id=self._extract_source_node_id(block),
             )
-            return block
+            return self._build_missing_image_placeholder(block)
 
         caption = self._extract_caption(block) or ""
         block_id = block.get("id")
@@ -209,8 +402,11 @@ class ProcessImageBlocksNode(WorkflowNode):
         else:
             image_url = f"{self.kb_base_url}/images/{repo_id}/{image_ref}"
 
-        # 下载图片文件
-        image_bytes = await self._download_file(image_url)
+        image_bytes = await self._download_with_limit(
+            image_url,
+            client=download_client,
+            semaphore=download_semaphore,
+        )
         if not image_bytes:
             logger.error(
                 "download_image_failed",
@@ -221,13 +417,14 @@ class ProcessImageBlocksNode(WorkflowNode):
         file_name = self._extract_file_name(image_url) or "image.png"
         resource_type = self._resolve_resource_type(image_url)
 
-        # 上传图片文件
-        image_response = await self._upload_resource(
+        image_response = await self._upload_with_limit(
             file_name=file_name,
             file_content=image_bytes,
             document_id=document_id,
             resource_type=resource_type,
             block_id=block_id,
+            client=upload_client,
+            semaphore=upload_semaphore,
         )
 
         if not image_response.success or not image_response.resource_id:
@@ -254,16 +451,23 @@ class ProcessImageBlocksNode(WorkflowNode):
             drawio_id = self._to_drawio_id(image_ref)
             drawio_url = f"{self.kb_base_url}/images/{repo_id}/{drawio_id}" if drawio_id else None
 
-        if drawio_url:
-            drawio_bytes = await self._download_file(drawio_url)
+        if self.process_drawio and drawio_url:
+            drawio_bytes = await self._download_with_limit(
+                drawio_url,
+                max_retries=1,
+                client=download_client,
+                semaphore=download_semaphore,
+            )
             if drawio_bytes:
                 drawio_file_name = self._extract_file_name(drawio_url) or "diagram.drawio"
-                drawio_response = await self._upload_resource(
+                drawio_response = await self._upload_with_limit(
                     file_name=drawio_file_name,
                     file_content=drawio_bytes,
                     document_id=document_id,
                     resource_type="drawio",
                     block_id=block_id,
+                    client=upload_client,
+                    semaphore=upload_semaphore,
                 )
                 if drawio_response.success and drawio_response.resource_id:
                     drawio_asset_id = drawio_response.resource_id
@@ -289,6 +493,57 @@ class ProcessImageBlocksNode(WorkflowNode):
             "attrs": attrs,
         }
 
+    async def _download_with_limit(
+        self,
+        url: str,
+        max_retries: int = DOWNLOAD_MAX_RETRIES,
+        client: Optional[httpx.AsyncClient] = None,
+        semaphore: Optional[asyncio.Semaphore] = None,
+    ) -> Optional[bytes]:
+        """按下载并发限制读取图片资源."""
+        if semaphore:
+            async with semaphore:
+                return await self._download_file(
+                    url,
+                    max_retries=max_retries,
+                    client=client,
+                )
+        return await self._download_file(
+            url,
+            max_retries=max_retries,
+            client=client,
+        )
+
+    async def _upload_with_limit(
+        self,
+        file_name: str,
+        file_content: bytes,
+        document_id: str,
+        resource_type: str,
+        block_id: Optional[str] = None,
+        client: Optional[httpx.AsyncClient] = None,
+        semaphore: Optional[asyncio.Semaphore] = None,
+    ) -> UploadResourceResponse:
+        """按上传并发限制写入 workspace 资源."""
+        if semaphore:
+            async with semaphore:
+                return await self._upload_resource(
+                    file_name=file_name,
+                    file_content=file_content,
+                    document_id=document_id,
+                    resource_type=resource_type,
+                    block_id=block_id,
+                    client=client,
+                )
+        return await self._upload_resource(
+            file_name=file_name,
+            file_content=file_content,
+            document_id=document_id,
+            resource_type=resource_type,
+            block_id=block_id,
+            client=client,
+        )
+
     async def _upload_resource(
         self,
         file_name: str,
@@ -296,6 +551,7 @@ class ProcessImageBlocksNode(WorkflowNode):
         document_id: str,
         resource_type: str,
         block_id: Optional[str] = None,
+        client: Optional[httpx.AsyncClient] = None,
     ) -> UploadResourceResponse:
         """调用 workspace API 上传资源文件.
 
@@ -305,6 +561,7 @@ class ProcessImageBlocksNode(WorkflowNode):
             document_id: 文档 ID（用作 owner_id）
             resource_type: 资源类型 (image/drawio/flowchart/callgraph)
             block_id: 所属条目ID（可选）
+            client: 本轮资源上传共享 HTTP 客户端
 
         Returns:
             资源上传响应
@@ -316,9 +573,15 @@ class ProcessImageBlocksNode(WorkflowNode):
             file_name=file_name,
             file_content=file_content,
             block_id=block_id,
+            client=client,
         )
 
-    async def _download_file(self, url: str) -> Optional[bytes]:
+    async def _download_file(
+        self,
+        url: str,
+        max_retries: int = DOWNLOAD_MAX_RETRIES,
+        client: Optional[httpx.AsyncClient] = None,
+    ) -> Optional[bytes]:
         """下载文件内容.
 
         支持 HTTP URL（带重试）和本地文件路径。
@@ -326,13 +589,19 @@ class ProcessImageBlocksNode(WorkflowNode):
 
         Args:
             url: 文件 URL 或本地路径
+            max_retries: HTTP 最大尝试次数
+            client: 本轮图片下载共享 HTTP 客户端
 
         Returns:
             文件字节内容，下载失败或超限时返回 None
         """
         try:
             if url.startswith(("http://", "https://")):
-                return await self._download_http(url)
+                return await self._download_http(
+                    url,
+                    max_retries=max_retries,
+                    client=client,
+                )
             else:
                 path = Path(url)
                 if path.exists():
@@ -356,7 +625,12 @@ class ProcessImageBlocksNode(WorkflowNode):
             )
         return None
 
-    async def _download_http(self, url: str) -> Optional[bytes]:
+    async def _download_http(
+        self,
+        url: str,
+        max_retries: int = DOWNLOAD_MAX_RETRIES,
+        client: Optional[httpx.AsyncClient] = None,
+    ) -> Optional[bytes]:
         """下载 HTTP 文件（带重试和内容校验）.
 
         复用单个 AsyncClient，优先通过 Content-Length 头预检查文件大小，
@@ -364,57 +638,94 @@ class ProcessImageBlocksNode(WorkflowNode):
 
         Args:
             url: HTTP URL
+            max_retries: 最大尝试次数
+            client: 本轮图片下载共享 HTTP 客户端
 
         Returns:
             文件字节内容，下载失败返回 None
         """
-        import asyncio
-
-        async with httpx.AsyncClient(
-            timeout=30.0, follow_redirects=True, trust_env=False
-        ) as client:
-            for attempt in range(DOWNLOAD_MAX_RETRIES):
+        request_client = client
+        owns_client = request_client is None
+        if request_client is None:
+            request_client = httpx.AsyncClient(
+                timeout=30.0,
+                follow_redirects=True,
+                trust_env=False,
+            )
+        try:
+            assert request_client is not None
+            for attempt in range(max(1, max_retries)):
                 try:
-                    response = await client.get(url)
-                    if response.status_code == 200:
-                        content_length = response.headers.get("content-length")
-                        if content_length:
-                            size = int(content_length)
-                            if size > MAX_FILE_SIZE:
-                                logger.warning(
-                                    "http_file_too_large",
-                                    url=self._sanitize_url(url),
-                                    size=size,
-                                    max_size=MAX_FILE_SIZE,
-                                )
-                                return None
-                        content_type = response.headers.get("content-type", "")
-                        if content_type.startswith("text/html"):
+                    async with request_client.stream("GET", url) as response:
+                        if response.status_code == 200:
+                            return await self._read_download_response(url, response)
+                        if 400 <= response.status_code < 500:
                             logger.warning(
-                                "http_unexpected_content_type",
+                                "http_download_client_error",
                                 url=self._sanitize_url(url),
-                                content_type=content_type,
+                                status_code=response.status_code,
                             )
                             return None
-                        return response.content
-                    logger.warning(
-                        "http_download_failed",
-                        url=self._sanitize_url(url),
-                        status_code=response.status_code,
-                        attempt=attempt + 1,
-                    )
+                        logger.warning(
+                            "http_download_failed",
+                            url=self._sanitize_url(url),
+                            status_code=response.status_code,
+                            attempt=attempt + 1,
+                        )
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(DOWNLOAD_RETRY_DELAY * (2 ** attempt))
                 except httpx.HTTPError as e:
                     logger.warning(
                         "http_download_error",
                         url=self._sanitize_url(url),
                         attempt=attempt + 1,
-                        max_retries=DOWNLOAD_MAX_RETRIES,
+                        max_retries=max_retries,
                         error_type=type(e).__name__,
                         error=str(e),
                     )
-                    if attempt < DOWNLOAD_MAX_RETRIES - 1:
+                    if attempt < max_retries - 1:
                         await asyncio.sleep(DOWNLOAD_RETRY_DELAY * (2 ** attempt))
-        return None
+            return None
+        finally:
+            if owns_client:
+                await request_client.aclose()
+
+    async def _read_download_response(self, url: str, response: httpx.Response) -> Optional[bytes]:
+        """读取下载响应并校验大小与类型."""
+        content_length = response.headers.get("content-length")
+        if content_length:
+            try:
+                size = int(content_length)
+            except ValueError:
+                size = 0
+            if size > MAX_FILE_SIZE:
+                logger.warning(
+                    "http_file_too_large",
+                    url=self._sanitize_url(url),
+                    size=size,
+                    max_size=MAX_FILE_SIZE,
+                )
+                return None
+        content_type = response.headers.get("content-type", "")
+        if content_type.startswith("text/html"):
+            logger.warning(
+                "http_unexpected_content_type",
+                url=self._sanitize_url(url),
+                content_type=content_type,
+            )
+            return None
+        chunks = bytearray()
+        async for chunk in response.aiter_bytes():
+            chunks.extend(chunk)
+            if len(chunks) > MAX_FILE_SIZE:
+                logger.warning(
+                    "http_file_too_large",
+                    url=self._sanitize_url(url),
+                    size=len(chunks),
+                    max_size=MAX_FILE_SIZE,
+                )
+                return None
+        return bytes(chunks)
 
     @staticmethod
     def _to_drawio_url(image_url: str) -> Optional[str]:
@@ -570,6 +881,34 @@ class ProcessImageBlocksNode(WorkflowNode):
             if ProcessImageBlocksNode._is_valid_image_reference(stripped)
             else None
         )
+
+    @staticmethod
+    def _extract_source_node_id(block: Dict[str, Any]) -> Optional[str]:
+        """从 sourceRefs 中提取节点 ID."""
+        source_refs = block.get("sourceRefs") or block.get("source_refs") or []
+        if not isinstance(source_refs, list):
+            return None
+        for source_ref in source_refs:
+            if not isinstance(source_ref, dict):
+                continue
+            for key in ("sourceId", "source_id", "nodeId", "node_id", "source_ref"):
+                value = source_ref.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        return None
+
+    @staticmethod
+    def _build_missing_image_placeholder(block: Dict[str, Any]) -> Dict[str, Any]:
+        """把无法解析图片引用的图片块转成可见占位文本."""
+        source_node_id = ProcessImageBlocksNode._extract_source_node_id(block)
+        content = "流程图资源缺失"
+        if source_node_id:
+            content = f"流程图资源缺失：{source_node_id}"
+        return {
+            **block,
+            "blockType": "paragraph",
+            "contentText": content,
+        }
 
     @staticmethod
     def _extract_reference_from_json_text(text: str) -> Optional[str]:

@@ -60,6 +60,11 @@ class Settings(BaseSettings):
     # 分批生成策略配置
     batch_max_size: int = Field(default=20, alias="BATCH_MAX_SIZE")
 
+    # 图片资源处理配置
+    image_download_parallelism: int = Field(default=16, alias="IMAGE_DOWNLOAD_PARALLELISM")
+    image_upload_parallelism: int = Field(default=8, alias="IMAGE_UPLOAD_PARALLELISM")
+    image_process_drawio: bool = Field(default=True, alias="IMAGE_PROCESS_DRAWIO")
+
     @property
     def template_path(self) -> Path:
         """获取模板目录路径."""

@@ -76,6 +76,8 @@ class HttpUtils:
         url: str,
         request_fn: Callable[[httpx.AsyncClient], Any],
         max_retries: int = MAX_RETRIES,
+        timeout: float = DEFAULT_TIMEOUT,
+        client: Optional[httpx.AsyncClient] = None,
     ) -> Dict[str, Any]:
         """执行HTTP请求并带重试.
 
@@ -84,6 +86,7 @@ class HttpUtils:
             url: 请求URL
             request_fn: 接收httpx.AsyncClient并返回Response的协程函数
             max_retries: 最大重试次数
+            client: 可选的外部共享客户端
 
         Returns:
             解析后的JSON响应
@@ -97,28 +100,31 @@ class HttpUtils:
         for attempt in range(max_retries + 1):
             start = time.monotonic()
             try:
-                async with httpx.AsyncClient(
-                    timeout=HttpUtils.DEFAULT_TIMEOUT,
-                    follow_redirects=True,
-                    http1=True,
-                    http2=False,
-                    trust_env=False,
-                ) as client:
+                if client is None:
+                    async with httpx.AsyncClient(
+                        timeout=timeout,
+                        follow_redirects=True,
+                        http1=True,
+                        http2=False,
+                        trust_env=False,
+                    ) as request_client:
+                        response = await request_fn(request_client)
+                else:
                     response = await request_fn(client)
-                    response.raise_for_status()
+                response.raise_for_status()
 
-                    data = response.json()
-                    elapsed_ms = round((time.monotonic() - start) * 1000, 2)
-                    logger.info(
-                        "http_request",
-                        method=method,
-                        url=url,
-                        status_code=response.status_code,
-                        elapsed_ms=elapsed_ms,
-                        trace_id=trace_id,
-                        attempt=attempt,
-                    )
-                    return data
+                data = response.json()
+                elapsed_ms = round((time.monotonic() - start) * 1000, 2)
+                logger.info(
+                    "http_request",
+                    method=method,
+                    url=url,
+                    status_code=response.status_code,
+                    elapsed_ms=elapsed_ms,
+                    trace_id=trace_id,
+                    attempt=attempt,
+                )
+                return data
 
             except Exception as e:
                 elapsed_ms = round((time.monotonic() - start) * 1000, 2)
@@ -195,7 +201,7 @@ class HttpUtils:
                 timeout=timeout,
             )
 
-        return await HttpUtils._execute_request("GET", url, _request)
+        return await HttpUtils._execute_request("GET", url, _request, timeout=timeout)
 
     @staticmethod
     async def post(
@@ -244,6 +250,8 @@ class HttpUtils:
         data: Optional[Dict[str, Any]] = None,
         headers: Optional[Dict[str, str]] = None,
         timeout: float = DEFAULT_TIMEOUT,
+        max_retries: int = MAX_RETRIES,
+        client: Optional[httpx.AsyncClient] = None,
     ) -> Dict[str, Any]:
         """发送multipart/form-data POST请求（带指数退避重试）."""
         default_headers = {
@@ -267,4 +275,11 @@ class HttpUtils:
                 timeout=timeout,
             )
 
-        return await HttpUtils._execute_request("POST_MULTIPART", url, _request)
+        return await HttpUtils._execute_request(
+            "POST_MULTIPART",
+            url,
+            _request,
+            max_retries=max_retries,
+            timeout=timeout,
+            client=client,
+        )

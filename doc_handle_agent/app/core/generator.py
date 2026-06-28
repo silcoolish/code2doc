@@ -64,7 +64,7 @@ class DocumentGenerator:
             SelectStrategyNode(self.content_generator),
             GenerateBlocksNode(self.content_generator),
             CreateDocumentNode(self.workspace_adapter),
-            ProcessImageBlocksNode(self.workspace_adapter),
+            ProcessImageBlocksNode(self.workspace_adapter, self.mcp_client),
             StoreBlockListNode(self.workspace_adapter),
         ]
 
