@@ -252,7 +252,7 @@ async def test_process_image_blocks_fills_missing_image_refs_from_source_refs():
 
 
 @pytest.mark.asyncio
-async def test_missing_image_reference_becomes_visible_placeholder():
+async def test_missing_image_reference_is_kept_without_confirmation():
     node = ProcessImageBlocksNode(_WorkspaceAdapter())
     block = {
         "id": "img-1",
@@ -264,5 +264,57 @@ async def test_missing_image_reference_becomes_visible_placeholder():
 
     result = await node._process_image_block(block, "doc-1", "repo-1")
 
-    assert result["blockType"] == "paragraph"
-    assert result["contentText"] == "流程图资源缺失：method-main"
+    assert result == block
+
+
+@pytest.mark.asyncio
+async def test_process_image_blocks_filters_confirmed_missing_image_reference():
+    node = ProcessImageBlocksNode(
+        _WorkspaceAdapter(),
+        _McpClient({
+            "images": [{
+                "node_id": "method-main",
+                "success": False,
+                "error": "No image available",
+            }],
+        }),
+    )
+    node.download_parallelism = 2
+    node.upload_parallelism = 2
+    blocks = [
+        {"id": "p1", "blockType": "paragraph", "contentText": "intro"},
+        {
+            "id": "img-1",
+            "blockType": "image",
+            "contentText": None,
+            "attrs": {},
+            "sourceRefs": [{"sourceId": "method-main"}],
+        },
+        {"id": "p2", "blockType": "paragraph", "contentText": "outro"},
+    ]
+
+    result = await node._process_blocks(blocks, "doc-1", "repo-1")
+
+    assert [block["id"] for block in result] == ["p1", "p2"]
+    assert node.mcp_client.calls == [
+        ("batch_get_image_ids", {"repo_id": "repo-1", "node_ids": ["method-main"]})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_process_image_blocks_keeps_unconfirmed_missing_image_reference():
+    node = ProcessImageBlocksNode(
+        _WorkspaceAdapter(),
+        _McpClient({"images": []}),
+    )
+    blocks = [{
+        "id": "img-1",
+        "blockType": "image",
+        "contentText": None,
+        "attrs": {},
+        "sourceRefs": [{"sourceId": "method-main"}],
+    }]
+
+    result = await node._process_blocks(blocks, "doc-1", "repo-1")
+
+    assert [block["id"] for block in result] == ["img-1"]

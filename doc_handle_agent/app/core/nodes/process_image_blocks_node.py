@@ -38,6 +38,7 @@ DOWNLOAD_RETRY_DELAY = 1.0
 MISSING_BLOCK_PLACEHOLDER_PATTERN = re.compile(
     r"^\[内容块\s+'[^']+'\s+生成缺失\]$"
 )
+CONFIRMED_MISSING_IMAGE_ATTR = "_confirmedMissingImage"
 
 
 class ProcessImageBlocksNode(WorkflowNode):
@@ -190,6 +191,7 @@ class ProcessImageBlocksNode(WorkflowNode):
             if block.get("blockType") == "image"
         ]
         processed_count = 0
+        skipped_missing_count = 0
         processed_lock = asyncio.Lock()
         download_semaphore = asyncio.Semaphore(self.download_parallelism)
         upload_semaphore = asyncio.Semaphore(self.upload_parallelism)
@@ -199,7 +201,7 @@ class ProcessImageBlocksNode(WorkflowNode):
                 updated_blocks[index] = block
 
         async def process_entry(index: int, block: Dict[str, Any]) -> None:
-            nonlocal processed_count
+            nonlocal processed_count, skipped_missing_count
             try:
                 processed = await self._process_image_block(
                     block,
@@ -222,6 +224,8 @@ class ProcessImageBlocksNode(WorkflowNode):
             updated_blocks[index] = processed
             async with processed_lock:
                 processed_count += 1
+                if processed is None:
+                    skipped_missing_count += 1
                 if reporter:
                     await reporter.report_step(
                         processed_count,
@@ -241,6 +245,13 @@ class ProcessImageBlocksNode(WorkflowNode):
         if image_entries:
             await asyncio.gather(
                 *(process_entry(index, block) for index, block in image_entries)
+            )
+
+        if skipped_missing_count:
+            logger.info(
+                "missing_image_blocks_skipped",
+                skipped_count=skipped_missing_count,
+                image_count=len(image_entries),
             )
 
         return [block for block in updated_blocks if block is not None]
@@ -271,31 +282,37 @@ class ProcessImageBlocksNode(WorkflowNode):
                 node_ids.append(node_id)
                 seen_node_ids.add(node_id)
 
-        image_refs = await self._load_image_refs_by_node_id(repo_id, node_ids)
+        image_refs, missing_node_ids = await self._load_image_ref_status_by_node_id(repo_id, node_ids)
         filled_count = 0
+        confirmed_missing_count = 0
         for block in pending_blocks:
             node_id = self._extract_source_node_id(block)
             image_ref = image_refs.get(node_id or "")
             if image_ref:
                 block["contentText"] = image_ref
                 filled_count += 1
+            elif node_id in missing_node_ids:
+                attrs = block.get("attrs") if isinstance(block.get("attrs"), dict) else {}
+                block["attrs"] = {**attrs, CONFIRMED_MISSING_IMAGE_ATTR: True}
+                confirmed_missing_count += 1
 
         logger.info(
             "image_refs_filled_from_source_refs",
             pending_count=len(pending_blocks),
             node_count=len(node_ids),
             filled_count=filled_count,
+            confirmed_missing_count=confirmed_missing_count,
         )
         return doc_blocks
 
-    async def _load_image_refs_by_node_id(
+    async def _load_image_ref_status_by_node_id(
         self,
         repo_id: str,
         node_ids: List[str],
-    ) -> Dict[str, str]:
-        """调用 batch_get_image_ids 获取节点到图片 ID 的映射."""
+    ) -> tuple[Dict[str, str], Set[str]]:
+        """调用 batch_get_image_ids 获取图片 ID 与明确缺图状态."""
         if not node_ids:
-            return {}
+            return {}, set()
         try:
             raw_result = await self.mcp_client.call_tool(
                 "batch_get_image_ids",
@@ -309,7 +326,7 @@ class ProcessImageBlocksNode(WorkflowNode):
                 error_type=type(exc).__name__,
                 error=str(exc),
             )
-            return {}
+            return {}, set()
 
         if isinstance(raw_result, dict):
             payload = raw_result
@@ -325,31 +342,39 @@ class ProcessImageBlocksNode(WorkflowNode):
                         repo_id=repo_id,
                         raw_result=str(raw_result)[:200],
                     )
-                    return {}
+                    return {}, set()
             except TypeError:
                 logger.warning(
                     "image_refs_parse_failed",
                     repo_id=repo_id,
                     raw_result=str(raw_result)[:200],
                 )
-                return {}
+                return {}, set()
         if not isinstance(payload, dict):
             logger.warning(
                 "image_refs_parse_failed",
                 repo_id=repo_id,
                 raw_result=str(raw_result)[:200],
             )
-            return {}
+            return {}, set()
 
         refs: Dict[str, str] = {}
+        missing_node_ids: Set[str] = set()
         for item in payload.get("images", []):
-            if not isinstance(item, dict) or not item.get("success"):
+            if not isinstance(item, dict):
                 continue
             node_id = str(item.get("node_id") or "").strip()
+            if not node_id:
+                continue
+            if not item.get("success"):
+                error = str(item.get("error") or "").strip()
+                if error in {"No image available", "Node not found"}:
+                    missing_node_ids.add(node_id)
+                continue
             image_id = self._extract_reference_from_value(item)
-            if node_id and image_id:
+            if image_id:
                 refs[node_id] = image_id
-        return refs
+        return refs, missing_node_ids
 
     async def _process_image_block(
         self,
@@ -360,7 +385,7 @@ class ProcessImageBlocksNode(WorkflowNode):
         upload_client: Optional[httpx.AsyncClient] = None,
         download_semaphore: Optional[asyncio.Semaphore] = None,
         upload_semaphore: Optional[asyncio.Semaphore] = None,
-    ) -> Dict[str, Any]:
+    ) -> Optional[Dict[str, Any]]:
         """处理单个图片块.
 
         下载图片文件并上传，同时检查并上传同名的 drawio 文件，更新块格式。
@@ -375,17 +400,20 @@ class ProcessImageBlocksNode(WorkflowNode):
             upload_semaphore: 资源上传并发限制
 
         Returns:
-            更新后的图片块数据
+            更新后的图片块数据，缺少可用图片资源时返回 None 并跳过该块
         """
         image_ref = self._extract_image_reference(block)
         if not image_ref:
             content = block.get("contentText")
-            logger.warning(
+            attrs = block.get("attrs") if isinstance(block.get("attrs"), dict) else {}
+            logger.debug(
                 "image_reference_not_found",
+                block_id=block.get("id"),
                 block_content=str(content or "")[:100],
                 source_node_id=self._extract_source_node_id(block),
+                confirmed_missing=bool(attrs.get(CONFIRMED_MISSING_IMAGE_ATTR)),
             )
-            return self._build_missing_image_placeholder(block)
+            return None if attrs.get(CONFIRMED_MISSING_IMAGE_ATTR) else block
 
         caption = self._extract_caption(block) or ""
         block_id = block.get("id")
@@ -896,19 +924,6 @@ class ProcessImageBlocksNode(WorkflowNode):
                 if isinstance(value, str) and value.strip():
                     return value.strip()
         return None
-
-    @staticmethod
-    def _build_missing_image_placeholder(block: Dict[str, Any]) -> Dict[str, Any]:
-        """把无法解析图片引用的图片块转成可见占位文本."""
-        source_node_id = ProcessImageBlocksNode._extract_source_node_id(block)
-        content = "流程图资源缺失"
-        if source_node_id:
-            content = f"流程图资源缺失：{source_node_id}"
-        return {
-            **block,
-            "blockType": "paragraph",
-            "contentText": content,
-        }
 
     @staticmethod
     def _extract_reference_from_json_text(text: str) -> Optional[str]:
