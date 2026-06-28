@@ -25,6 +25,14 @@ class _ContentGenerator:
     static_list_provider = _StaticListProvider()
 
 
+class _ProgressReporter:
+    def __init__(self):
+        self.messages = []
+
+    async def report_percent(self, percent, message=None):
+        self.messages.append((percent, message))
+
+
 @pytest.mark.asyncio
 async def test_outline_confirmation_expands_static_method_list_with_source_refs():
     node = OutlineConfirmationNode(_ContentGenerator())
@@ -65,6 +73,33 @@ async def test_outline_confirmation_expands_static_method_list_with_source_refs(
         "symbolName": "push_back",
         "filePath": "TinySTL/Vector.impl.h",
     }]
+
+
+@pytest.mark.asyncio
+async def test_outline_confirmation_reports_static_list_expand_progress():
+    node = OutlineConfirmationNode(_ContentGenerator())
+    reporter = _ProgressReporter()
+    state = create_initial_state(repo_id="repo-1", template_id="tpl-1")
+    state["__progress_reporter"] = reporter
+    state["blocks"] = [
+        TemplateBlock(
+            id="method-list",
+            parent_block_id=None,
+            block_type="heading",
+            heading_level=3,
+            order_no="a",
+            content_text="函数详细设计项",
+            attrs={
+                "templateType": "template",
+                "isList": True,
+                "list_tool": "get_all_methods",
+            },
+        ),
+    ]
+
+    await node.execute(state)
+
+    assert (35, "已获取1个函数列表条目，正在展开文档大纲...") in reporter.messages
 
 
 def test_outline_confirmation_assigns_order_no_incrementally():

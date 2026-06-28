@@ -1,5 +1,6 @@
 """大纲确认节点."""
 
+import asyncio
 import copy
 import json
 import re
@@ -15,6 +16,7 @@ from app.utils.timing import log_timing
 
 logger = get_logger(__name__)
 
+_EXPAND_PROGRESS_INTERVAL = 50
 _ORDER_KEY_LENGTH = 8
 _ORDER_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
@@ -64,7 +66,7 @@ class OutlineConfirmationNode(WorkflowNode):
             with log_timing("outline_confirmation", block_count=len(blocks)):
                 sorted_blocks = sorted(blocks, key=lambda b: b.order_no)
                 expanded_blocks = await self._expand_blocks(
-                    sorted_blocks, state["repo_id"]
+                    sorted_blocks, state["repo_id"], reporter=reporter
                 )
 
                 self._assign_block_identity(expanded_blocks)
@@ -100,6 +102,7 @@ class OutlineConfirmationNode(WorkflowNode):
         blocks: List[TemplateBlock],
         repo_id: str,
         parent_context: str = "",
+        reporter=None,
     ) -> List[TemplateBlock]:
         """递归展开 block 列表中的模板列表块.
 
@@ -113,17 +116,34 @@ class OutlineConfirmationNode(WorkflowNode):
             if block.is_list:
                 children = self._get_child_blocks(blocks, i)
                 items = await self._generate_list_items(block, repo_id, parent_context)
+                if reporter:
+                    await reporter.report_percent(
+                        35,
+                        self._build_list_expand_message(block, len(items)),
+                    )
 
-                for item in items:
+                total_items = len(items)
+                for item_index, item in enumerate(items, start=1):
                     item_text = item.name if hasattr(item, "name") else str(item)
                     item_source_refs = item.source_refs if hasattr(item, "source_refs") else []
                     item_block = self._create_item_block(block, item_text, item_source_refs)
                     result.append(item_block)
 
                     expanded_children = await self._expand_blocks(
-                        children, repo_id, parent_context=item_text
+                        children,
+                        repo_id,
+                        parent_context=item_text,
+                        reporter=reporter,
                     )
                     result.extend(expanded_children)
+
+                    if item_index % _EXPAND_PROGRESS_INTERVAL == 0:
+                        await asyncio.sleep(0)
+                        if reporter:
+                            await reporter.report_percent(
+                                self._calculate_expand_percent(item_index, total_items),
+                                f"正在展开文档大纲 {item_index}/{total_items}...",
+                            )
 
                 i += 1 + len(children)
             else:
@@ -148,6 +168,25 @@ class OutlineConfirmationNode(WorkflowNode):
             value, remainder = divmod(value, len(_ORDER_ALPHABET))
             chars.append(_ORDER_ALPHABET[remainder])
         return "".join(reversed(chars))
+
+    @staticmethod
+    def _calculate_expand_percent(current: int, total: int) -> float:
+        """把列表展开进度映射到大纲确认节点内部百分比."""
+        if total <= 0:
+            return 35
+        return 35 + min(60, (current / total) * 60)
+
+    @staticmethod
+    def _build_list_expand_message(block: TemplateBlock, item_count: int) -> str:
+        """构建列表展开进度文案."""
+        list_name = block.content_text or block.list_tool or "列表"
+        if block.list_tool == "get_all_methods":
+            list_name = "函数列表"
+        elif block.list_tool == "get_all_classes":
+            list_name = "类列表"
+        elif block.list_tool == "get_all_modules":
+            list_name = "模块列表"
+        return f"已获取{item_count}个{list_name}条目，正在展开文档大纲..."
 
     @staticmethod
     def _get_child_blocks(
