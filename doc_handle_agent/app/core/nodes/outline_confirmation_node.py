@@ -10,11 +10,13 @@ from app.core.state import AgentState, GenerationStatus
 from app.domain.content_generator import ContentGenerator
 from app.domain.model import TemplateBlock
 from app.domain.prompts import LIST_GENERATION_SYSTEM_PROMPT
-from app.utils.fractional_sort_order import key_for_index
 from app.utils.logger import get_logger
 from app.utils.timing import log_timing
 
 logger = get_logger(__name__)
+
+_ORDER_KEY_LENGTH = 8
+_ORDER_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 
 class OutlineConfirmationNode(WorkflowNode):
@@ -65,9 +67,7 @@ class OutlineConfirmationNode(WorkflowNode):
                     sorted_blocks, state["repo_id"]
                 )
 
-                for i, block in enumerate(expanded_blocks):
-                    block.order_no = key_for_index(i)
-                    block.id = str(i)
+                self._assign_block_identity(expanded_blocks)
 
                 state["blocks"] = expanded_blocks
                 state["total_blocks"] = len(expanded_blocks)
@@ -129,6 +129,23 @@ class OutlineConfirmationNode(WorkflowNode):
                 i += 1
 
         return result
+
+    @staticmethod
+    def _assign_block_identity(blocks: List[TemplateBlock]) -> None:
+        """按当前顺序重新分配块 ID 和排序号."""
+        for index, block in enumerate(blocks):
+            block.order_no = OutlineConfirmationNode._key_for_sequence(index)
+            block.id = str(index)
+
+    @staticmethod
+    def _key_for_sequence(index: int) -> str:
+        """生成固定长度顺序排序键，避免大文档顺序块把 sort_order 撑长."""
+        value = index
+        chars = []
+        for _ in range(_ORDER_KEY_LENGTH):
+            value, remainder = divmod(value, len(_ORDER_ALPHABET))
+            chars.append(_ORDER_ALPHABET[remainder])
+        return "".join(reversed(chars))
 
     @staticmethod
     def _get_child_blocks(
