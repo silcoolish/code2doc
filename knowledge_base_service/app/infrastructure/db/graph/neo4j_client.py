@@ -1356,13 +1356,11 @@ class Neo4jClient(GraphDatabaseClient):
             包含 directory_count, class_count, method_count 的字典
         """
         query = """
-        MATCH (r:Repository {repoId: $repo_id})
-        OPTIONAL MATCH (d:Directory {repoId: $repo_id})
-        OPTIONAL MATCH (c:Class {repoId: $repo_id})
-        OPTIONAL MATCH (m:Method {repoId: $repo_id})
-        RETURN count(DISTINCT d) as directory_count,
-               count(DISTINCT c) as class_count,
-               count(DISTINCT m) as method_count
+        MATCH (n)
+        WHERE n.repoId = $repo_id AND (n:Directory OR n:Class OR n:Method)
+        RETURN count(CASE WHEN n:Directory THEN 1 END) as directory_count,
+               count(CASE WHEN n:Class THEN 1 END) as class_count,
+               count(CASE WHEN n:Method THEN 1 END) as method_count
         """
         results = await self._execute_query(query, {"repo_id": repo_id}, database)
         if results:

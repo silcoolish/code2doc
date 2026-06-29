@@ -1,14 +1,17 @@
 """初始化相关 API 路由."""
 
+import logging
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.core.pipeline import get_orchestrator
+from app.infrastructure.db import get_graph_db_client
 from app.infrastructure.csv_storage import get_repo_status_storage, InitializationStatus
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 class StartInitializationRequest(BaseModel):
@@ -189,6 +192,25 @@ async def get_initialization_status(repo_id: str) -> InitializationStatusRespons
 
     # 根据记录状态和运行状态确定最终状态
     if record.initial_status == InitializationStatus.COMPLETED:
+        try:
+            node_counts = await get_graph_db_client().get_repo_node_counts(repo_id)
+            total_nodes = sum(node_counts.values())
+            method_count = node_counts.get("method_count", 0)
+            if total_nodes == 0 or method_count == 0:
+                return InitializationStatusResponse(
+                    repo_id=repo_id,
+                    status="Failed",
+                    repo_name=record.repo_name,
+                    repo_path=record.repo_path,
+                    message="Initialization completed but method graph data is empty, please reinitialize",
+                )
+        except Exception as e:
+            logger.warning(
+                "Failed to verify graph data for completed initialization %s: %s",
+                repo_id,
+                e,
+            )
+
         return InitializationStatusResponse(
             repo_id=repo_id,
             status="Completed",

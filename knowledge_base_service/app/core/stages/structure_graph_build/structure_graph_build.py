@@ -269,9 +269,11 @@ class StructureGraphBuildStage(PipelineStageHandler):
         if not repo_root.exists():
             raise FileNotFoundError(f"Repository path not found: {repo_path}")
 
+        node_repo_id = pipeline_repo_id or repo_name
+
         # 创建 Repository 节点（基础信息，统计信息在遍历完成后更新）
         repository = Repository(
-            id=f"repo_{repo_name}",
+            id=f"repo_{node_repo_id}",
             name=repo_name,
             type="Repository",
             repo_id=pipeline_repo_id,
@@ -311,7 +313,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
                 if path.is_dir():
                     # 收集 Directory 节点（稍后批量创建）
                     directory = Directory(
-                        id=f"dir_{repo_name}_{str_path}",
+                        id=f"dir_{node_repo_id}_{str_path}",
                         name=path.name,
                         type="Directory",
                         repo_id=pipeline_repo_id,
@@ -352,7 +354,7 @@ class StructureGraphBuildStage(PipelineStageHandler):
 
                     # 收集 File 节点（稍后批量创建）
                     file_node = File(
-                        id=f"file_{repo_name}_{str_path}",
+                        id=f"file_{node_repo_id}_{str_path}",
                         name=path.name,
                         type="File",
                         repo_id=pipeline_repo_id,
@@ -659,7 +661,8 @@ class StructureGraphBuildStage(PipelineStageHandler):
         Returns:
             Class 节点对象
         """
-        class_node_id = f"class_{repo_name}_{file_path}_{class_symbol.name}"
+        node_repo_id = pipeline_repo_id or repo_name
+        class_node_id = f"class_{node_repo_id}_{file_path}_{class_symbol.name}"
 
         real_type = "Class"
         if class_symbol.symbol_type:
@@ -703,12 +706,13 @@ class StructureGraphBuildStage(PipelineStageHandler):
         Returns:
             Method 节点对象
         """
+        node_repo_id = pipeline_repo_id or repo_name
         if class_name:
             method_node_id = (
-                f"method_{repo_name}_{file_path}_{class_name}_{method_symbol.name}"
+                f"method_{node_repo_id}_{file_path}_{class_name}_{method_symbol.name}"
             )
         else:
-            method_node_id = f"method_{repo_name}_{file_path}_{method_symbol.name}"
+            method_node_id = f"method_{node_repo_id}_{file_path}_{method_symbol.name}"
 
         return Method(
             id=method_node_id,
