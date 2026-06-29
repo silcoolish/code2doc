@@ -19,6 +19,7 @@ import httpx
 from app.config import get_settings
 from app.core.nodes.base import WorkflowNode
 from app.core.state import AgentState, GenerationStatus
+from app.domain.drawio_architecture import DiagramArtifacts, render_drawio_architecture
 from app.infrastructure.workspace import (
     UploadResourceResponse,
     WorkspaceServiceAdapter,
@@ -402,6 +403,14 @@ class ProcessImageBlocksNode(WorkflowNode):
         Returns:
             更新后的图片块数据，缺少可用图片资源时返回 None 并跳过该块
         """
+        if self._is_drawio_architecture_block(block):
+            return await self._process_drawio_architecture_block(
+                block,
+                document_id,
+                upload_client=upload_client,
+                upload_semaphore=upload_semaphore,
+            )
+
         image_ref = self._extract_image_reference(block)
         if not image_ref:
             content = block.get("contentText")
@@ -519,6 +528,94 @@ class ProcessImageBlocksNode(WorkflowNode):
             "blockType": "image",
             "contentText": caption,
             "attrs": attrs,
+        }
+
+    async def _process_drawio_architecture_block(
+        self,
+        block: Dict[str, Any],
+        document_id: str,
+        upload_client: Optional[httpx.AsyncClient] = None,
+        upload_semaphore: Optional[asyncio.Semaphore] = None,
+    ) -> Dict[str, Any]:
+        """将结构化架构图内容渲染并上传为 draw.io 资源."""
+        block_id = str(block.get("id") or "")
+        attrs = block.get("attrs") if isinstance(block.get("attrs"), dict) else {}
+        artifacts = render_drawio_architecture(
+            block.get("contentText"),
+            fallback_title=self._resolve_drawio_architecture_title(block, attrs),
+        )
+        drawio_response = await self._upload_drawio_architecture_resource(
+            artifacts=artifacts,
+            block_id=block_id,
+            document_id=document_id,
+            upload_client=upload_client,
+            upload_semaphore=upload_semaphore,
+        )
+        if not drawio_response.success or not drawio_response.resource_id:
+            logger.error(
+                "upload_drawio_architecture_source_failed",
+                block_id=block_id,
+                error=drawio_response.error,
+            )
+            return block
+
+        next_attrs = self._build_drawio_architecture_attrs(attrs, artifacts, drawio_response.resource_id)
+        logger.info(
+            "drawio_architecture_resource_uploaded",
+            block_id=block_id,
+            drawio_asset_id=drawio_response.resource_id,
+        )
+        return {
+            **block,
+            "blockType": "image",
+            "contentText": artifacts.caption,
+            "attrs": next_attrs,
+        }
+
+    async def _upload_drawio_architecture_resource(
+        self,
+        artifacts: DiagramArtifacts,
+        block_id: str,
+        document_id: str,
+        upload_client: Optional[httpx.AsyncClient] = None,
+        upload_semaphore: Optional[asyncio.Semaphore] = None,
+    ) -> UploadResourceResponse:
+        """上传 draw.io 架构图源文件."""
+        file_stem = self._sanitize_file_stem(block_id or artifacts.title or "architecture")
+        return await self._upload_with_limit(
+            file_name=f"{file_stem}.drawio",
+            file_content=artifacts.drawio_xml.encode("utf-8"),
+            document_id=document_id,
+            resource_type="drawio",
+            block_id=block_id or None,
+            client=upload_client,
+            semaphore=upload_semaphore,
+        )
+
+    @staticmethod
+    def _resolve_drawio_architecture_title(block: Dict[str, Any], attrs: Dict[str, Any]) -> str:
+        """解析 draw.io 架构图标题兜底值."""
+        return (
+            str(attrs.get("title") or attrs.get("caption") or block.get("title") or "").strip()
+            or "项目架构图"
+        )
+
+    @staticmethod
+    def _build_drawio_architecture_attrs(
+        attrs: Dict[str, Any],
+        artifacts: DiagramArtifacts,
+        drawio_asset_id: str,
+    ) -> Dict[str, Any]:
+        """构造 draw.io 架构图块属性."""
+        return {
+            **attrs,
+            "drawioAssetId": drawio_asset_id,
+            "editableAssetId": drawio_asset_id,
+            "caption": artifacts.caption,
+            "alt": artifacts.caption,
+            "diagramKind": "drawio_architecture",
+            # 预览由前端 draw.io viewer 从同一份源文件生成，避免后端 SVG 与编辑器渲染不一致
+            "renderKind": "drawio",
         }
 
     async def _download_with_limit(
@@ -825,6 +922,19 @@ class ProcessImageBlocksNode(WorkflowNode):
             return str(url) if url is not None else ""
         parsed = urlparse(url)
         return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+
+    @staticmethod
+    def _is_drawio_architecture_block(block: Dict[str, Any]) -> bool:
+        """判断是否为需要本地生成的 draw.io 架构图块."""
+        attrs = block.get("attrs") if isinstance(block.get("attrs"), dict) else {}
+        value = attrs.get("format") or attrs.get("outputFormat") or attrs.get("diagramKind")
+        return str(value or "").strip().lower() == "drawio_architecture"
+
+    @staticmethod
+    def _sanitize_file_stem(value: str) -> str:
+        """生成适合资源文件名的稳定前缀."""
+        stem = re.sub(r"[^0-9A-Za-z_\-\u4e00-\u9fff]+", "-", value or "").strip("-")
+        return stem[:80] or "architecture"
 
     @staticmethod
     def _extract_image_reference(block: Dict[str, Any]) -> Optional[str]:

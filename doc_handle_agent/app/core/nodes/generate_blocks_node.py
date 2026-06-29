@@ -154,7 +154,7 @@ class GenerateBlocksNode(WorkflowNode):
             block_data = {
                 "id": block.id,
                 "parentBlockId": block.parent_block_id,
-                "blockType": "mermaid" if block.is_mermaid else block.block_type,
+                "blockType": self._resolve_output_block_type(block),
                 "headingLevel": block.heading_level,
                 "orderNo": block.order_no,
                 "contentText": block.content_text,
@@ -166,6 +166,14 @@ class GenerateBlocksNode(WorkflowNode):
             doc_blocks.append(block_data)
 
         return doc_blocks
+
+    @staticmethod
+    def _resolve_output_block_type(block: TemplateBlock) -> str:
+        if block.is_drawio_architecture:
+            return "image"
+        if block.is_mermaid:
+            return "mermaid"
+        return block.block_type
 
     def _build_generated_table(
         self,

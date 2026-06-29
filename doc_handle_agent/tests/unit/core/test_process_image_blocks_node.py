@@ -19,6 +19,13 @@ class _UploadResponse:
     error = None
 
 
+class _UploadResponseWithId:
+    def __init__(self, resource_id):
+        self.success = True
+        self.resource_id = resource_id
+        self.error = None
+
+
 class _Reporter:
     def __init__(self):
         self.calls = []
@@ -265,6 +272,111 @@ async def test_missing_image_reference_is_kept_without_confirmation():
     result = await node._process_image_block(block, "doc-1", "repo-1")
 
     assert result == block
+
+
+@pytest.mark.asyncio
+async def test_process_drawio_architecture_block_uploads_drawio_asset():
+    node = ProcessImageBlocksNode(_WorkspaceAdapter())
+    uploads = []
+
+    async def upload_resource(
+        file_name,
+        file_content,
+        document_id,
+        resource_type,
+        block_id=None,
+        client=None,
+    ):
+        uploads.append((file_name, file_content, resource_type, block_id))
+        return _UploadResponseWithId(f"asset-{len(uploads)}")
+
+    node._upload_resource = upload_resource
+    block = {
+        "id": "architecture-1",
+        "blockType": "image",
+        "contentText": {
+            "title": "StarCodeDoc 项目架构图",
+            "layers": [
+                {
+                    "id": "desktop",
+                    "label": "L1",
+                    "name": "桌面工作台",
+                    "items": [{"id": "editor", "name": "文档编辑"}],
+                },
+                {
+                    "id": "workspace",
+                    "label": "L2",
+                    "name": "工作空间服务",
+                    "items": [{"id": "document", "name": "文档中心"}],
+                },
+            ],
+            "connections": [{"from": "editor", "to": "document", "label": "HTTP API"}],
+            "pipeline": [{"name": "代码仓库"}, {"name": "生成文档"}],
+        },
+        "attrs": {"format": "drawio_architecture"},
+    }
+
+    result = await node._process_image_block(block, "doc-1", "repo-1")
+
+    assert result["blockType"] == "image"
+    assert result["contentText"] == "StarCodeDoc 项目架构图"
+    assert result["attrs"]["drawioAssetId"] == "asset-1"
+    assert result["attrs"]["editableAssetId"] == "asset-1"
+    assert result["attrs"]["renderKind"] == "drawio"
+    assert "assetId" not in result["attrs"]
+    assert "svgAssetId" not in result["attrs"]
+    assert uploads[0][0].endswith(".drawio")
+    assert uploads[0][2] == "drawio"
+    assert b"mxGraphModel" in uploads[0][1]
+
+
+@pytest.mark.asyncio
+async def test_process_drawio_architecture_block_keeps_original_block_when_drawio_upload_fails():
+    node = ProcessImageBlocksNode(_WorkspaceAdapter())
+    uploads = []
+
+    async def upload_resource(
+        file_name,
+        file_content,
+        document_id,
+        resource_type,
+        block_id=None,
+        client=None,
+    ):
+        uploads.append((file_name, file_content, resource_type, block_id))
+        response = _UploadResponseWithId("")
+        response.success = False
+        response.error = "upload failed"
+        return response
+
+    node._upload_resource = upload_resource
+    block = {
+        "id": "architecture-1",
+        "blockType": "image",
+        "contentText": {
+            "title": "StarCodeDoc 项目架构图",
+            "layers": [
+                {
+                    "id": "desktop",
+                    "label": "L1",
+                    "name": "桌面工作台",
+                    "items": [{"id": "editor", "name": "文档编辑"}],
+                },
+                {
+                    "id": "workspace",
+                    "label": "L2",
+                    "name": "工作空间服务",
+                    "items": [{"id": "document", "name": "文档中心"}],
+                },
+            ],
+        },
+        "attrs": {"format": "drawio_architecture"},
+    }
+
+    result = await node._process_image_block(block, "doc-1", "repo-1")
+
+    assert result == block
+    assert [upload[2] for upload in uploads] == ["drawio"]
 
 
 @pytest.mark.asyncio

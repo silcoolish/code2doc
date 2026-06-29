@@ -18,6 +18,7 @@
    }
    ```
 6. 表格每一行的列数应与 `table_schema.columns` 数量一致；如果某个单元格没有内容，填空字符串
+7. 重要: 如果内容块包含 `format="drawio_architecture"`，则按“draw.io 架构图格式”输出 `content_text` JSON，用系统分层、核心组件、连接关系和主链路表达项目总体架构；不要输出 Mermaid、Markdown 表格或图片ID
 
 ## 正常返回格式
 

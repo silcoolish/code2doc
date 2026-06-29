@@ -94,3 +94,30 @@ def test_build_document_blocks_persists_mermaid_type_from_format():
 
     assert doc_blocks[0]["blockType"] == "mermaid"
     assert doc_blocks[0]["contentText"] == "flowchart LR\n  A --> B"
+
+
+def test_build_document_blocks_uses_image_type_for_drawio_architecture_format():
+    node = GenerateBlocksNode(content_generator=None)
+    blocks = [
+        TemplateBlock(
+            id="architecture-block",
+            parent_block_id=None,
+            block_type="paragraph",
+            heading_level=0,
+            order_no="a",
+            content_text="",
+            attrs={"templateType": "template", "format": "drawio_architecture"},
+        )
+    ]
+    results = [
+        DocumentBlock(
+            block_id="architecture-block",
+            block_type="image",
+            text_content='{"title":"项目架构图","layers":[]}',
+        )
+    ]
+
+    doc_blocks = node._build_document_blocks(blocks, results)
+
+    assert doc_blocks[0]["blockType"] == "image"
+    assert doc_blocks[0]["attrs"]["format"] == "drawio_architecture"

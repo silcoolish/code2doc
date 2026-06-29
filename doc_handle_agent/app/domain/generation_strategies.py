@@ -111,6 +111,8 @@ class GenerationStrategy(ABC):
     @staticmethod
     def _resolve_block_type(block: TemplateBlock) -> str:
         """解析 block 的结果类型."""
+        if block.is_drawio_architecture:
+            return "image"
         if block.is_mermaid:
             return "mermaid"
         if block.is_table:

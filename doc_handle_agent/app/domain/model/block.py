@@ -103,6 +103,11 @@ class TemplateBlock:
         return self.block_type == "mermaid" or self.output_format == "mermaid"
 
     @property
+    def is_drawio_architecture(self) -> bool:
+        """是否为 draw.io 架构图生成块."""
+        return self.output_format == "drawio_architecture"
+
+    @property
     def is_table(self) -> bool:
         """是否为表格类型内容块."""
         return self.block_type == "table"
