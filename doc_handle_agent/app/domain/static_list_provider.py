@@ -3,7 +3,7 @@
 import ast
 import json
 from dataclasses import dataclass, field
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from app.infrastructure.mcp_client import MCPClient
 from app.utils.logger import get_logger
@@ -53,7 +53,18 @@ class StaticListProvider:
 
     async def _get_all_methods(self, repo_id: str) -> List[ListItem]:
         """获取所有方法节点."""
-        return await self._get_all_nodes(repo_id, ["Method"])
+        return await self._get_all_nodes(
+            repo_id,
+            ["Method"],
+            returns=[
+                "node_id",
+                "name",
+                "node_type",
+                "file_path",
+                "start_line",
+                "end_line",
+            ],
+        )
 
     async def _get_all_classes(self, repo_id: str) -> List[ListItem]:
         """获取所有类节点."""
@@ -64,7 +75,10 @@ class StaticListProvider:
         return await self._get_all_nodes(repo_id, ["Module"])
 
     async def _get_all_nodes(
-        self, repo_id: str, node_types: List[str]
+        self,
+        repo_id: str,
+        node_types: List[str],
+        returns: Optional[List[str]] = None,
     ) -> List[ListItem]:
         """调用 get_all_nodes 工具获取节点列表.
 
@@ -75,10 +89,11 @@ class StaticListProvider:
         Returns:
             列表项列表，每项包含节点名称和节点ID(source_refs)
         """
-        tool_result = await self.mcp_client.call_tool(
-            "get_all_nodes",
-            {"repo_id": repo_id, "node_types": node_types},
-        )
+        payload: Dict[str, Any] = {"repo_id": repo_id, "node_types": node_types}
+        if returns:
+            payload["returns"] = returns
+
+        tool_result = await self.mcp_client.call_tool("get_all_nodes", payload)
 
         data = self._parse_tool_result(tool_result)
         nodes = data.get("nodes", [])
@@ -90,7 +105,14 @@ class StaticListProvider:
             file_path = node.get("file_path", "")
             if name:
                 item_name = self._build_item_name(name, file_path, node_types)
-                source_ref = self._build_source_ref(node_id, name, file_path, node_types)
+                source_ref = self._build_source_ref(
+                    node_id,
+                    name,
+                    file_path,
+                    node_types,
+                    node.get("start_line"),
+                    node.get("end_line"),
+                )
                 items.append(ListItem(name=item_name, source_refs=[source_ref] if source_ref else []))
 
         logger.info(
@@ -110,7 +132,14 @@ class StaticListProvider:
         return name
 
     @staticmethod
-    def _build_source_ref(node_id: str, name: str, file_path: str, node_types: List[str]) -> Dict[str, Any]:
+    def _build_source_ref(
+        node_id: str,
+        name: str,
+        file_path: str,
+        node_types: List[str],
+        start_line: Any = None,
+        end_line: Any = None,
+    ) -> Dict[str, Any]:
         """构建 workspace sourceRefs 兼容的源码引用."""
         if not node_id:
             return {}
@@ -122,7 +151,22 @@ class StaticListProvider:
             source_ref["symbolType"] = node_types[0]
         if file_path:
             source_ref["filePath"] = file_path
+        if node_types and node_types[0] == "Method":
+            start = StaticListProvider._to_positive_int(start_line)
+            end = StaticListProvider._to_positive_int(end_line)
+            if start is not None:
+                source_ref["lineStart"] = start
+                source_ref["lineEnd"] = end if end is not None else start
         return source_ref
+
+    @staticmethod
+    def _to_positive_int(value: Any) -> Optional[int]:
+        """转换源码行号，非法值保持缺省."""
+        try:
+            line = int(value)
+        except (TypeError, ValueError):
+            return None
+        return line if line > 0 else None
 
     def _parse_tool_result(self, tool_result: str) -> Dict[str, Any]:
         """解析工具返回结果.

@@ -464,7 +464,8 @@ class Neo4jClient(GraphDatabaseClient):
             RETURN n.id as id, n.name as name, labels(n) as types,
                    coalesce(n.filePath, n.path) as file_path,
                    n.summary as summary, n.language as language,
-                   n.description as description
+                   n.description as description,
+                   n.startLine as start_line, n.endLine as end_line
             ORDER BY n.name
             """ % node_type
 

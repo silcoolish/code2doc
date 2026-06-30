@@ -597,7 +597,7 @@ class KnowledgeBaseTools:
                 可传入多个类型，如 ["Class", "Method"] 同时返回类和方法。
             returns: 指定返回字段列表，如 ["node_id", "name", "summary"]。
                 默认返回: node_id, name, node_type, file_path, summary, description
-                可选字段: node_id, name, node_type, file_path, summary, description, language
+                可选字段: node_id, name, node_type, file_path, summary, description, language, start_line, end_line
 
         Returns:
             JSON 字符串，包含所有节点的简要信息列表
@@ -617,6 +617,8 @@ class KnowledgeBaseTools:
                     "summary": result.get("summary", ""),
                     "language": result.get("language", ""),
                     "description": result.get("description", ""),
+                    "start_line": result.get("start_line"),
+                    "end_line": result.get("end_line"),
                 }
                 nodes.append({k: v for k, v in record.items() if k in result_keys})
 

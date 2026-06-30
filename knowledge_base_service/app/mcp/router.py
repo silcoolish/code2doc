@@ -432,7 +432,7 @@ async def list_tools() -> dict:
                         "default": ["File", "Class", "Method"],
                         "description": "节点类型枚举值: File(文件), Class(类), Method(方法), Module(模块), Workflow(工作流), Directory(目录)。可传入多个类型",
                     },
-                    "returns": {"type": "array", "items": {"type": "string"}, "description": "可选枚举值: node_id, name, node_type, file_path, summary, language"},
+                    "returns": {"type": "array", "items": {"type": "string"}, "description": "可选枚举值: node_id, name, node_type, file_path, summary, language, start_line, end_line"},
                 },
             },
             {

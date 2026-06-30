@@ -16,6 +16,8 @@ class _StaticListProvider:
                     "symbolName": "push_back",
                     "filePath": "TinySTL/Vector.impl.h",
                     "symbolType": "Method",
+                    "lineStart": 12,
+                    "lineEnd": 28,
                 }],
             )
         ]
@@ -84,6 +86,8 @@ async def test_outline_confirmation_expands_static_method_list_with_source_refs(
         "symbolName": "push_back",
         "filePath": "TinySTL/Vector.impl.h",
         "symbolType": "Method",
+        "lineStart": 12,
+        "lineEnd": 28,
     }]
 
 
