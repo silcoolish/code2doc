@@ -37,6 +37,7 @@ ANALYZER_REGISTRY: Dict[str, Type[CodeAnalyzer]] = {
     ".cxx": CppAnalyzer,
     ".hpp": CppAnalyzer,
     ".hh": CppAnalyzer,
+    ".hxx": CppAnalyzer,
     # Go
     ".go": GoAnalyzer,
     # Rust

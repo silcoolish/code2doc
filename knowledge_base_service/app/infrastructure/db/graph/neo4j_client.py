@@ -406,6 +406,9 @@ class Neo4jClient(GraphDatabaseClient):
             ".cpp": "cpp",
             ".hpp": "cpp",
             ".cc": "cpp",
+            ".cxx": "cpp",
+            ".hh": "cpp",
+            ".hxx": "cpp",
         }
 
         for file_node in result:

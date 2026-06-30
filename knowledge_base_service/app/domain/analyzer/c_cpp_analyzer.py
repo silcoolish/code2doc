@@ -314,7 +314,7 @@ class CAnalyzer(BaseTreeSitterAnalyzer):
         header_name = parts[-1] if parts else module
 
         # 尝试匹配 C/C++ 头文件和源文件
-        for ext in [".h", ".hpp", ".c", ".cpp", ".cc", ".cxx"]:
+        for ext in [".h", ".hpp", ".hh", ".hxx", ".c", ".cpp", ".cc", ".cxx"]:
             # 尝试直接使用 header 名（带扩展名）
             if header_name.endswith(ext):
                 if header_name in file_path_index:
@@ -504,7 +504,7 @@ class CppAnalyzer(CAnalyzer):
     @property
     def supported_extensions(self) -> List[str]:
         """支持的文件扩展名."""
-        return [".cpp", ".cc", ".cxx", ".hpp", ".hh"]
+        return [".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx"]
 
     @property
     def language_name(self) -> str:
