@@ -107,6 +107,7 @@ class OutlineConfirmationNode(WorkflowNode):
         blocks: List[TemplateBlock],
         repo_id: str,
         parent_context: str = "",
+        inherited_source_refs: Optional[List[Dict[str, Any]]] = None,
         reporter=None,
     ) -> List[TemplateBlock]:
         """递归展开 block 列表中的模板列表块.
@@ -138,6 +139,7 @@ class OutlineConfirmationNode(WorkflowNode):
                         children,
                         repo_id,
                         parent_context=item_text,
+                        inherited_source_refs=item_source_refs or inherited_source_refs,
                         reporter=reporter,
                     )
                     result.extend(expanded_children)
@@ -152,10 +154,48 @@ class OutlineConfirmationNode(WorkflowNode):
 
                 i += 1 + len(children)
             else:
-                result.append(copy.deepcopy(block))
+                copied_block = copy.deepcopy(block)
+                self._inherit_source_refs_to_image_block(copied_block, inherited_source_refs)
+                result.append(copied_block)
                 i += 1
 
         return result
+
+    @staticmethod
+    def _inherit_source_refs_to_image_block(
+        block: TemplateBlock,
+        source_refs: Optional[List[Dict[str, Any]]],
+    ) -> None:
+        """为列表项下的图片块继承源码引用"""
+        if (
+            not source_refs
+            or block.source_refs
+            or not block.is_image_block
+            or not OutlineConfirmationNode._has_function_source_ref(source_refs)
+        ):
+            return
+        # 函数图需要函数节点 ID，后续图片处理才能确认缺图并过滤
+        block.source_refs = copy.deepcopy(source_refs)
+
+    @staticmethod
+    def _has_function_source_ref(source_refs: List[Dict[str, Any]]) -> bool:
+        """判断源码引用是否指向函数或方法节点"""
+        for source_ref in source_refs:
+            if not isinstance(source_ref, dict):
+                continue
+            values = [
+                source_ref.get("symbolType"),
+                source_ref.get("refType"),
+                source_ref.get("role"),
+                source_ref.get("nodeType"),
+                source_ref.get("type"),
+            ]
+            if any(
+                str(value or "").strip().lower() in {"method", "function"}
+                for value in values
+            ):
+                return True
+        return False
 
     @staticmethod
     def _assign_block_identity(blocks: List[TemplateBlock]) -> None:

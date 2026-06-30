@@ -6,19 +6,29 @@ from app.domain.model import TemplateBlock
 from app.domain.static_list_provider import ListItem
 
 
+METHOD_SOURCE_REF = {
+    "sourceId": "method-vector-push-back",
+    "symbolName": "push_back",
+    "filePath": "TinySTL/Vector.impl.h",
+    "symbolType": "Method",
+    "lineStart": 12,
+    "lineEnd": 28,
+}
+
+CLASS_SOURCE_REF = {
+    "sourceId": "class-vector",
+    "symbolName": "Vector",
+    "filePath": "TinySTL/Vector.h",
+    "symbolType": "Class",
+}
+
+
 class _StaticListProvider:
     async def get_list_items(self, list_tool, repo_id):
         return [
             ListItem(
                 name="push_back（TinySTL/Vector.impl.h）",
-                source_refs=[{
-                    "sourceId": "method-vector-push-back",
-                    "symbolName": "push_back",
-                    "filePath": "TinySTL/Vector.impl.h",
-                    "symbolType": "Method",
-                    "lineStart": 12,
-                    "lineEnd": 28,
-                }],
+                source_refs=[METHOD_SOURCE_REF],
             )
         ]
 
@@ -81,14 +91,74 @@ async def test_outline_confirmation_expands_static_method_list_with_source_refs(
     assert expanded.content_text == "push_back（TinySTL/Vector.impl.h）"
     assert expanded.attrs["templateType"] == "static"
     assert expanded.attrs["template_block_id"] == "method-list"
-    assert expanded.source_refs == [{
-        "sourceId": "method-vector-push-back",
-        "symbolName": "push_back",
-        "filePath": "TinySTL/Vector.impl.h",
-        "symbolType": "Method",
-        "lineStart": 12,
-        "lineEnd": 28,
-    }]
+    assert expanded.source_refs == [METHOD_SOURCE_REF]
+
+
+@pytest.mark.asyncio
+async def test_outline_confirmation_inherits_method_source_refs_to_child_image_blocks():
+    node = OutlineConfirmationNode(_ContentGenerator())
+    state = create_initial_state(repo_id="repo-1", template_id="tpl-1")
+    state["blocks"] = [
+        TemplateBlock(
+            id="method-list",
+            parent_block_id=None,
+            block_type="heading",
+            heading_level=3,
+            order_no="a",
+            content_text="函数详细设计项",
+            attrs={
+                "templateType": "template",
+                "isList": True,
+                "list_tool": "get_all_methods",
+            },
+        ),
+        TemplateBlock(
+            id="method-flowchart",
+            parent_block_id=None,
+            block_type="image",
+            heading_level=0,
+            order_no="b",
+            content_text="函数流程图",
+            attrs={"templateType": "template"},
+        ),
+        TemplateBlock(
+            id="method-body",
+            parent_block_id=None,
+            block_type="paragraph",
+            heading_level=0,
+            order_no="c",
+            content_text="函数说明模板",
+            attrs={"templateType": "template"},
+        ),
+    ]
+
+    result = await node.execute(state)
+
+    flowchart_block = result["blocks"][1]
+    paragraph_block = result["blocks"][2]
+    assert flowchart_block.block_type == "image"
+    assert flowchart_block.source_refs == [METHOD_SOURCE_REF]
+    assert paragraph_block.block_type == "paragraph"
+    assert paragraph_block.source_refs == []
+
+
+def test_outline_confirmation_does_not_inherit_class_source_refs_to_child_image_blocks():
+    block = TemplateBlock(
+        id="class-diagram",
+        parent_block_id=None,
+        block_type="image",
+        heading_level=0,
+        order_no="a",
+        content_text="类图",
+        attrs={"templateType": "template"},
+    )
+
+    OutlineConfirmationNode._inherit_source_refs_to_image_block(
+        block,
+        [CLASS_SOURCE_REF],
+    )
+
+    assert block.source_refs == []
 
 
 @pytest.mark.asyncio

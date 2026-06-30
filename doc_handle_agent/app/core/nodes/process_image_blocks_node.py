@@ -449,7 +449,8 @@ class ProcessImageBlocksNode(WorkflowNode):
                 "download_image_failed",
                 image_url=self._sanitize_url(image_url),
             )
-            return block
+            # 引用存在但资源不可下载时跳过图片块，避免文档里留下空的“图示资源缺失”占位
+            return None
 
         file_name = self._extract_file_name(image_url) or "image.png"
         resource_type = self._resolve_resource_type(image_url)
@@ -470,7 +471,8 @@ class ProcessImageBlocksNode(WorkflowNode):
                 image_url=self._sanitize_url(image_url),
                 error=image_response.error,
             )
-            return block
+            # 上传失败的图片没有可绑定资源，继续保留只会在前端显示空图片块
+            return None
 
         asset_id = image_response.resource_id
         logger.info(

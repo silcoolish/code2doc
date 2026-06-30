@@ -430,3 +430,57 @@ async def test_process_image_blocks_keeps_unconfirmed_missing_image_reference():
     result = await node._process_blocks(blocks, "doc-1", "repo-1")
 
     assert [block["id"] for block in result] == ["img-1"]
+
+
+@pytest.mark.asyncio
+async def test_process_image_blocks_filters_download_failed_image_reference():
+    node = ProcessImageBlocksNode(_WorkspaceAdapter())
+    node.process_drawio = False
+
+    async def download_file(url, max_retries=3, client=None):
+        return None
+
+    node._download_file = download_file
+    blocks = [
+        {"id": "p1", "blockType": "paragraph", "contentText": "intro"},
+        {"id": "img-1", "blockType": "image", "contentText": "missing.flowchart.svg"},
+        {"id": "p2", "blockType": "paragraph", "contentText": "outro"},
+    ]
+
+    result = await node._process_blocks(blocks, "doc-1", "repo-1")
+
+    assert [block["id"] for block in result] == ["p1", "p2"]
+
+
+@pytest.mark.asyncio
+async def test_process_image_blocks_filters_upload_failed_image_reference():
+    node = ProcessImageBlocksNode(_WorkspaceAdapter())
+    node.process_drawio = False
+
+    async def download_file(url, max_retries=3, client=None):
+        return b"image"
+
+    async def upload_resource(
+        file_name,
+        file_content,
+        document_id,
+        resource_type,
+        block_id=None,
+        client=None,
+    ):
+        response = _UploadResponseWithId("")
+        response.success = False
+        response.error = "upload failed"
+        return response
+
+    node._download_file = download_file
+    node._upload_resource = upload_resource
+    blocks = [
+        {"id": "p1", "blockType": "paragraph", "contentText": "intro"},
+        {"id": "img-1", "blockType": "image", "contentText": "broken.flowchart.svg"},
+        {"id": "p2", "blockType": "paragraph", "contentText": "outro"},
+    ]
+
+    result = await node._process_blocks(blocks, "doc-1", "repo-1")
+
+    assert [block["id"] for block in result] == ["p1", "p2"]
