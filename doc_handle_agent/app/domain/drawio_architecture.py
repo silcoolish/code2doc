@@ -694,7 +694,7 @@ class ArchitectureLayout:
             self._add_drawio_edge(line.source.id, line.target.id, line.label, line.color)
 
     def _resolve_connection_lines(self) -> List[ConnectionLine]:
-        """解析可渲染连接线，模型连接不可用时回退到层间默认连线."""
+        """解析可渲染连接线."""
         lines: List[ConnectionLine] = []
         for connection in self.connections:
             source = self.refs.get(connection.get("from", ""))
@@ -708,24 +708,7 @@ class ArchitectureLayout:
                         color="#1d4ed8",
                     )
                 )
-        if lines:
-            return lines
-
-        # 模型给出的连接无法匹配节点时，回退到层间默认连线，避免空关系图
-        layer_refs = [self._first_layer_ref(layer) for layer in self.layers]
-        layer_refs = [ref for ref in layer_refs if ref]
-        return [
-            ConnectionLine(source=source, target=target, label="", color="#111827")
-            for source, target in zip(layer_refs, layer_refs[1:])
-        ]
-
-    def _first_layer_ref(self, layer: Dict[str, Any]) -> Optional[ElementRef]:
-        """获取层内第一个可连线元素."""
-        for item in layer.get("items", []):
-            ref = self.refs.get(item.get("id")) or self.refs.get(item.get("name"))
-            if ref:
-                return ref
-        return None
+        return lines
 
     def _register_ref(self, key: str, ref: ElementRef, alias: Optional[str] = None) -> None:
         """登记节点引用，支持连接关系按 id 或名称寻址."""
