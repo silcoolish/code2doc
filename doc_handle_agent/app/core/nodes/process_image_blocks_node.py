@@ -615,6 +615,7 @@ class ProcessImageBlocksNode(WorkflowNode):
             "editableAssetId": drawio_asset_id,
             "caption": artifacts.caption,
             "alt": artifacts.caption,
+            "architectureSpec": artifacts.spec,
             "diagramKind": "drawio_architecture",
             # 预览由前端 draw.io viewer 从同一份源文件生成，避免后端 SVG 与编辑器渲染不一致
             "renderKind": "drawio",

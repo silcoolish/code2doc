@@ -1,6 +1,6 @@
 """文档生成API路由."""
 
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Header, HTTPException
 
@@ -11,9 +11,15 @@ from app.api.models.schemas import (
     SystemStatusResponse,
     RewriteBlockRequest,
     RewriteBlockResponse,
+    RegenerateDrawioArchitectureRequest,
+    RegenerateDrawioArchitectureResponse,
 )
+from app.core.nodes.process_image_blocks_node import ProcessImageBlocksNode
 from app.core.document_engine import get_document_engine
+from app.domain.drawio_architecture import render_drawio_architecture
+from app.domain.drawio_architecture_regenerate_agent import DrawioArchitectureRegenerateAgent
 from app.domain.rewrite_agent import RewriteAgent
+from app.infrastructure.workspace import WorkspaceServiceAdapter
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -159,3 +165,99 @@ async def rewrite_block(request: RewriteBlockRequest) -> RewriteBlockResponse:
             status_code=500,
             detail=f"Rewrite failed: {str(e)}",
         )
+
+
+@router.post("/regenerateDrawioArchitecture", response_model=RegenerateDrawioArchitectureResponse)
+async def regenerate_drawio_architecture(
+    request: RegenerateDrawioArchitectureRequest,
+    authorization: Optional[str] = Header(default=None, alias="Authorization"),
+) -> RegenerateDrawioArchitectureResponse:
+    """重生成 draw.io 架构图.
+
+    接收前端当前块上下文，生成新的架构 JSON，并复用图片处理节点上传 draw.io 源文件
+    """
+    logger.info(
+        "api_regenerate_drawio_architecture",
+        repo_id=request.repo_id,
+        document_id=request.document_id,
+        block_id=request.block_id,
+        has_current_spec=bool(request.current_spec),
+        has_prompt=bool(request.prompt and request.prompt.strip()),
+    )
+
+    if not request.block_id:
+        raise HTTPException(status_code=400, detail="block_id is required")
+    if not request.document_id:
+        raise HTTPException(status_code=400, detail="document_id is required")
+
+    try:
+        agent = DrawioArchitectureRegenerateAgent()
+        architecture_spec = await agent.regenerate(request)
+        title = request.title or str(architecture_spec.get("title") or "项目总体架构图")
+        artifacts = render_drawio_architecture(architecture_spec, fallback_title=title)
+
+        # 上传 draw.io 源文件要沿用当前用户登录态，避免 workspace 回调鉴权失败
+        process_node = ProcessImageBlocksNode(
+            workspace_adapter=WorkspaceServiceAdapter(auth_token=authorization),
+        )
+        upload_response = await process_node._upload_drawio_architecture_resource(
+            artifacts=artifacts,
+            block_id=request.block_id,
+            document_id=request.document_id,
+        )
+        if not upload_response.success or not upload_response.resource_id:
+            raise RuntimeError(upload_response.error or "draw.io 资源上传失败")
+
+        attrs = _build_regenerated_drawio_attrs(
+            request.attrs,
+            artifacts=artifacts,
+            drawio_asset_id=upload_response.resource_id,
+        )
+        return RegenerateDrawioArchitectureResponse(
+            block={
+                "id": request.block_id,
+                "type": "image",
+                "kind": "image",
+                "blockType": "image",
+                "contentText": artifacts.caption,
+                "plainText": artifacts.caption,
+                "markdown": f"![{artifacts.caption}](asset://{upload_response.resource_id})",
+                "attrs": attrs,
+                "renderKind": "drawio",
+            },
+            architecture_spec=artifacts.spec,
+            drawio_asset_id=upload_response.resource_id,
+            drawio_xml=artifacts.drawio_xml,
+        )
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(
+            "regenerate_drawio_architecture_failed",
+            error_type=type(e).__name__,
+            error=str(e),
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Regenerate draw.io architecture failed: {str(e)}",
+        )
+
+
+def _build_regenerated_drawio_attrs(
+    attrs: Dict[str, Any],
+    artifacts: Any,
+    drawio_asset_id: str,
+) -> Dict[str, Any]:
+    """构造重生成后的架构图块属性."""
+    next_attrs = ProcessImageBlocksNode._build_drawio_architecture_attrs(
+        attrs if isinstance(attrs, dict) else {},
+        artifacts,
+        drawio_asset_id,
+    )
+    # 前端资产列表刷新前，先用内联 XML 立即替换编辑器画布
+    next_attrs["drawioXml"] = artifacts.drawio_xml
+    next_attrs["format"] = "drawio_architecture"
+    next_attrs["title"] = artifacts.title
+    return next_attrs

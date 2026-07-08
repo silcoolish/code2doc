@@ -64,6 +64,7 @@ SUPPORTED_LAYOUTS = {"layered", "domain_map", "pipeline"}
 class DiagramArtifacts:
     title: str
     caption: str
+    spec: Dict[str, Any]
     svg: str
     drawio_xml: str
 
@@ -144,6 +145,7 @@ def render_drawio_architecture(
     return DiagramArtifacts(
         title=layout.title,
         caption=layout.title,
+        spec=spec,
         svg=layout.render_svg() if include_svg else "",
         drawio_xml=layout.render_drawio_xml(),
     )
