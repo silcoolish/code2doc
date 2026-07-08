@@ -34,12 +34,19 @@
 ```json
 {
   "title": "项目架构图标题",
+  "visual": {
+    "layout": "layered",
+    "theme": "vivid",
+    "accent": "lime",
+    "variant": "balanced"
+  },
   "layers": [
     {
       "id": "desktop",
       "label": "L1",
       "name": "桌面与网页工作台",
       "subtitle": "Electron + React",
+      "color": "sky",
       "items": [
         {"id": "repo-browser", "name": "源码浏览", "description": "仓库文件与代码预览"}
       ],
@@ -47,7 +54,7 @@
     }
   ],
   "connections": [
-    {"from": "desktop", "to": "workspace-service", "label": "HTTP API"}
+    {"from": "desktop", "to": "workspace-service", "label": "HTTP API", "color": "indigo"}
   ],
   "pipeline": [
     {"name": "本地代码仓库", "description": "仓库注册"},
@@ -57,10 +64,17 @@
 ```
 
 生成要求：
-1. `layers` 按自上而下的系统分层组织，优先覆盖用户入口层、业务编排层、能力服务层、数据与资源层、基础依赖层
-2. 每层 `items` 只放核心组件，名称短且可视化友好；详细说明放在 `description`
-3. `connections.from/to` 必须引用 layer 或 item 的 `id/name`，用于绘制箭头
-4. `pipeline` 表示主链路，按从左到右的业务流程输出
-5. 不要输出 Mermaid 语法，不要输出 ` ``` ` 代码围栏
+1. `visual.layout` 表示图形版式，可选 `layered`、`domain_map`、`pipeline`，请根据项目结构选择，不要所有项目都固定使用同一种版式
+2. 版式选择建议：层级依赖清晰时选 `layered`；模块/领域边界更重要时选 `domain_map`；业务主流程或控制流是重点时选 `pipeline`
+3. `visual.theme` 表示整体配色，可选 `classic`、`cool`、`warm`、`contrast`、`forest`、`sunset`、`vivid`，请根据项目领域和图内容选择
+4. 主题选择建议：通用后台/数据系统可选 `cool` 或 `classic`；硬件控制、游戏、交互流程可选 `warm`、`sunset` 或 `vivid`；资源/生态/任务编排可选 `forest`；跨模块依赖复杂时选 `contrast`
+5. `visual.accent` 表示主链路或重点路径强调色，颜色范围同 `layers.color`；不要总是使用 `orange` 或 `blue`
+6. 请主动为关键层设置不同 `color`，后端会把该颜色渲染为明显色条；避免连续使用相近色系，示例中的 `theme/accent/color` 只是结构示例，不要照抄
+7. `layers` 表示系统分层、领域分组或支撑模块，优先覆盖用户入口、业务编排、核心能力、数据资源、基础依赖等关键区域
+8. 每层可选 `color`，只能使用 `blue`、`green`、`orange`、`teal`、`purple`、`slate`、`indigo`、`emerald`、`amber`、`sky`、`rose`、`violet`、`red`、`cyan`、`lime`、`yellow`、`pink`、`zinc`，不要输出十六进制颜色
+9. 每层 `items` 只放核心组件，名称短且可视化友好；详细说明放在 `description`
+10. `connections.from/to` 必须引用 layer 或 item 的 `id/name`，用于绘制箭头；可选 `color`，颜色范围同上
+11. `pipeline` 表示主链路，按从左到右的业务流程输出；当主流程很重要时优先选择 `visual.layout="pipeline"`
+12. 不要输出 Mermaid 语法，不要输出 ` ``` ` 代码围栏
 
 
