@@ -131,6 +131,7 @@ class RegenerateDrawioArchitectureRequest(BaseModel):
     title: Optional[str] = Field(None, description="架构图标题兜底")
     prompt: Optional[str] = Field(None, description="本次重生成补充要求")
     block_text: Optional[str] = Field(None, description="当前块展示文本或标题")
+    current_xml: Optional[str] = Field(None, description="当前 draw.io XML，用于按用户编辑后的真实图继续优化")
     current_spec: Optional[Dict[str, Any]] = Field(None, description="当前架构图 JSON 结构")
     attrs: Dict[str, Any] = Field(default_factory=dict, description="当前块 attrs")
     surrounding_blocks: List[Dict[str, Any]] = Field(default_factory=list, description="邻近文档块上下文")

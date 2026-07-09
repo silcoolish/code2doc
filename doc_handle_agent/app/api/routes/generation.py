@@ -16,7 +16,7 @@ from app.api.models.schemas import (
 )
 from app.core.nodes.process_image_blocks_node import ProcessImageBlocksNode
 from app.core.document_engine import get_document_engine
-from app.domain.drawio_architecture import render_drawio_architecture
+from app.domain.drawio_architecture import DiagramArtifacts, render_drawio_architecture
 from app.domain.drawio_architecture_regenerate_agent import DrawioArchitectureRegenerateAgent
 from app.domain.rewrite_agent import RewriteAgent
 from app.infrastructure.workspace import WorkspaceServiceAdapter
@@ -167,21 +167,23 @@ async def rewrite_block(request: RewriteBlockRequest) -> RewriteBlockResponse:
         )
 
 
+@router.post("/optimizeDrawioDiagram", response_model=RegenerateDrawioArchitectureResponse)
 @router.post("/regenerateDrawioArchitecture", response_model=RegenerateDrawioArchitectureResponse)
-async def regenerate_drawio_architecture(
+async def optimize_drawio_diagram(
     request: RegenerateDrawioArchitectureRequest,
     authorization: Optional[str] = Header(default=None, alias="Authorization"),
 ) -> RegenerateDrawioArchitectureResponse:
-    """重生成 draw.io 架构图.
+    """优化 draw.io 图.
 
-    接收前端当前块上下文，生成新的架构 JSON，并复用图片处理节点上传 draw.io 源文件
+    接收前端当前块上下文，按 current_xml 决定走 XML 优化或 JSON 重生成，并上传 draw.io 源文件
     """
     logger.info(
-        "api_regenerate_drawio_architecture",
+        "api_optimize_drawio_diagram",
         repo_id=request.repo_id,
         document_id=request.document_id,
         block_id=request.block_id,
         has_current_spec=bool(request.current_spec),
+        has_current_xml=bool(request.current_xml),
         has_prompt=bool(request.prompt and request.prompt.strip()),
     )
 
@@ -192,9 +194,23 @@ async def regenerate_drawio_architecture(
 
     try:
         agent = DrawioArchitectureRegenerateAgent()
-        architecture_spec = await agent.regenerate(request)
-        title = request.title or str(architecture_spec.get("title") or "项目总体架构图")
-        artifacts = render_drawio_architecture(architecture_spec, fallback_title=title)
+        if request.current_xml and request.current_xml.strip():
+            # 编辑器 AI 优化以当前 XML 为事实源，避免 JSON renderer 重排用户手动改过的图
+            optimized_xml = await agent.optimize_xml(request)
+            raw_architecture_spec = request.current_spec or request.attrs.get("architectureSpec") or {}
+            architecture_spec = raw_architecture_spec if isinstance(raw_architecture_spec, dict) else {}
+            title = request.title or str(architecture_spec.get("title") or request.attrs.get("title") or "项目总体架构图")
+            artifacts = DiagramArtifacts(
+                title=title,
+                caption=title,
+                spec=architecture_spec,
+                svg="",
+                drawio_xml=optimized_xml,
+            )
+        else:
+            architecture_spec = await agent.regenerate(request)
+            title = request.title or str(architecture_spec.get("title") or "项目总体架构图")
+            artifacts = render_drawio_architecture(architecture_spec, fallback_title=title)
 
         # 上传 draw.io 源文件要沿用当前用户登录态，避免 workspace 回调鉴权失败
         process_node = ProcessImageBlocksNode(
@@ -234,7 +250,7 @@ async def regenerate_drawio_architecture(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(
-            "regenerate_drawio_architecture_failed",
+            "optimize_drawio_diagram_failed",
             error_type=type(e).__name__,
             error=str(e),
             exc_info=True,
