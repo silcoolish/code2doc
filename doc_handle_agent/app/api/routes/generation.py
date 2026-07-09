@@ -11,13 +11,13 @@ from app.api.models.schemas import (
     SystemStatusResponse,
     RewriteBlockRequest,
     RewriteBlockResponse,
-    RegenerateDrawioArchitectureRequest,
-    RegenerateDrawioArchitectureResponse,
+    OptimizeDrawioDiagramRequest,
+    OptimizeDrawioDiagramResponse,
 )
 from app.core.nodes.process_image_blocks_node import ProcessImageBlocksNode
 from app.core.document_engine import get_document_engine
-from app.domain.drawio_architecture import DiagramArtifacts, render_drawio_architecture
-from app.domain.drawio_architecture_regenerate_agent import DrawioArchitectureRegenerateAgent
+from app.domain.drawio_architecture import DiagramArtifacts
+from app.domain.drawio_diagram_optimize_agent import DrawioDiagramOptimizeAgent
 from app.domain.rewrite_agent import RewriteAgent
 from app.infrastructure.workspace import WorkspaceServiceAdapter
 from app.utils.logger import get_logger
@@ -167,22 +167,20 @@ async def rewrite_block(request: RewriteBlockRequest) -> RewriteBlockResponse:
         )
 
 
-@router.post("/optimizeDrawioDiagram", response_model=RegenerateDrawioArchitectureResponse)
-@router.post("/regenerateDrawioArchitecture", response_model=RegenerateDrawioArchitectureResponse)
+@router.post("/optimizeDrawioDiagram", response_model=OptimizeDrawioDiagramResponse)
 async def optimize_drawio_diagram(
-    request: RegenerateDrawioArchitectureRequest,
+    request: OptimizeDrawioDiagramRequest,
     authorization: Optional[str] = Header(default=None, alias="Authorization"),
-) -> RegenerateDrawioArchitectureResponse:
+) -> OptimizeDrawioDiagramResponse:
     """优化 draw.io 图.
 
-    接收前端当前块上下文，按 current_xml 决定走 XML 优化或 JSON 重生成，并上传 draw.io 源文件
+    接收前端当前块上下文，基于当前 draw.io XML 优化并上传 draw.io 源文件
     """
     logger.info(
         "api_optimize_drawio_diagram",
         repo_id=request.repo_id,
         document_id=request.document_id,
         block_id=request.block_id,
-        has_current_spec=bool(request.current_spec),
         has_current_xml=bool(request.current_xml),
         has_prompt=bool(request.prompt and request.prompt.strip()),
     )
@@ -191,26 +189,20 @@ async def optimize_drawio_diagram(
         raise HTTPException(status_code=400, detail="block_id is required")
     if not request.document_id:
         raise HTTPException(status_code=400, detail="document_id is required")
+    if not request.current_xml or not request.current_xml.strip():
+        raise HTTPException(status_code=400, detail="current_xml is required")
 
     try:
-        agent = DrawioArchitectureRegenerateAgent()
-        if request.current_xml and request.current_xml.strip():
-            # 编辑器 AI 优化以当前 XML 为事实源，避免 JSON renderer 重排用户手动改过的图
-            optimized_xml = await agent.optimize_xml(request)
-            raw_architecture_spec = request.current_spec or request.attrs.get("architectureSpec") or {}
-            architecture_spec = raw_architecture_spec if isinstance(raw_architecture_spec, dict) else {}
-            title = request.title or str(architecture_spec.get("title") or request.attrs.get("title") or "项目总体架构图")
-            artifacts = DiagramArtifacts(
-                title=title,
-                caption=title,
-                spec=architecture_spec,
-                svg="",
-                drawio_xml=optimized_xml,
-            )
-        else:
-            architecture_spec = await agent.regenerate(request)
-            title = request.title or str(architecture_spec.get("title") or "项目总体架构图")
-            artifacts = render_drawio_architecture(architecture_spec, fallback_title=title)
+        agent = DrawioDiagramOptimizeAgent()
+        optimized_xml = await agent.optimize_xml(request)
+        title = request.title or str(request.attrs.get("title") or request.attrs.get("caption") or "draw.io 图示")
+        artifacts = DiagramArtifacts(
+            title=title,
+            caption=title,
+            spec={},
+            svg="",
+            drawio_xml=optimized_xml,
+        )
 
         # 上传 draw.io 源文件要沿用当前用户登录态，避免 workspace 回调鉴权失败
         process_node = ProcessImageBlocksNode(
@@ -224,12 +216,12 @@ async def optimize_drawio_diagram(
         if not upload_response.success or not upload_response.resource_id:
             raise RuntimeError(upload_response.error or "draw.io 资源上传失败")
 
-        attrs = _build_regenerated_drawio_attrs(
+        attrs = _build_optimized_drawio_attrs(
             request.attrs,
             artifacts=artifacts,
             drawio_asset_id=upload_response.resource_id,
         )
-        return RegenerateDrawioArchitectureResponse(
+        return OptimizeDrawioDiagramResponse(
             block={
                 "id": request.block_id,
                 "type": "image",
@@ -241,7 +233,6 @@ async def optimize_drawio_diagram(
                 "attrs": attrs,
                 "renderKind": "drawio",
             },
-            architecture_spec=artifacts.spec,
             drawio_asset_id=upload_response.resource_id,
             drawio_xml=artifacts.drawio_xml,
         )
@@ -257,23 +248,24 @@ async def optimize_drawio_diagram(
         )
         raise HTTPException(
             status_code=500,
-            detail=f"Regenerate draw.io architecture failed: {str(e)}",
+            detail=f"Optimize draw.io diagram failed: {str(e)}",
         )
 
 
-def _build_regenerated_drawio_attrs(
+def _build_optimized_drawio_attrs(
     attrs: Dict[str, Any],
     artifacts: Any,
     drawio_asset_id: str,
 ) -> Dict[str, Any]:
-    """构造重生成后的架构图块属性."""
-    next_attrs = ProcessImageBlocksNode._build_drawio_architecture_attrs(
-        attrs if isinstance(attrs, dict) else {},
-        artifacts,
-        drawio_asset_id,
-    )
+    """构造优化后的 draw.io 图块属性."""
+    next_attrs = {**(attrs if isinstance(attrs, dict) else {})}
+    next_attrs.pop("architectureSpec", None)
+    next_attrs["drawioAssetId"] = drawio_asset_id
+    next_attrs["editableAssetId"] = drawio_asset_id
+    next_attrs["caption"] = artifacts.caption
+    next_attrs["alt"] = artifacts.caption
+    next_attrs["renderKind"] = "drawio"
     # 前端资产列表刷新前，先用内联 XML 立即替换编辑器画布
     next_attrs["drawioXml"] = artifacts.drawio_xml
-    next_attrs["format"] = "drawio_architecture"
     next_attrs["title"] = artifacts.title
     return next_attrs

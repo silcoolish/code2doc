@@ -2,8 +2,8 @@ import json
 
 import pytest
 
-from app.api.models.schemas import RegenerateDrawioArchitectureRequest
-from app.domain.drawio_architecture_regenerate_agent import DrawioArchitectureRegenerateAgent
+from app.api.models.schemas import OptimizeDrawioDiagramRequest
+from app.domain.drawio_diagram_optimize_agent import DrawioDiagramOptimizeAgent
 from app.domain.drawio_xml_tools import (
     apply_diagram_operations,
     validate_drawio_xml,
@@ -109,10 +109,10 @@ async def test_optimize_xml_uses_edit_diagram_tool_call():
             ],
         }
     )
-    agent = DrawioArchitectureRegenerateAgent(llm_client=fake_llm)
+    agent = DrawioDiagramOptimizeAgent(llm_client=fake_llm)
 
     result = await agent.optimize_xml(
-        RegenerateDrawioArchitectureRequest(
+        OptimizeDrawioDiagramRequest(
             repo_id="repo-1",
             document_id="doc-1",
             block_id="block-1",

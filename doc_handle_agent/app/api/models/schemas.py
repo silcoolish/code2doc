@@ -122,28 +122,26 @@ class RewriteBlockResponse(BaseModel):
     summary: Optional[str] = Field(None, description="改写摘要")
 
 
-class RegenerateDrawioArchitectureRequest(BaseModel):
-    """重生成 draw.io 架构图请求."""
+class OptimizeDrawioDiagramRequest(BaseModel):
+    """优化 draw.io 图请求."""
 
     repo_id: str = Field(..., description="仓库ID")
     document_id: str = Field(..., description="文档ID，用于上传新的 drawio 资源")
-    block_id: str = Field(..., description="架构图块ID")
-    title: Optional[str] = Field(None, description="架构图标题兜底")
-    prompt: Optional[str] = Field(None, description="本次重生成补充要求")
+    block_id: str = Field(..., description="图示块ID")
+    title: Optional[str] = Field(None, description="图示标题兜底")
+    prompt: Optional[str] = Field(None, description="本次优化补充要求")
     block_text: Optional[str] = Field(None, description="当前块展示文本或标题")
-    current_xml: Optional[str] = Field(None, description="当前 draw.io XML，用于按用户编辑后的真实图继续优化")
-    current_spec: Optional[Dict[str, Any]] = Field(None, description="当前架构图 JSON 结构")
+    current_xml: str = Field(..., description="当前 draw.io XML，用于按用户编辑后的真实图继续优化")
     attrs: Dict[str, Any] = Field(default_factory=dict, description="当前块 attrs")
     surrounding_blocks: List[Dict[str, Any]] = Field(default_factory=list, description="邻近文档块上下文")
 
 
-class RegenerateDrawioArchitectureResponse(BaseModel):
-    """重生成 draw.io 架构图响应."""
+class OptimizeDrawioDiagramResponse(BaseModel):
+    """优化 draw.io 图响应."""
 
     block: Dict[str, Any] = Field(..., description="可直接替换前端当前块的 image block")
-    architecture_spec: Dict[str, Any] = Field(..., description="本次生成的规范化架构图 JSON")
     drawio_asset_id: str = Field(..., description="新上传的 drawio 资源ID")
-    drawio_xml: str = Field(..., description="新生成的 draw.io XML，供前端立即刷新编辑器")
+    drawio_xml: str = Field(..., description="优化后的 draw.io XML，供前端立即刷新编辑器")
 
 
 # 兼容性导出（保留旧名称以兼容现有代码）
