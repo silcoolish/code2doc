@@ -1,6 +1,6 @@
 """文档生成API路由."""
 
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, Header, HTTPException
 
@@ -14,12 +14,9 @@ from app.api.models.schemas import (
     OptimizeDrawioDiagramRequest,
     OptimizeDrawioDiagramResponse,
 )
-from app.core.nodes.process_image_blocks_node import ProcessImageBlocksNode
 from app.core.document_engine import get_document_engine
-from app.domain.drawio_architecture import DiagramArtifacts
 from app.domain.drawio_diagram_optimize_agent import DrawioDiagramOptimizeAgent
 from app.domain.rewrite_agent import RewriteAgent
-from app.infrastructure.workspace import WorkspaceServiceAdapter
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -170,11 +167,10 @@ async def rewrite_block(request: RewriteBlockRequest) -> RewriteBlockResponse:
 @router.post("/optimizeDrawioDiagram", response_model=OptimizeDrawioDiagramResponse)
 async def optimize_drawio_diagram(
     request: OptimizeDrawioDiagramRequest,
-    authorization: Optional[str] = Header(default=None, alias="Authorization"),
 ) -> OptimizeDrawioDiagramResponse:
     """优化 draw.io 图.
 
-    接收前端当前块上下文，基于当前 draw.io XML 优化并上传 draw.io 源文件
+    接收前端当前块上下文并返回候选 XML，不创建资源或写入文档
     """
     logger.info(
         "api_optimize_drawio_diagram",
@@ -195,46 +191,8 @@ async def optimize_drawio_diagram(
     try:
         agent = DrawioDiagramOptimizeAgent()
         optimized_xml = await agent.optimize_xml(request)
-        title = request.title or str(request.attrs.get("title") or request.attrs.get("caption") or "draw.io 图示")
-        artifacts = DiagramArtifacts(
-            title=title,
-            caption=title,
-            spec={},
-            svg="",
-            drawio_xml=optimized_xml,
-        )
-
-        # 上传 draw.io 源文件要沿用当前用户登录态，避免 workspace 回调鉴权失败
-        process_node = ProcessImageBlocksNode(
-            workspace_adapter=WorkspaceServiceAdapter(auth_token=authorization),
-        )
-        upload_response = await process_node._upload_drawio_architecture_resource(
-            artifacts=artifacts,
-            block_id=request.block_id,
-            document_id=request.document_id,
-        )
-        if not upload_response.success or not upload_response.resource_id:
-            raise RuntimeError(upload_response.error or "draw.io 资源上传失败")
-
-        attrs = _build_optimized_drawio_attrs(
-            request.attrs,
-            artifacts=artifacts,
-            drawio_asset_id=upload_response.resource_id,
-        )
         return OptimizeDrawioDiagramResponse(
-            block={
-                "id": request.block_id,
-                "type": "image",
-                "kind": "image",
-                "blockType": "image",
-                "contentText": artifacts.caption,
-                "plainText": artifacts.caption,
-                "markdown": f"![{artifacts.caption}](asset://{upload_response.resource_id})",
-                "attrs": attrs,
-                "renderKind": "drawio",
-            },
-            drawio_asset_id=upload_response.resource_id,
-            drawio_xml=artifacts.drawio_xml,
+            drawio_xml=optimized_xml,
         )
 
     except ValueError as e:
@@ -250,22 +208,3 @@ async def optimize_drawio_diagram(
             status_code=500,
             detail=f"Optimize draw.io diagram failed: {str(e)}",
         )
-
-
-def _build_optimized_drawio_attrs(
-    attrs: Dict[str, Any],
-    artifacts: Any,
-    drawio_asset_id: str,
-) -> Dict[str, Any]:
-    """构造优化后的 draw.io 图块属性."""
-    next_attrs = {**(attrs if isinstance(attrs, dict) else {})}
-    next_attrs.pop("architectureSpec", None)
-    next_attrs["drawioAssetId"] = drawio_asset_id
-    next_attrs["editableAssetId"] = drawio_asset_id
-    next_attrs["caption"] = artifacts.caption
-    next_attrs["alt"] = artifacts.caption
-    next_attrs["renderKind"] = "drawio"
-    # 前端资产列表刷新前，先用内联 XML 立即替换编辑器画布
-    next_attrs["drawioXml"] = artifacts.drawio_xml
-    next_attrs["title"] = artifacts.title
-    return next_attrs

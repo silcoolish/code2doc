@@ -130,18 +130,14 @@ class OptimizeDrawioDiagramRequest(BaseModel):
     block_id: str = Field(..., description="图示块ID")
     title: Optional[str] = Field(None, description="图示标题兜底")
     prompt: Optional[str] = Field(None, description="本次优化补充要求")
-    block_text: Optional[str] = Field(None, description="当前块展示文本或标题")
     current_xml: str = Field(..., description="当前 draw.io XML，用于按用户编辑后的真实图继续优化")
-    attrs: Dict[str, Any] = Field(default_factory=dict, description="当前块 attrs")
     surrounding_blocks: List[Dict[str, Any]] = Field(default_factory=list, description="邻近文档块上下文")
 
 
 class OptimizeDrawioDiagramResponse(BaseModel):
     """优化 draw.io 图响应."""
 
-    block: Dict[str, Any] = Field(..., description="可直接替换前端当前块的 image block")
-    drawio_asset_id: str = Field(..., description="新上传的 drawio 资源ID")
-    drawio_xml: str = Field(..., description="优化后的 draw.io XML，供前端立即刷新编辑器")
+    drawio_xml: str = Field(..., description="候选 draw.io XML，由前端确认应用后再保存")
 
 
 # 兼容性导出（保留旧名称以兼容现有代码）
