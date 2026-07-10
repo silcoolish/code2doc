@@ -128,6 +128,48 @@ async def test_optimize_xml_uses_edit_diagram_tool_call():
     assert validate_drawio_xml(result) is None
 
 
+@pytest.mark.asyncio
+async def test_optimize_xml_prompt_protects_svg_source_location():
+    current_xml = wrap_with_mxfile(
+        '<mxCell id="func-parseOrder" value="parseOrder" style="rounded=1;" vertex="1" parent="1">'
+        '<mxGeometry x="80" y="80" width="140" height="60" as="geometry" />'
+        "</mxCell>"
+    )
+    fake_llm = _FakeLLM(
+        {
+            "tool": "edit_diagram",
+            "operations": [
+                {
+                    "operation": "update",
+                    "cell_id": "func-parseOrder",
+                    "new_xml": (
+                        '<mxCell id="func-parseOrder" value="parseOrder" style="rounded=1;fillColor=#e0f2fe;" vertex="1" parent="1">'
+                        '<mxGeometry x="80" y="80" width="140" height="60" as="geometry" />'
+                        "</mxCell>"
+                    ),
+                },
+            ],
+        }
+    )
+    agent = DrawioDiagramOptimizeAgent(llm_client=fake_llm)
+
+    await agent.optimize_xml(
+        OptimizeDrawioDiagramRequest(
+            repo_id="repo-1",
+            document_id="doc-1",
+            block_id="block-1",
+            title="函数流程图",
+            prompt="美化一下颜色",
+            current_xml=current_xml,
+        )
+    )
+
+    joined_prompt = "\n".join(message.content for message in fake_llm.messages)
+    assert "源码定位保护要求" in joined_prompt
+    assert "代码行定位" in joined_prompt
+    assert "不要 delete 后重新 add" in joined_prompt
+
+
 class _FakeResponse:
     def __init__(self, content: str):
         self.content = content
@@ -136,6 +178,8 @@ class _FakeResponse:
 class _FakeLLM:
     def __init__(self, payload: dict):
         self.payload = payload
+        self.messages = []
 
-    async def ainvoke(self, _messages):
+    async def ainvoke(self, messages):
+        self.messages = messages
         return _FakeResponse(json.dumps(self.payload, ensure_ascii=False))

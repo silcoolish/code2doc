@@ -45,6 +45,9 @@ edit_diagram operations:
 8. 连线使用 orthogonalEdgeStyle，并尽量设置 exitX、exitY、entryX、entryY，避免穿过节点
 9. 容器节点不要覆盖子节点文字；子节点 parent 可指向容器，但几何坐标必须相对容器且留出标题区
 10. XML 属性中的 <、>、&、" 必须转义为 &lt;、&gt;、&amp;、&quot;
+11. 现有 mxCell id、value 和边的 source/target 可能用于前端 SVG 源码定位，样式、布局或文案小改必须用 update 保留原 cell id
+12. 优化由源码 SVG 转来的流程图时，尽量保留方法/函数节点数量、节点文本和连接关系，避免点击跳转到代码行的能力失效
+13. 用户只要求美化或局部优化时不要使用 display_diagram，因为整图重建会丢失原有源码定位锚点
 """
 
 
@@ -111,6 +114,10 @@ class DrawioDiagramOptimizeAgent:
             f"标题: {request.title or 'draw.io 图示'}",
             "Current diagram XML（root 下 mxCell，按这些 id 精准编辑）:",
             current_cells,
+            "源码定位保护要求:",
+            "- 现有 mxCell id 可能对应 SVG 节点和代码行定位，除非用户明确要求删除该节点，否则不要 delete 后重新 add",
+            "- 样式、颜色、布局、文字微调优先返回 edit_diagram update，保留原 id、parent、source、target 和核心标签",
+            "- 如果确实需要新增说明节点，使用全新 id，并保持已有业务节点和连线仍可识别",
         ]
         if request.prompt and request.prompt.strip():
             parts.append(f"用户本次调整要求:\n{request.prompt.strip()}")
