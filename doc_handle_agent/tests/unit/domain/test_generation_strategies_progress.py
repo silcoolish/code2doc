@@ -1,5 +1,7 @@
 import pytest
 import asyncio
+import json
+import re
 from unittest.mock import AsyncMock, MagicMock
 
 from app.domain.generation_strategies import BatchedGenerationStrategy
@@ -204,6 +206,56 @@ def test_batched_strategy_reports_function_parallel_blocker():
     assert reason == "missing_function_anchor"
 
 
+def test_batched_strategy_recognizes_prompt_expanded_function_heading():
+    strategy = BatchedGenerationStrategy(MagicMock(), function_batch_parallelism=2)
+    heading = TemplateBlock(
+        id="method-heading",
+        block_type="heading",
+        content_text="SysTick_Init",
+        order_no="a",
+        parent_block_id=None,
+        heading_level=3,
+        attrs={"templateType": "static", "template_block_id": "method-list"},
+    )
+    body = TemplateBlock(
+        id="method-body",
+        block_type="paragraph",
+        content_text="函数说明模板",
+        order_no="b",
+        parent_block_id=None,
+        heading_level=0,
+        attrs={"templateType": "template"},
+    )
+
+    assert strategy._get_function_batch_parallel_blocker([heading, body], [body]) is None
+
+
+def test_batched_strategy_rejects_malformed_prompt_expanded_heading():
+    strategy = BatchedGenerationStrategy(MagicMock(), function_batch_parallelism=2)
+    heading = TemplateBlock(
+        id="method-heading",
+        block_type="heading",
+        content_text="{'repo_id': 'repo-1', 'results': []}",
+        order_no="a",
+        parent_block_id=None,
+        heading_level=3,
+        attrs={"templateType": "static", "template_block_id": "method-list"},
+    )
+    body = TemplateBlock(
+        id="method-body",
+        block_type="paragraph",
+        content_text="函数说明模板",
+        order_no="b",
+        parent_block_id=None,
+        heading_level=0,
+        attrs={"templateType": "template"},
+    )
+
+    reason = strategy._get_function_batch_parallel_blocker([heading, body], [body])
+
+    assert reason == "missing_function_anchor"
+
+
 def _method_heading(block_id: str, name: str) -> TemplateBlock:
     return TemplateBlock(
         id=block_id,
@@ -274,6 +326,60 @@ async def test_batched_strategy_processes_method_batches_concurrently():
     result_map = {result.block_id: result.text_content for result in results}
     for index in range(10):
         assert result_map[f"m{index}-body"] == f"m{index}"
+
+
+@pytest.mark.asyncio
+async def test_batched_strategy_processes_200_prompt_expanded_blocks_with_ten_calls():
+    agent = MagicMock()
+    active_calls = 0
+    max_active_calls = 0
+
+    async def generate_with_tools(**kwargs):
+        nonlocal active_calls, max_active_calls
+        active_calls += 1
+        max_active_calls = max(max_active_calls, active_calls)
+        await asyncio.sleep(0.01)
+        active_calls -= 1
+        match = re.search(r"本次只生成以下模板块: (.*?)。", kwargs["task_message"])
+        target_ids = match.group(1).split(", ") if match else []
+        return json.dumps([
+            {"id": block_id, "block_type": "paragraph", "content_text": block_id}
+            for block_id in target_ids
+        ])
+
+    agent.generate_with_tools = generate_with_tools
+    strategy = BatchedGenerationStrategy(
+        agent,
+        max_batch_size=20,
+        function_batch_parallelism=10,
+    )
+
+    blocks = []
+    for function_index in range(50):
+        blocks.append(TemplateBlock(
+            id=f"f{function_index}",
+            block_type="heading",
+            content_text=f"func_{function_index}",
+            order_no=f"f{function_index}",
+            parent_block_id=None,
+            heading_level=3,
+            attrs={"templateType": "static", "template_block_id": "function-list"},
+        ))
+        for block_index in range(4):
+            blocks.append(_method_template(
+                f"f{function_index}-body-{block_index}",
+                f"f{function_index}-body-{block_index}",
+            ))
+
+    results = await strategy.execute(blocks, repo_id="repo-1")
+
+    generated_ids = {
+        result.block_id
+        for result in results
+        if result.block_id and "-body-" in result.block_id
+    }
+    assert max_active_calls == 10
+    assert len(generated_ids) == 200
 
 
 @pytest.mark.asyncio

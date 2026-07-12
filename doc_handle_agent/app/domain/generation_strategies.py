@@ -23,6 +23,9 @@ logger = get_logger(__name__)
 MISSING_BLOCK_PLACEHOLDER_PATTERN = re.compile(
     r"^\[内容块\s+'[^']+'\s+生成缺失\]$"
 )
+CPP_FUNCTION_HEADING_PATTERN = re.compile(
+    r"^[A-Za-z_~][A-Za-z0-9_~]*(?:::[A-Za-z_~][A-Za-z0-9_~]*)*(?:函数|方法)?$"
+)
 
 
 class FallbackSignalError(RuntimeError):
@@ -1191,10 +1194,23 @@ class BatchedGenerationStrategy(GenerationStrategy):
         if not block.is_heading:
             return False
 
-        source_refs = block.source_refs or []
-        if not source_refs:
-            return False
+        if BatchedGenerationStrategy._has_function_source_refs(block.source_refs):
+            return True
+        # 提示词列表展开的函数标题没有 sourceRefs，只能用展开身份和函数名形态识别
+        heading_text = str(block.content_text or "").strip()
+        return (
+            block.heading_level == 3
+            and bool(block.attrs.get("template_block_id"))
+            and bool(CPP_FUNCTION_HEADING_PATTERN.fullmatch(heading_text))
+        )
+
+    @staticmethod
+    def _has_function_source_refs(source_refs: Optional[List[Dict[str, Any]]]) -> bool:
+        """判断内容块是否已限定到一组真实函数源码"""
+        source_refs = source_refs or []
         for source_ref in source_refs:
+            if not isinstance(source_ref, dict):
+                continue
             values = [
                 source_ref.get("symbolType"),
                 source_ref.get("refType"),
@@ -1204,11 +1220,7 @@ class BatchedGenerationStrategy(GenerationStrategy):
             ]
             if any(str(value or "").strip().lower() in {"method", "function"} for value in values):
                 return True
-        anchor_text = f"{block.content_text or ''} {block.attrs.get('template_block_id') or ''}".lower()
-        return bool(block.attrs.get("template_block_id")) and any(
-            keyword in anchor_text
-            for keyword in ("函数", "方法", "function", "method")
-        )
+        return False
 
     @staticmethod
     def _is_cross_context_template(block: TemplateBlock) -> bool:

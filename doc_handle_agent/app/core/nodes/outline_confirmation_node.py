@@ -6,6 +6,7 @@ import json
 import re
 from typing import Any, Dict, List, Optional
 
+from app.config import get_settings
 from app.core.nodes.base import WorkflowNode
 from app.core.state import AgentState, GenerationStatus
 from app.domain.content_generator import ContentGenerator
@@ -41,6 +42,7 @@ class OutlineConfirmationNode(WorkflowNode):
     def __init__(self, content_generator: ContentGenerator):
         self.agent = content_generator.agent
         self.static_list_provider = content_generator.static_list_provider
+        self.list_parallelism = max(1, get_settings().outline_list_parallelism)
 
     @property
     def name(self) -> str:
@@ -109,40 +111,67 @@ class OutlineConfirmationNode(WorkflowNode):
         parent_context: str = "",
         inherited_source_refs: Optional[List[Dict[str, Any]]] = None,
         reporter=None,
+        list_semaphore: Optional[asyncio.Semaphore] = None,
     ) -> List[TemplateBlock]:
         """递归展开 block 列表中的模板列表块.
 
         遇到 isList=true 的块时，识别子内容块、生成列表项、递归展开。
         其他块（包括单个模板内容块）原样保留，由后续节点处理。
         """
+        if list_semaphore is None:
+            list_semaphore = asyncio.Semaphore(self.list_parallelism)
+
         result: List[TemplateBlock] = []
         i = 0
         while i < len(blocks):
             block = blocks[i]
             if block.is_list:
                 children = self._get_child_blocks(blocks, i)
-                items = await self._generate_list_items(block, repo_id, parent_context)
+                async with list_semaphore:
+                    items = await self._generate_list_items(block, repo_id, parent_context)
                 if reporter:
                     await reporter.report_percent(
                         35,
                         self._build_list_expand_message(block, len(items)),
                     )
 
-                total_items = len(items)
-                for item_index, item in enumerate(items, start=1):
+                async def expand_item(item: Any) -> List[TemplateBlock]:
                     item_text = item.name if hasattr(item, "name") else str(item)
                     item_source_refs = item.source_refs if hasattr(item, "source_refs") else []
                     item_block = self._create_item_block(block, item_text, item_source_refs)
-                    result.append(item_block)
-
                     expanded_children = await self._expand_blocks(
                         children,
                         repo_id,
                         parent_context=item_text,
                         inherited_source_refs=item_source_refs or inherited_source_refs,
                         reporter=reporter,
+                        list_semaphore=list_semaphore,
                     )
-                    result.extend(expanded_children)
+                    return [item_block, *expanded_children]
+
+                # 仅当子层仍有列表时并发，普通列表项复制保持轻量串行
+                if len(items) > 1 and any(child.is_list for child in children):
+                    logger.info(
+                        "outline_nested_lists_parallel",
+                        item_count=len(items),
+                        parallelism=self.list_parallelism,
+                    )
+                    item_results = await asyncio.gather(
+                        *(expand_item(item) for item in items),
+                        return_exceptions=True,
+                    )
+                    for item_result in item_results:
+                        if isinstance(item_result, BaseException):
+                            raise item_result
+                    item_groups = item_results
+                else:
+                    item_groups = []
+                    for item in items:
+                        item_groups.append(await expand_item(item))
+
+                total_items = len(item_groups)
+                for item_index, item_group in enumerate(item_groups, start=1):
+                    result.extend(item_group)
 
                     if item_index % _EXPAND_PROGRESS_INTERVAL == 0:
                         await asyncio.sleep(0)

@@ -1,5 +1,6 @@
 """内容生成器Agent - 负责LLM调用和工具执行."""
 
+import asyncio
 import json
 import uuid
 from contextvars import ContextVar
@@ -63,6 +64,7 @@ class ContentGeneratorAgent:
 
         # 工具结果缓存，避免同一会话中重复查询
         self._tool_result_cache: Dict[str, str] = {}
+        self._tool_result_inflight: Dict[str, asyncio.Task[str]] = {}
         self._cache_hits = 0
         self._cache_misses = 0
 
@@ -602,20 +604,35 @@ class ContentGeneratorAgent:
                 )
             return self._tool_result_cache[cache_key]
 
+        inflight_task = self._tool_result_inflight.get(cache_key)
+        if inflight_task is not None:
+            self._cache_hits += 1
+            if agent_logger:
+                agent_logger.log_event(
+                    "tool_cache_joined",
+                    tool_name=tool_name,
+                    cache_hits=self._cache_hits,
+                    cache_misses=self._cache_misses,
+                )
+            return await asyncio.shield(inflight_task)
+
         self._cache_misses += 1
 
-        try:
-            result = await self.mcp_client.call_tool(tool_name, tool_args)
+        async def execute_and_cache() -> str:
+            try:
+                try:
+                    result = await self.mcp_client.call_tool(tool_name, tool_args)
+                except Exception as e:
+                    result = f"工具调用失败: {str(e)}"
+                # 失败结果也缓存，避免相同查询持续重试
+                self._tool_result_cache[cache_key] = result
+                return result
+            finally:
+                self._tool_result_inflight.pop(cache_key, None)
 
-            # 缓存结果
-            self._tool_result_cache[cache_key] = result
-            return result
-        except Exception as e:
-            error_msg = f"工具调用失败: {str(e)}"
-
-            # 失败结果也缓存，避免重复失败请求
-            self._tool_result_cache[cache_key] = error_msg
-            return error_msg
+        inflight_task = asyncio.create_task(execute_and_cache())
+        self._tool_result_inflight[cache_key] = inflight_task
+        return await asyncio.shield(inflight_task)
 
     def _build_tool_cache_key(self, tool_name: str, tool_args: Dict[str, Any]) -> str:
         """构建工具缓存键.
@@ -635,6 +652,9 @@ class ContentGeneratorAgent:
 
     def clear_tool_cache(self) -> None:
         """清空工具结果缓存."""
+        for task in self._tool_result_inflight.values():
+            task.cancel()
+        self._tool_result_inflight.clear()
         self._tool_result_cache.clear()
         self._cache_hits = 0
         self._cache_misses = 0

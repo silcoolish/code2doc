@@ -64,7 +64,10 @@ class AgentLogger:
 
         safe_repo = _sanitize_filename(repo_id, max_len=30)
         safe_task = _sanitize_filename(task_name, max_len=30)
-        self.log_file = self.log_dir / f"{safe_repo}_{safe_task}_{timestamp}.jsonl"
+        safe_session = _sanitize_filename(self.session_id, max_len=8)
+        self.log_file = self.log_dir / (
+            f"{safe_repo}_{safe_task}_{timestamp}_{safe_session}.jsonl"
+        )
 
         # 配置专用 logger，阻止向 root logger 传播（避免进入系统日志和控制台）
         self.logger = logging.getLogger(f"agent_calls.{self.session_id}")

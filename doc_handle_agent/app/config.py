@@ -68,6 +68,7 @@ class Settings(BaseSettings):
     # 分批生成策略配置
     batch_max_size: int = Field(default=20, alias="BATCH_MAX_SIZE")
     function_batch_parallelism: int = Field(default=10, alias="FUNCTION_BATCH_PARALLELISM")
+    outline_list_parallelism: int = Field(default=10, alias="OUTLINE_LIST_PARALLELISM")
 
     # 图片资源处理配置
     image_download_parallelism: int = Field(default=16, alias="IMAGE_DOWNLOAD_PARALLELISM")

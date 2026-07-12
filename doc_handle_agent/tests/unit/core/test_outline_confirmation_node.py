@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from app.core.nodes.outline_confirmation_node import OutlineConfirmationNode
@@ -234,3 +236,78 @@ def test_outline_confirmation_assigns_order_no_incrementally():
     assert [block.id for block in blocks] == [str(index) for index in range(120)]
     assert order_numbers == sorted(order_numbers)
     assert len(order_numbers) == len(set(order_numbers))
+
+class _ConcurrentPromptDrivenAgent:
+    def __init__(self):
+        self.active_calls = 0
+        self.max_active_calls = 0
+
+    async def generate_with_tools(self, **kwargs):
+        task_message = kwargs["task_message"]
+        if "当前上下文：" not in task_message:
+            return str([f"模块{index}" for index in range(10)]).replace("'", '"')
+
+        self.active_calls += 1
+        self.max_active_calls = max(self.max_active_calls, self.active_calls)
+        await asyncio.sleep(0.01)
+        self.active_calls -= 1
+        module_name = task_message.split("当前上下文：", 1)[1].splitlines()[0]
+        return f'["{module_name}_func"]'
+
+
+class _ConcurrentPromptDrivenContentGenerator:
+    agent = _ConcurrentPromptDrivenAgent()
+    static_list_provider = _StaticListProvider()
+
+
+@pytest.mark.asyncio
+async def test_outline_confirmation_expands_nested_lists_with_bounded_parallelism():
+    agent = _ConcurrentPromptDrivenContentGenerator.agent
+    agent.active_calls = 0
+    agent.max_active_calls = 0
+    node = OutlineConfirmationNode(_ConcurrentPromptDrivenContentGenerator())
+    node.list_parallelism = 3
+    state = create_initial_state(repo_id="repo-1", template_id="tpl-1")
+    state["blocks"] = [
+        TemplateBlock(
+            id="module-heading",
+            parent_block_id=None,
+            block_type="heading",
+            heading_level=2,
+            order_no="a",
+            content_text="模块标题",
+            attrs={"templateType": "template", "isList": True, "prompt": "生成模块"},
+        ),
+        TemplateBlock(
+            id="function-heading",
+            parent_block_id=None,
+            block_type="heading",
+            heading_level=3,
+            order_no="b",
+            content_text="函数标题",
+            attrs={"templateType": "template", "isList": True, "prompt": "生成函数"},
+        ),
+        TemplateBlock(
+            id="function-body",
+            parent_block_id=None,
+            block_type="paragraph",
+            heading_level=0,
+            order_no="c",
+            content_text="函数正文",
+            attrs={"templateType": "template", "prompt": "描述函数"},
+        ),
+    ]
+
+    result = await node.execute(state)
+
+    headings = [
+        block.content_text
+        for block in result["blocks"]
+        if block.block_type == "heading"
+    ]
+    expected_headings = []
+    for index in range(10):
+        expected_headings.extend([f"模块{index}", f"模块{index}_func"])
+    assert result["error"] is None
+    assert agent.max_active_calls == 3
+    assert headings == expected_headings
