@@ -105,6 +105,93 @@ async def test_process_image_blocks_runs_with_bounded_parallelism_and_keeps_orde
 
 
 @pytest.mark.asyncio
+async def test_process_image_blocks_propagates_function_refs_before_filtering_missing_image():
+    source_refs = [{
+        "sourceId": "method_repo_src/system.c_System_Init",
+        "symbolName": "System_Init",
+        "filePath": "src/system.c",
+        "lineStart": 3,
+        "lineEnd": 13,
+    }]
+    node = ProcessImageBlocksNode(
+        _WorkspaceAdapter(),
+        _McpClient({
+            "images": [{
+                "node_id": source_refs[0]["sourceId"],
+                "success": False,
+                "error": "No image available",
+            }],
+        }),
+    )
+    blocks = [
+        {
+            "id": "heading-1",
+            "blockType": "heading",
+            "headingLevel": 3,
+            "contentText": "System_Init",
+            "sourceRefs": [],
+        },
+        {
+            "id": "table-1",
+            "blockType": "table",
+            "contentText": {"rows": []},
+            "sourceRefs": [],
+        },
+        {
+            "id": "image-1",
+            "blockType": "image",
+            "contentText": None,
+            "sourceRefs": source_refs,
+        },
+    ]
+
+    result = await node._process_blocks(blocks, "doc-1", "repo-1")
+
+    assert [block["id"] for block in result] == ["heading-1", "table-1"]
+    assert result[0]["sourceRefs"] == source_refs
+    assert result[1]["sourceRefs"] == source_refs
+    assert result[0]["sourceRefs"] is not source_refs
+    assert result[1]["sourceRefs"] is not source_refs
+
+
+def test_function_ref_propagation_stops_at_non_matching_nearest_heading():
+    source_refs = [{
+        "sourceId": "method_repo_src/system.c_System_Init",
+        "symbolName": "System_Init",
+        "filePath": "src/system.c",
+        "lineStart": 3,
+        "lineEnd": 13,
+    }]
+    blocks = [
+        {
+            "id": "heading-1",
+            "blockType": "heading",
+            "headingLevel": 3,
+            "contentText": "System_Init",
+            "sourceRefs": [],
+        },
+        {
+            "id": "heading-2",
+            "blockType": "heading",
+            "headingLevel": 3,
+            "contentText": "System_RunCycle",
+            "sourceRefs": [],
+        },
+        {
+            "id": "image-1",
+            "blockType": "image",
+            "contentText": "system-init.svg",
+            "sourceRefs": source_refs,
+        },
+    ]
+
+    ProcessImageBlocksNode._propagate_function_source_refs(blocks)
+
+    assert blocks[0]["sourceRefs"] == []
+    assert blocks[1]["sourceRefs"] == []
+
+
+@pytest.mark.asyncio
 async def test_process_image_blocks_limits_upload_parallelism_independently():
     node = ProcessImageBlocksNode(_WorkspaceAdapter())
     node.download_parallelism = 4

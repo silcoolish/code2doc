@@ -10,6 +10,7 @@ import json
 import re
 import asyncio
 import ast
+import copy
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 from urllib.parse import urlparse
@@ -20,6 +21,7 @@ from app.config import get_settings
 from app.core.nodes.base import WorkflowNode
 from app.core.state import AgentState, GenerationStatus
 from app.domain.drawio_architecture import DiagramArtifacts, render_drawio_architecture
+from app.domain.source_refs import is_function_source_ref
 from app.infrastructure.workspace import (
     UploadResourceResponse,
     WorkspaceServiceAdapter,
@@ -185,6 +187,8 @@ class ProcessImageBlocksNode(WorkflowNode):
             更新后的文档块列表
         """
         doc_blocks = await self._fill_missing_image_refs_from_source_refs(doc_blocks, repo_id)
+        # 图片之后可能因明确缺图或上传失败被过滤，先保留其精确源码引用
+        self._propagate_function_source_refs(doc_blocks)
         updated_blocks: List[Optional[Dict[str, Any]]] = [None] * len(doc_blocks)
         image_entries = [
             (index, block)
@@ -256,6 +260,79 @@ class ProcessImageBlocksNode(WorkflowNode):
             )
 
         return [block for block in updated_blocks if block is not None]
+
+    @classmethod
+    def _propagate_function_source_refs(
+        cls,
+        doc_blocks: List[Dict[str, Any]],
+    ) -> None:
+        """把函数流程图的精确源码引用回填到同组标题和内容块
+
+        仅在流程图包含唯一函数名，且最近标题与函数名精确一致时传播，
+        防止重载、同名函数或跨章节内容误绑定源码
+
+        Args:
+            doc_blocks: 按文档顺序排列的内容块，方法会原地更新空引用块
+        """
+        for image_index, image_block in enumerate(doc_blocks):
+            if image_block.get("blockType") != "image":
+                continue
+
+            function_refs = cls._extract_function_source_refs(image_block)
+            symbol_names = {
+                str(source_ref.get("symbolName") or source_ref.get("symbol_name") or "").strip()
+                for source_ref in function_refs
+            }
+            symbol_names.discard("")
+            if not function_refs or len(symbol_names) != 1:
+                continue
+
+            heading_index = cls._find_matching_function_heading(
+                doc_blocks,
+                image_index,
+                next(iter(symbol_names)),
+            )
+            if heading_index is None:
+                continue
+
+            # 只填充当前函数标题到流程图之间的空引用，不覆盖更精确的已有引用
+            for target_block in doc_blocks[heading_index:image_index]:
+                if target_block.get("sourceRefs") or target_block.get("source_refs"):
+                    continue
+                target_block["sourceRefs"] = copy.deepcopy(function_refs)
+
+    @staticmethod
+    def _extract_function_source_refs(
+        block: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        """提取明确指向 Method 或 Function 的源码引用"""
+        source_refs = block.get("sourceRefs") or block.get("source_refs") or []
+        if not isinstance(source_refs, list):
+            return []
+
+        function_refs: List[Dict[str, Any]] = []
+        for source_ref in source_refs:
+            if isinstance(source_ref, dict) and is_function_source_ref(source_ref):
+                function_refs.append(source_ref)
+        return function_refs
+
+    @staticmethod
+    def _find_matching_function_heading(
+        doc_blocks: List[Dict[str, Any]],
+        image_index: int,
+        symbol_name: str,
+    ) -> Optional[int]:
+        """从流程图向前查找同组且名称精确一致的最近标题
+
+        遇到最近标题后立即结束，不跨过其他函数或章节标题继续模糊查找
+        """
+        for index in range(image_index - 1, -1, -1):
+            block = doc_blocks[index]
+            if block.get("blockType") != "heading":
+                continue
+            heading_text = str(block.get("contentText") or "").strip()
+            return index if heading_text == symbol_name else None
+        return None
 
     async def _fill_missing_image_refs_from_source_refs(
         self,

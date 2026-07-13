@@ -15,6 +15,7 @@ from app.domain.prompts import (
     BATCH_CONTEXT_STRATEGY_PROMPT,
 )
 from app.domain.model import DocumentBlock, TemplateBlock
+from app.domain.source_refs import is_function_source_ref
 from app.utils.logger import get_logger
 from app.utils.token_estimator import TokenEstimator
 
@@ -412,7 +413,7 @@ class GenerationStrategy(ABC):
             "headerRow": header_row,
             "headerColumn": header_column,
             "expectedRows": len(rows_source) if rows_source else None,
-            "output": 'content_text 只返回 {"rows":[["单元格1","单元格2"]]}，不要返回 columns/cells/headerRow/headerColumn',
+            "output": 'content_text 只返回 {"rows":[["单元格1","单元格2"]]}；rows 仅包含数据行，严禁重复 columns 中的列名或表头；不要返回 columns/cells/headerRow/headerColumn',
         }
 
     @staticmethod
@@ -1206,21 +1207,12 @@ class BatchedGenerationStrategy(GenerationStrategy):
 
     @staticmethod
     def _has_function_source_refs(source_refs: Optional[List[Dict[str, Any]]]) -> bool:
-        """判断内容块是否已限定到一组真实函数源码"""
-        source_refs = source_refs or []
-        for source_ref in source_refs:
-            if not isinstance(source_ref, dict):
-                continue
-            values = [
-                source_ref.get("symbolType"),
-                source_ref.get("refType"),
-                source_ref.get("role"),
-                source_ref.get("nodeType"),
-                source_ref.get("type"),
-            ]
-            if any(str(value or "").strip().lower() in {"method", "function"} for value in values):
-                return True
-        return False
+        """判断内容块是否包含可作为批量并发锚点的真实函数源码引用"""
+        return any(
+            is_function_source_ref(source_ref)
+            for source_ref in source_refs or []
+            if isinstance(source_ref, dict)
+        )
 
     @staticmethod
     def _is_cross_context_template(block: TemplateBlock) -> bool:
