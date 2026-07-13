@@ -128,8 +128,6 @@ class ContentGeneratorAgent:
         Raises:
             RuntimeError: 当获取失败时
         """
-        import httpx
-
         settings = get_settings()
 
         # 根据模型名称判断使用哪个API
@@ -501,6 +499,37 @@ class ContentGeneratorAgent:
             else:
                 # 达到最大迭代次数
                 end_reason = "max_iterations_reached"
+
+            if isinstance(messages[-1], ToolMessage):
+                # 工具调用占满迭代轮次时，额外进行一次无工具收口，避免返回原始工具数据
+                messages.append(
+                    HumanMessage(
+                        content=(
+                            "工具调用轮次已结束。请根据已有工具结果完成最初任务，"
+                            "只返回任务要求的最终内容，不要解释，也不要复述工具原始响应。"
+                        )
+                    )
+                )
+                final_iteration += 1
+                agent_logger.log_llm_call(
+                    session_id=session_id,
+                    iteration=final_iteration,
+                    messages=self._serialize_messages(messages),
+                    model_name=self.model_name,
+                )
+                response = await self.llm.ainvoke(messages)
+                messages.append(response)
+                response_content = (
+                    response.content if hasattr(response, "content") else str(response)
+                )
+                agent_logger.log_llm_response(
+                    session_id=session_id,
+                    iteration=final_iteration,
+                    response_content=response_content,
+                    tool_calls=None,
+                    model_name=self.model_name,
+                )
+                end_reason = "max_iterations_finalized"
 
             final_response = messages[-1]
             final_content = final_response.content if hasattr(final_response, "content") else str(final_response)

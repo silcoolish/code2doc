@@ -237,6 +237,20 @@ def test_outline_confirmation_assigns_order_no_incrementally():
     assert order_numbers == sorted(order_numbers)
     assert len(order_numbers) == len(set(order_numbers))
 
+
+def test_outline_confirmation_parses_json_array_surrounded_by_explanation():
+    raw_content = '已按源码职责完成模块划分：\n["传感器模块", "控制模块"]\n以上为全部模块。'
+
+    items = OutlineConfirmationNode(_ContentGenerator())._parse_string_list(raw_content)
+
+    assert items == ["传感器模块", "控制模块"]
+
+
+def test_outline_confirmation_recognizes_function_ref_by_method_id():
+    source_refs = [{"sourceId": "method_repo_src/system.c_System_Init"}]
+
+    assert OutlineConfirmationNode._has_function_source_ref(source_refs)
+
 class _ConcurrentPromptDrivenAgent:
     def __init__(self):
         self.active_calls = 0
@@ -311,3 +325,136 @@ async def test_outline_confirmation_expands_nested_lists_with_bounded_parallelis
     assert result["error"] is None
     assert agent.max_active_calls == 3
     assert headings == expected_headings
+
+
+class _ParagraphListAgent:
+    async def generate_with_tools(self, **kwargs):
+        return '["导航模块", "控制模块"]'
+
+
+class _ParagraphListContentGenerator:
+    agent = _ParagraphListAgent()
+    static_list_provider = _StaticListProvider()
+
+
+class _RepairingListAgent:
+    def __init__(self):
+        self.calls = 0
+
+    async def generate_with_tools(self, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            return "{'repo_id': 'repo-1', 'nodes': [{'name': 'Sensor_Init'}]}"
+        return '["Sensor_Init", "Sensor_Read"]'
+
+
+class _RepairingListContentGenerator:
+    agent = _RepairingListAgent()
+    static_list_provider = _StaticListProvider()
+
+
+@pytest.mark.asyncio
+async def test_outline_confirmation_expands_explicit_children_for_paragraph_list():
+    node = OutlineConfirmationNode(_ParagraphListContentGenerator())
+    state = create_initial_state(repo_id="repo-1", template_id="tpl-1")
+    state["blocks"] = [
+        TemplateBlock(
+            id="module-list",
+            parent_block_id=None,
+            block_type="paragraph",
+            heading_level=0,
+            order_no="a",
+            content_text="模块说明条目",
+            attrs={"templateType": "template", "isList": True, "prompt": "生成模块"},
+        ),
+        TemplateBlock(
+            id="module-body",
+            parent_block_id="module-list",
+            block_type="paragraph",
+            heading_level=0,
+            order_no="b",
+            content_text="模块正文",
+            attrs={"templateType": "template", "prompt": "描述当前模块"},
+        ),
+        TemplateBlock(
+            id="module-table",
+            parent_block_id="module-list",
+            block_type="table",
+            heading_level=0,
+            order_no="c",
+            content_text="模块主要函数表",
+            attrs={"templateType": "template", "prompt": "生成当前模块主要函数表"},
+        ),
+        TemplateBlock(
+            id="entry-heading",
+            parent_block_id=None,
+            block_type="heading",
+            heading_level=2,
+            order_no="d",
+            content_text="功能入口设计",
+            attrs={"templateType": "static"},
+        ),
+    ]
+
+    result = await node.execute(state)
+
+    assert result["error"] is None
+    assert [block.content_text for block in result["blocks"]] == [
+        "导航模块",
+        "模块正文",
+        "模块主要函数表",
+        "控制模块",
+        "模块正文",
+        "模块主要函数表",
+        "功能入口设计",
+    ]
+    assert result["blocks"][0].attrs["templateType"] == "static"
+    assert result["blocks"][3].attrs["templateType"] == "static"
+
+
+@pytest.mark.asyncio
+async def test_outline_confirmation_retries_invalid_tool_payload_list_item():
+    agent = _RepairingListContentGenerator.agent
+    agent.calls = 0
+    node = OutlineConfirmationNode(_RepairingListContentGenerator())
+    block = TemplateBlock(
+        id="function-list",
+        parent_block_id=None,
+        block_type="heading",
+        heading_level=3,
+        order_no="a",
+        content_text="动态函数标题",
+        attrs={"templateType": "template", "isList": True, "prompt": "生成函数"},
+    )
+
+    items = await node._generate_list_items(block, "repo-1")
+
+    assert items == ["Sensor_Init", "Sensor_Read"]
+    assert agent.calls == 2
+
+
+class _InvalidListAgent:
+    async def generate_with_tools(self, **kwargs):
+        return "{'repo_id': 'repo-1', 'nodes': [{'name': 'Sensor_Init'}]}"
+
+
+class _InvalidListContentGenerator:
+    agent = _InvalidListAgent()
+    static_list_provider = _StaticListProvider()
+
+
+@pytest.mark.asyncio
+async def test_outline_confirmation_fails_when_invalid_list_retry_still_invalid():
+    node = OutlineConfirmationNode(_InvalidListContentGenerator())
+    block = TemplateBlock(
+        id="function-list",
+        parent_block_id=None,
+        block_type="heading",
+        heading_level=3,
+        order_no="a",
+        content_text="动态函数标题",
+        attrs={"templateType": "template", "isList": True, "prompt": "生成函数"},
+    )
+
+    with pytest.raises(ValueError, match="重试后仍无法收口"):
+        await node._generate_list_items(block, "repo-1")

@@ -12,6 +12,7 @@ from app.core.state import AgentState, GenerationStatus
 from app.domain.content_generator import ContentGenerator
 from app.domain.model import TemplateBlock
 from app.domain.prompts import LIST_GENERATION_SYSTEM_PROMPT
+from app.domain.source_refs import is_function_source_ref
 from app.utils.logger import get_logger
 from app.utils.timing import log_timing
 
@@ -20,6 +21,8 @@ logger = get_logger(__name__)
 _EXPAND_PROGRESS_INTERVAL = 50
 _ORDER_KEY_LENGTH = 8
 _ORDER_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+_MAX_LIST_ITEM_LENGTH = 120
+_LIST_REPAIR_INPUT_LIMIT = 12000
 _STATIC_LIST_NAMES = {
     "get_all_methods": "函数列表",
     "get_all_classes": "类列表",
@@ -209,22 +212,11 @@ class OutlineConfirmationNode(WorkflowNode):
     @staticmethod
     def _has_function_source_ref(source_refs: List[Dict[str, Any]]) -> bool:
         """判断源码引用是否指向函数或方法节点"""
-        for source_ref in source_refs:
-            if not isinstance(source_ref, dict):
-                continue
-            values = [
-                source_ref.get("symbolType"),
-                source_ref.get("refType"),
-                source_ref.get("role"),
-                source_ref.get("nodeType"),
-                source_ref.get("type"),
-            ]
-            if any(
-                str(value or "").strip().lower() in {"method", "function"}
-                for value in values
-            ):
-                return True
-        return False
+        return any(
+            is_function_source_ref(source_ref)
+            for source_ref in source_refs
+            if isinstance(source_ref, dict)
+        )
 
     @staticmethod
     def _assign_block_identity(blocks: List[TemplateBlock]) -> None:
@@ -264,6 +256,9 @@ class OutlineConfirmationNode(WorkflowNode):
     ) -> List[TemplateBlock]:
         """识别父内容块的子内容块.
 
+        模板显式配置 parent_block_id 时优先按父子关系识别连续子树，
+        允许正文列表复制正文、表格等非标题子块。
+
         子内容块定义为：在扁平列表中，位于父块之后，且 heading_level
         大于父块 heading_level 的连续内容块，直到遇到 heading_level
         小于或等于父块的块为止。
@@ -271,6 +266,18 @@ class OutlineConfirmationNode(WorkflowNode):
         非标题块的 heading_level 可能为 null/None，统一视为 99。
         """
         parent = blocks[parent_index]
+
+        # 显式父子关系允许非标题列表拥有正文、表格等子块
+        descendant_ids = {parent.id}
+        explicit_children: List[TemplateBlock] = []
+        for candidate in blocks[parent_index + 1 :]:
+            if candidate.parent_block_id not in descendant_ids:
+                break
+            explicit_children.append(candidate)
+            descendant_ids.add(candidate.id)
+        if explicit_children:
+            return explicit_children
+
         parent_level = parent.heading_level or 99
         children: List[TemplateBlock] = []
         for j in range(parent_index + 1, len(blocks)):
@@ -322,16 +329,39 @@ class OutlineConfirmationNode(WorkflowNode):
             parent_context,
         )
         items = self._parse_string_list(raw_content)
+        if self._are_valid_list_items(items):
+            return items
 
-        if not items:
-            logger.warning(
-                "llm_list_generation_empty",
+        logger.warning(
+            "llm_list_generation_invalid_retrying",
+            prompt=block.prompt,
+            parent_context=parent_context,
+            item_count=len(items),
+            raw_preview=raw_content[:500],
+        )
+        repaired_content = await self._repair_list_items(
+            prompt=block.prompt or "",
+            raw_content=raw_content,
+            repo_id=repo_id,
+            parent_context=parent_context,
+        )
+        repaired_items = self._parse_string_list(repaired_content)
+        if self._are_valid_list_items(repaired_items):
+            logger.info(
+                "llm_list_generation_repair_success",
                 prompt=block.prompt,
                 parent_context=parent_context,
+                item_count=len(repaired_items),
             )
-            items = [block.prompt or "未命名项"]
+            return repaired_items
 
-        return items
+        logger.error(
+            "llm_list_generation_repair_failed",
+            prompt=block.prompt,
+            parent_context=parent_context,
+            raw_preview=repaired_content[:500],
+        )
+        raise ValueError("列表生成结果格式异常，重试后仍无法收口为字符串数组")
 
     @staticmethod
     def _get_static_list_name(list_tool: str) -> str:
@@ -361,6 +391,67 @@ class OutlineConfirmationNode(WorkflowNode):
             max_iterations=10,
         )
 
+    async def _repair_list_items(
+        self,
+        prompt: str,
+        raw_content: str,
+        repo_id: str,
+        parent_context: str = "",
+    ) -> str:
+        """用上一轮输出重试收口字符串数组
+
+        修复轮次复用已经查询到的内容，只负责提取列表，不重新设计任务
+
+        Args:
+            prompt: 原始列表生成要求
+            raw_content: 首轮未通过格式校验的输出
+            repo_id: 当前仓库 ID
+            parent_context: 父列表项上下文
+
+        Returns:
+            修复后的模型原始输出
+        """
+        task_parts = [f"仓库ID: {repo_id}"]
+        if parent_context:
+            task_parts.append(f"当前上下文：{parent_context}")
+        task_parts.extend(
+            [
+                f"原始任务：{prompt}",
+                "上一轮已经完成信息查询，但最终格式不合法。不要重新调用工具，"
+                "只从下面的原始输出中提取符合原始任务的列表项，并直接返回 JSON 字符串数组。",
+                "原始输出：",
+                raw_content[:_LIST_REPAIR_INPUT_LIMIT],
+            ]
+        )
+        return await self.agent.generate_with_tools(
+            system_prompt=LIST_GENERATION_SYSTEM_PROMPT,
+            task_message="\n".join(task_parts),
+            repo_id=repo_id,
+            task_name="list_generation_repair",
+            max_iterations=3,
+        )
+
+    @staticmethod
+    def _are_valid_list_items(items: List[str]) -> bool:
+        """校验列表项是否可直接作为大纲条目
+
+        拒绝工具原始对象、嵌套 JSON、多行内容和异常长条目，避免模型工具响应
+        被误当成标题或模块名称写入文档
+        """
+        if not items:
+            return False
+        for item in items:
+            if not isinstance(item, str):
+                return False
+            value = item.strip()
+            if not value or len(value) > _MAX_LIST_ITEM_LENGTH or "\n" in value:
+                return False
+            if (value.startswith("{") and value.endswith("}")) or (
+                value.startswith("[") and value.endswith("]")
+            ):
+                return False
+        return True
+
     def _create_item_block(
         self,
         original: TemplateBlock,
@@ -376,8 +467,8 @@ class OutlineConfirmationNode(WorkflowNode):
         new_block.attrs.pop("prompt", None)
         new_block.attrs.pop("example", None)
 
-        if new_block.block_type == "heading":
-            new_block.attrs["templateType"] = "static"
+        # 列表项名称已经生成完成，后续只作为子块的上下文使用
+        new_block.attrs["templateType"] = "static"
 
         if source_refs:
             new_block.source_refs = source_refs
@@ -427,6 +518,24 @@ class OutlineConfirmationNode(WorkflowNode):
                         ]
         except json.JSONDecodeError:
             pass
+
+        # 兼容模型在 JSON 数组前后附带少量说明文字
+        decoder = json.JSONDecoder()
+        for start, char in enumerate(content):
+            if char != "[":
+                continue
+            try:
+                data, _ = decoder.raw_decode(content[start:])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(data, list):
+                items = [
+                    str(item)
+                    for item in data
+                    if item is not None and str(item).strip()
+                ]
+                if items:
+                    return items
 
         # 降级：按行解析 markdown 列表
         items: List[str] = []
