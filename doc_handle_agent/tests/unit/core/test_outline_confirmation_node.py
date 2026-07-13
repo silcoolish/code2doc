@@ -246,6 +246,15 @@ def test_outline_confirmation_parses_json_array_surrounded_by_explanation():
     assert items == ["传感器模块", "控制模块"]
 
 
+def test_outline_confirmation_distinguishes_explicit_empty_list_from_parse_failure():
+    node = OutlineConfirmationNode(_ContentGenerator())
+
+    assert node._parse_string_list("说明文字\n```json\n[]\n```") == []
+    assert node._parse_string_list("") is None
+    assert node._are_valid_list_items([])
+    assert not node._are_valid_list_items(None)
+
+
 def test_outline_confirmation_recognizes_function_ref_by_method_id():
     source_refs = [{"sourceId": "method_repo_src/system.c_System_Init"}]
 
@@ -353,6 +362,20 @@ class _RepairingListContentGenerator:
     static_list_provider = _StaticListProvider()
 
 
+class _EmptyListAgent:
+    def __init__(self):
+        self.calls = 0
+
+    async def generate_with_tools(self, **kwargs):
+        self.calls += 1
+        return "当前项目没有生产入口。\n```json\n[]\n```"
+
+
+class _EmptyListContentGenerator:
+    agent = _EmptyListAgent()
+    static_list_provider = _StaticListProvider()
+
+
 @pytest.mark.asyncio
 async def test_outline_confirmation_expands_explicit_children_for_paragraph_list():
     node = OutlineConfirmationNode(_ParagraphListContentGenerator())
@@ -431,6 +454,76 @@ async def test_outline_confirmation_retries_invalid_tool_payload_list_item():
 
     assert items == ["Sensor_Init", "Sensor_Read"]
     assert agent.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_outline_confirmation_accepts_explicit_empty_dynamic_list_without_retry():
+    agent = _EmptyListContentGenerator.agent
+    agent.calls = 0
+    node = OutlineConfirmationNode(_EmptyListContentGenerator())
+    block = TemplateBlock(
+        id="entry-list",
+        parent_block_id=None,
+        block_type="heading",
+        heading_level=3,
+        order_no="a",
+        content_text="动态入口函数标题",
+        attrs={"templateType": "template", "isList": True, "prompt": "生成入口函数"},
+    )
+
+    items = await node._generate_list_items(block, "repo-1")
+
+    assert items == []
+    assert agent.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_outline_confirmation_replaces_empty_list_with_visible_explanation():
+    agent = _EmptyListContentGenerator.agent
+    agent.calls = 0
+    node = OutlineConfirmationNode(_EmptyListContentGenerator())
+    state = create_initial_state(repo_id="repo-1", template_id="tpl-1")
+    state["blocks"] = [
+        TemplateBlock(
+            id="entry-list",
+            parent_block_id=None,
+            block_type="heading",
+            heading_level=3,
+            order_no="a",
+            content_text="动态入口函数标题",
+            attrs={
+                "templateType": "template",
+                "isList": True,
+                "prompt": "生成入口函数",
+                "emptyText": "经源码分析，未发现生产功能入口。",
+            },
+        ),
+        TemplateBlock(
+            id="entry-table",
+            parent_block_id="entry-list",
+            block_type="table",
+            heading_level=0,
+            order_no="b",
+            content_text="函数设计表",
+            attrs={"templateType": "template"},
+        ),
+        TemplateBlock(
+            id="module-heading",
+            parent_block_id=None,
+            block_type="heading",
+            heading_level=2,
+            order_no="c",
+            content_text="后续模块",
+            attrs={"templateType": "static"},
+        ),
+    ]
+
+    result = await node.execute(state)
+
+    assert result["error"] is None
+    assert [block.block_type for block in result["blocks"]] == ["paragraph", "heading"]
+    assert result["blocks"][0].content_text == "经源码分析，未发现生产功能入口。"
+    assert result["blocks"][1].content_text == "后续模块"
 
 
 class _InvalidListAgent:

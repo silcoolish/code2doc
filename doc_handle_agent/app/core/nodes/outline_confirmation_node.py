@@ -138,6 +138,12 @@ class OutlineConfirmationNode(WorkflowNode):
                         self._build_list_expand_message(block, len(items)),
                     )
 
+                if not items:
+                    # 合法空列表保留可见说明，避免固定章节为空且不阻断整篇文档
+                    result.append(self._create_empty_list_block(block))
+                    i += 1 + len(children)
+                    continue
+
                 async def expand_item(item: Any) -> List[TemplateBlock]:
                     item_text = item.name if hasattr(item, "name") else str(item)
                     item_source_refs = item.source_refs if hasattr(item, "source_refs") else []
@@ -336,7 +342,7 @@ class OutlineConfirmationNode(WorkflowNode):
             "llm_list_generation_invalid_retrying",
             prompt=block.prompt,
             parent_context=parent_context,
-            item_count=len(items),
+            item_count=len(items or []),
             raw_preview=raw_content[:500],
         )
         repaired_content = await self._repair_list_items(
@@ -432,13 +438,14 @@ class OutlineConfirmationNode(WorkflowNode):
         )
 
     @staticmethod
-    def _are_valid_list_items(items: List[str]) -> bool:
+    def _are_valid_list_items(items: Optional[List[str]]) -> bool:
         """校验列表项是否可直接作为大纲条目
 
         拒绝工具原始对象、嵌套 JSON、多行内容和异常长条目，避免模型工具响应
-        被误当成标题或模块名称写入文档
+        被误当成标题或模块名称写入文档。明确解析出的空数组表示当前列表无条目，
+        与解析失败的 None 分开处理
         """
-        if not items:
+        if items is None:
             return False
         for item in items:
             if not isinstance(item, str):
@@ -477,7 +484,36 @@ class OutlineConfirmationNode(WorkflowNode):
 
         return new_block
 
-    def _parse_string_list(self, raw_content: str) -> List[str]:
+    @staticmethod
+    def _create_empty_list_block(original: TemplateBlock) -> TemplateBlock:
+        """为合法空动态列表创建可见说明块
+
+        模板可以通过 emptyText 指定领域化文案；未配置时使用通用说明，
+        保证纯库项目或无匹配源码的章节仍能说明实际分析结果
+
+        Args:
+            original: 返回空数组的动态列表模板块
+
+        Returns:
+            替代动态列表及其子块的静态正文块
+        """
+        empty_block = copy.deepcopy(original)
+        empty_block.id = ""
+        empty_block.block_type = "paragraph"
+        empty_block.heading_level = 0
+        empty_block.content_text = str(
+            original.attrs.get("emptyText")
+            or "经源码分析，未发现符合当前条件的内容。"
+        ).strip()
+        empty_block.attrs.pop("isList", None)
+        empty_block.attrs.pop("prompt", None)
+        empty_block.attrs.pop("example", None)
+        empty_block.attrs.pop("list_tool", None)
+        empty_block.attrs["templateType"] = "static"
+        empty_block.attrs["template_block_id"] = original.id
+        return empty_block
+
+    def _parse_string_list(self, raw_content: str) -> Optional[List[str]]:
         """从 LLM 响应中解析字符串数组.
 
         支持以下格式：
@@ -534,6 +570,7 @@ class OutlineConfirmationNode(WorkflowNode):
                     for item in data
                     if item is not None and str(item).strip()
                 ]
+                # 说明文字中的空方括号含义不明确，仅接受完整或 fenced JSON 的空数组
                 if items:
                     return items
 
@@ -548,4 +585,4 @@ class OutlineConfirmationNode(WorkflowNode):
             if cleaned and cleaned not in ("[", "]", "{", "}", "``"):
                 items.append(cleaned)
 
-        return items
+        return items or None

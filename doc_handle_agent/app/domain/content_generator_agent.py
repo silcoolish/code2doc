@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 import uuid
 from contextvars import ContextVar
 from typing import Any, Dict, List, Optional
@@ -15,6 +16,12 @@ from app.utils.agent_logger import get_agent_logger
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+_FINALIZATION_MAX_ATTEMPTS = 3
+_TEXTUAL_TOOL_CALL_PATTERN = re.compile(
+    r"^<[|｜]+DSML[|｜]+tool_calls>",
+    re.IGNORECASE,
+)
 _agent_logger_var: ContextVar[Any] = ContextVar("agent_logger", default=None)
 
 
@@ -401,6 +408,16 @@ class ContentGeneratorAgent:
                     extra_count=len(extra_tools),
                     total=len(tools),
                 )
+            repo_scoped_tool_names = {
+                tool.get("function", {}).get("name")
+                for tool in tools
+                if "repo_id"
+                in (
+                    tool.get("function", {})
+                    .get("parameters", {})
+                    .get("properties", {})
+                )
+            }
             llm_with_tools = self.llm.bind_tools(tools)
 
             messages = [
@@ -452,9 +469,18 @@ class ContentGeneratorAgent:
                 if hasattr(response, "tool_calls") and response.tool_calls:
                     for tool_call in response.tool_calls:
                         tool_name = tool_call.get("name", "")
-                        tool_args = tool_call.get("args", {})
+                        tool_args = dict(tool_call.get("args") or {})
 
-                        if "repo_id" not in tool_args:
+                        if tool_name in repo_scoped_tool_names:
+                            model_repo_id = str(tool_args.get("repo_id") or "").strip()
+                            if model_repo_id and model_repo_id != repo_id:
+                                logger.warning(
+                                    "tool_repo_id_overridden",
+                                    tool_name=tool_name,
+                                    model_repo_id=model_repo_id,
+                                    workflow_repo_id=repo_id,
+                                )
+                            # repo_id 来自工作流可信上下文，禁止模型改写或跨仓库查询
                             tool_args["repo_id"] = repo_id
 
                         # 记录工具调用请求
@@ -510,26 +536,51 @@ class ContentGeneratorAgent:
                         )
                     )
                 )
-                final_iteration += 1
-                agent_logger.log_llm_call(
-                    session_id=session_id,
-                    iteration=final_iteration,
-                    messages=self._serialize_messages(messages),
-                    model_name=self.model_name,
-                )
-                response = await self.llm.ainvoke(messages)
-                messages.append(response)
-                response_content = (
-                    response.content if hasattr(response, "content") else str(response)
-                )
-                agent_logger.log_llm_response(
-                    session_id=session_id,
-                    iteration=final_iteration,
-                    response_content=response_content,
-                    tool_calls=None,
-                    model_name=self.model_name,
-                )
-                end_reason = "max_iterations_finalized"
+                for attempt in range(1, _FINALIZATION_MAX_ATTEMPTS + 1):
+                    final_iteration += 1
+                    agent_logger.log_llm_call(
+                        session_id=session_id,
+                        iteration=final_iteration,
+                        messages=self._serialize_messages(messages),
+                        model_name=self.model_name,
+                    )
+                    response = await self.llm.ainvoke(messages)
+                    messages.append(response)
+                    response_content = (
+                        response.content
+                        if hasattr(response, "content")
+                        else str(response)
+                    )
+                    agent_logger.log_llm_response(
+                        session_id=session_id,
+                        iteration=final_iteration,
+                        response_content=response_content,
+                        tool_calls=None,
+                        model_name=self.model_name,
+                    )
+                    has_tool_call = bool(getattr(response, "tool_calls", None)) or (
+                        self._is_textual_tool_call(response_content)
+                    )
+                    if not has_tool_call:
+                        end_reason = "max_iterations_finalized"
+                        break
+
+                    logger.warning(
+                        "max_iterations_finalization_returned_tool_call",
+                        attempt=attempt,
+                        max_attempts=_FINALIZATION_MAX_ATTEMPTS,
+                    )
+                    if attempt < _FINALIZATION_MAX_ATTEMPTS:
+                        messages.append(
+                            HumanMessage(
+                                content=(
+                                    "检测到你仍返回了工具调用，但当前已禁止继续调用工具。"
+                                    "请仅依据已有工具结果直接完成最初任务，严格返回要求的最终格式。"
+                                )
+                            )
+                        )
+                else:
+                    end_reason = "max_iterations_finalization_failed"
 
             final_response = messages[-1]
             final_content = final_response.content if hasattr(final_response, "content") else str(final_response)
@@ -542,10 +593,21 @@ class ContentGeneratorAgent:
                 reason=end_reason,
             )
 
+            if end_reason == "max_iterations_finalization_failed":
+                raise RuntimeError("模型在最终收口阶段仍持续请求工具调用")
+
             return final_content
         finally:
             # 流程结束，解绑日志记录器
             self._agent_logger_var.reset(logger_token)
+
+    @staticmethod
+    def _is_textual_tool_call(content: str) -> bool:
+        """判断无工具收口响应是否仍是文本形式的工具调用"""
+        normalized = str(content or "").lstrip()
+        return bool(_TEXTUAL_TOOL_CALL_PATTERN.match(normalized)) or normalized.startswith(
+            ("<tool_calls>", '{"tool_calls"')
+        )
 
     @staticmethod
     def _sanitize_tool_args(tool_args: Dict[str, Any]) -> Dict[str, Any]:
