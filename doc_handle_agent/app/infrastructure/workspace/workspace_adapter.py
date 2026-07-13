@@ -331,6 +331,42 @@ class WorkspaceServiceAdapter:
             )
             raise
 
+    async def get_repo_name(self, repo_id: str) -> str:
+        """获取仓库显示名称
+
+        Args:
+            repo_id: 仓库 ID
+
+        Returns:
+            仓库显示名称，不存在时返回空字符串
+        """
+        response = await self.http.get(
+            self._build_url(f"/api/repos/{repo_id}"),
+            headers=self._auth_headers(),
+        )
+        if not response.get("success"):
+            raise ValueError(response.get("message", "Failed to get repository"))
+        data = response.get("data") or {}
+        return str(data.get("repoName") or "").strip()
+
+    async def get_template_name(self, template_id: str) -> str:
+        """获取模板显示名称
+
+        Args:
+            template_id: 模板 ID
+
+        Returns:
+            模板显示名称，不存在时返回空字符串
+        """
+        response = await self.http.get(
+            self._build_url(f"/api/templates/{template_id}"),
+            headers=self._auth_headers(),
+        )
+        if not response.get("success"):
+            raise ValueError(response.get("message", "Failed to get template"))
+        data = response.get("data") or {}
+        return str(data.get("templateName") or data.get("title") or "").strip()
+
     async def save_document(self, request: SaveDocumentRequest) -> SaveDocumentResponse:
         """创建或保存文档.
 

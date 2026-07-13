@@ -3,6 +3,8 @@
 负责调用 workspace_service API 创建文档，获取 document_id。
 """
 
+import asyncio
+import re
 from typing import Optional
 
 from app.core.nodes.base import WorkflowNode
@@ -49,7 +51,7 @@ class CreateDocumentNode(WorkflowNode):
             if reporter:
                 await reporter.report_percent(0, "正在创建文档...")
 
-            title = self._extract_title(state)
+            title = await self._resolve_title(state)
             state["title"] = title
 
             # 创建文档时不传 blocks，由 store_block_list 统一保存
@@ -95,8 +97,50 @@ class CreateDocumentNode(WorkflowNode):
 
         return state
 
-    def _extract_title(self, state: AgentState) -> str:
-        """从生成的 blocks 中提取文档标题."""
+    async def _resolve_title(self, state: AgentState) -> str:
+        """按项目名称和模板名称生成稳定的文档标题
+
+        元数据读取失败时不影响文档生成，依次退化为可用的单项名称、
+        大纲首个标题和固定默认名称
+
+        Args:
+            state: 当前工作流状态
+
+        Returns:
+            用于创建文档的标题
+        """
+        repo_result, template_result = await asyncio.gather(
+            self.workspace_adapter.get_repo_name(state.get("repo_id", "")),
+            self.workspace_adapter.get_template_name(state.get("template_id", "")),
+            return_exceptions=True,
+        )
+        if isinstance(repo_result, Exception):
+            logger.warning(
+                "document_title_repo_name_unavailable",
+                repo_id=state.get("repo_id"),
+                error=str(repo_result),
+            )
+        if isinstance(template_result, Exception):
+            logger.warning(
+                "document_title_template_name_unavailable",
+                template_id=state.get("template_id"),
+                error=str(template_result),
+            )
+        repo_name = repo_result if isinstance(repo_result, str) else ""
+        template_name = template_result if isinstance(template_result, str) else ""
+        document_type = re.sub(r"\s*模板\s*$", "", template_name).strip()
+
+        if repo_name and document_type:
+            return f"{repo_name} - {document_type}"
+        if document_type:
+            return document_type
+        if repo_name:
+            return repo_name
+        return self._extract_outline_title(state)
+
+    @staticmethod
+    def _extract_outline_title(state: AgentState) -> str:
+        """从大纲提取旧版兼容标题"""
         blocks = state.get("blocks", [])
         if not blocks:
             return "项目文档"
