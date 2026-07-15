@@ -9,6 +9,7 @@ from json_repair import repair_json
 from app.domain.content_generator import ContentGenerator
 from app.core.nodes.base import WorkflowNode
 from app.core.state import AgentState, GenerationStatus
+from app.domain.document_caption import normalize_document_caption
 from app.domain.model import TemplateBlock, DocumentBlock
 from app.utils.logger import get_logger
 from app.utils.timing import log_timing
@@ -129,6 +130,22 @@ class GenerateBlocksNode(WorkflowNode):
             if block:
                 if result.source_refs:
                     block.source_refs = result.source_refs
+                generated_caption = normalize_document_caption(
+                    result.caption,
+                    self._resolve_output_block_type(block),
+                )
+                existing_caption = block.attrs.get("caption")
+                if (
+                    generated_caption
+                    and not (isinstance(existing_caption, str) and existing_caption.strip())
+                    and (
+                        block.is_table
+                        or block.is_image_block
+                        or block.is_mermaid
+                        or block.is_drawio_architecture
+                    )
+                ):
+                    block.attrs["caption"] = generated_caption
                 if block.is_table:
                     # 静态表格已经有结构化 attrs.table，这里只保留展示文本，避免把摘要文案再当 JSON 解析
                     if not block.is_template and isinstance(block.attrs.get("table"), dict):

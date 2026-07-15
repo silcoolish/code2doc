@@ -353,6 +353,14 @@ class GenerationStrategy(ABC):
                 "content_text": block.content_text,
                 "template": "template" if block.is_template else "static",
             }
+            if (
+                block.is_table
+                or block.is_image_block
+                or block.is_mermaid
+                or block.is_drawio_architecture
+            ):
+                caption = block.attrs.get("caption")
+                data["caption"] = caption if isinstance(caption, str) else ""
             if block.is_template:
                 if block.prompt:
                     data["prompt"] = block.prompt
@@ -527,7 +535,7 @@ class GenerationStrategy(ABC):
         """从响应中解析block列表（只支持新JSON格式）.
 
         支持格式：
-        - 新格式: [{"id": "...", "block_type": "paragraph", "content_text": "..."}, ...]
+        - 新格式: [{"id": "...", "block_type": "table", "content_text": {...}, "caption": "..."}, ...]
 
         Args:
             raw_content: 原始响应内容
@@ -562,6 +570,9 @@ class GenerationStrategy(ABC):
                 source_refs = item.get("sourceRefs") or item.get("source_refs") or []
                 if not isinstance(source_refs, list):
                     source_refs = []
+                caption = item.get("caption")
+                if not isinstance(caption, str):
+                    caption = None
                 content = self._normalize_generated_content(block_type, content)
 
                 results.append(
@@ -571,6 +582,7 @@ class GenerationStrategy(ABC):
                         text_content=content,
                         heading_level=heading_level,
                         source_refs=source_refs,
+                        caption=caption,
                     )
                 )
 
@@ -1550,6 +1562,14 @@ class BatchedGenerationStrategy(GenerationStrategy):
                 "content_text": block.content_text,
                 "template": "template" if should_generate else "static",
             }
+            if (
+                block.is_table
+                or block.is_image_block
+                or block.is_mermaid
+                or block.is_drawio_architecture
+            ):
+                caption = block.attrs.get("caption")
+                data["caption"] = caption if isinstance(caption, str) else ""
             if should_generate:
                 if block.prompt:
                     data["prompt"] = block.prompt

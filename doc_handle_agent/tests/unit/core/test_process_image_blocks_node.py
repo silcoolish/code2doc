@@ -362,6 +362,40 @@ async def test_missing_image_reference_is_kept_without_confirmation():
 
 
 @pytest.mark.asyncio
+async def test_process_image_block_preserves_explicit_caption():
+    node = ProcessImageBlocksNode(_WorkspaceAdapter())
+    node.process_drawio = False
+
+    async def download_file(url, max_retries=3, client=None):
+        return b"image"
+
+    async def upload_resource(
+        file_name,
+        file_content,
+        document_id,
+        resource_type,
+        block_id=None,
+        client=None,
+    ):
+        return _UploadResponse()
+
+    node._download_file = download_file
+    node._upload_resource = upload_resource
+    block = {
+        "id": "img-1",
+        "blockType": "image",
+        "contentText": "main.flowchart.svg",
+        "attrs": {"caption": "main函数流程图"},
+    }
+
+    result = await node._process_image_block(block, "doc-1", "repo-1")
+
+    assert result["contentText"] == "main函数流程图"
+    assert result["attrs"]["caption"] == "main函数流程图"
+    assert result["attrs"]["alt"] == "main函数流程图"
+
+
+@pytest.mark.asyncio
 async def test_process_drawio_architecture_block_uploads_drawio_asset():
     node = ProcessImageBlocksNode(_WorkspaceAdapter())
     uploads = []
@@ -415,6 +449,74 @@ async def test_process_drawio_architecture_block_uploads_drawio_asset():
     assert uploads[0][0].endswith(".drawio")
     assert uploads[0][2] == "drawio"
     assert b"mxGraphModel" in uploads[0][1]
+
+
+@pytest.mark.asyncio
+async def test_process_drawio_architecture_block_preserves_explicit_caption():
+    node = ProcessImageBlocksNode(_WorkspaceAdapter())
+
+    async def upload_resource(
+        file_name,
+        file_content,
+        document_id,
+        resource_type,
+        block_id=None,
+        client=None,
+    ):
+        return _UploadResponseWithId("asset-drawio")
+
+    node._upload_resource = upload_resource
+    block = {
+        "id": "architecture-1",
+        "blockType": "image",
+        "contentText": {
+            "title": "模型生成的架构图名称",
+            "layers": [
+                {"id": "entry", "name": "入口层", "items": [{"id": "main", "name": "主入口"}]},
+                {"id": "core", "name": "核心层", "items": [{"id": "run", "name": "核心处理"}]},
+            ],
+        },
+        "attrs": {"format": "drawio_architecture", "caption": "项目总体架构图"},
+    }
+
+    result = await node._process_image_block(block, "doc-1", "repo-1")
+
+    assert result["contentText"] == "项目总体架构图"
+    assert result["attrs"]["caption"] == "项目总体架构图"
+    assert result["attrs"]["alt"] == "项目总体架构图"
+
+
+@pytest.mark.asyncio
+async def test_process_drawio_architecture_block_uses_title_from_fenced_json():
+    node = ProcessImageBlocksNode(_WorkspaceAdapter())
+
+    async def upload_resource(
+        file_name,
+        file_content,
+        document_id,
+        resource_type,
+        block_id=None,
+        client=None,
+    ):
+        return _UploadResponseWithId("asset-drawio")
+
+    node._upload_resource = upload_resource
+    block = {
+        "id": "architecture-1",
+        "blockType": "image",
+        "contentText": (
+            "```json\n"
+            '{"title":"订单系统架构图","layers":['
+            '{"id":"service","name":"服务层","items":[]}]}'
+            "\n```"
+        ),
+        "attrs": {"format": "drawio_architecture"},
+    }
+
+    result = await node._process_image_block(block, "doc-1", "repo-1")
+
+    assert result["contentText"] == "订单系统架构图"
+    assert result["attrs"]["caption"] == "订单系统架构图"
 
 
 @pytest.mark.asyncio

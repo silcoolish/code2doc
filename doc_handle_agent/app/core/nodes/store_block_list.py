@@ -4,6 +4,7 @@ from typing import Optional
 
 from app.core.nodes.base import WorkflowNode
 from app.core.state import AgentState, GenerationStatus
+from app.domain.document_caption import fill_missing_document_block_captions
 from app.infrastructure.workspace import (
     SaveDocumentRequest,
     WorkspaceServiceAdapter,
@@ -61,6 +62,9 @@ class StoreBlockListNode(WorkflowNode):
                 # create_document 只创建占位文档；这里如果拿不到最终块，继续保存会把
                 # 任务伪装成成功，因此直接失败交给上层处理。
                 raise RuntimeError("No document blocks generated to persist")
+
+            doc_blocks = fill_missing_document_block_captions(doc_blocks)
+            state["doc_blocks"] = doc_blocks
 
             # 清空 block id，交由 workspace 服务生成
             for block in doc_blocks:

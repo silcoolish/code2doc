@@ -103,6 +103,23 @@ def test_drawio_architecture_does_not_reuse_title_as_fallback_layer_name():
     assert any("系统组成" in value for value in values)
 
 
+def test_drawio_architecture_does_not_repeat_caption_as_single_layer_name():
+    spec = normalize_architecture_spec(
+        {
+            "title": "系统架构图",
+            "layers": [
+                {
+                    "id": "architecture",
+                    "name": "系统架构图",
+                    "items": [{"id": "service", "name": "服务组件"}],
+                }
+            ],
+        }
+    )
+
+    assert spec["layers"][0]["name"] == "系统组成"
+
+
 def test_drawio_architecture_uses_content_based_dynamic_colors():
     layers = [
         {

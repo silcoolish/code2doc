@@ -205,9 +205,8 @@ class ImageInfo:
 class DocumentBlock:
     """文档块模型.
 
-    表示LLM返回的文档内容块，只承载生成结果中的核心字段。
-    其他元数据（如source_refs、source_node_ids）在内容生成节点中
-    通过与TemplateBlock合并后写入doc_blocks。
+    承载 LLM 返回的正文、图表名称和源码引用。模板样式等其他元数据
+    在内容生成节点中与 TemplateBlock 合并后写入 doc_blocks。
     """
 
     block_type: str  # "heading" | "paragraph" | "image" | 其他扩展类型
@@ -215,6 +214,7 @@ class DocumentBlock:
     heading_level: int = 0  # 标题层级
     block_id: Optional[str] = None  # 关联的模板block ID
     source_refs: List[Dict[str, Any]] = field(default_factory=list)  # 生成结果携带的源码引用
+    caption: Optional[str] = None  # Agent 为图表生成的语义名称，不包含图号或表号
 
     @property
     def is_heading(self) -> bool:
@@ -234,4 +234,5 @@ class DocumentBlock:
             "heading_level": self.heading_level,
             "block_id": self.block_id,
             "source_refs": self.source_refs,
+            "caption": self.caption,
         }

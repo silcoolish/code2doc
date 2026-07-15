@@ -37,6 +37,42 @@ def test_build_document_blocks_keeps_generated_source_refs():
     assert doc_blocks[0]["sourceRefs"] == [source_ref]
 
 
+def test_build_document_blocks_uses_agent_caption_without_number():
+    node = GenerateBlocksNode(content_generator=None)
+    blocks = [
+        TemplateBlock(
+            id="function-heading",
+            parent_block_id=None,
+            block_type="heading",
+            heading_level=3,
+            order_no="a",
+            content_text="System_Init",
+            attrs={"templateType": "static"},
+        ),
+        TemplateBlock(
+            id="flowchart-block",
+            parent_block_id=None,
+            block_type="image",
+            heading_level=0,
+            order_no="b",
+            content_text="",
+            attrs={"templateType": "template", "format": "flowchart"},
+        ),
+    ]
+    results = [
+        DocumentBlock(
+            block_id="flowchart-block",
+            block_type="image",
+            text_content="system-init.flowchart.svg",
+            caption="图1  System_Init函数流程",
+        )
+    ]
+
+    doc_blocks = node._build_document_blocks(blocks, results)
+
+    assert doc_blocks[1]["attrs"]["caption"] == "System_Init函数流程图"
+
+
 def test_build_generated_table_preserves_falsy_cell_values():
     node = GenerateBlocksNode(content_generator=None)
     block = TemplateBlock(

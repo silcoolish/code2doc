@@ -20,6 +20,7 @@ import httpx
 from app.config import get_settings
 from app.core.nodes.base import WorkflowNode
 from app.core.state import AgentState, GenerationStatus
+from app.domain.document_caption import normalize_document_caption
 from app.domain.drawio_architecture import DiagramArtifacts, render_drawio_architecture
 from app.domain.source_refs import is_function_source_ref
 from app.infrastructure.workspace import (
@@ -638,7 +639,16 @@ class ProcessImageBlocksNode(WorkflowNode):
             )
             return block
 
-        next_attrs = self._build_drawio_architecture_attrs(attrs, artifacts, drawio_response.resource_id)
+        caption = self._read_explicit_caption(attrs) or normalize_document_caption(
+            artifacts.caption,
+            "image",
+        )
+        next_attrs = self._build_drawio_architecture_attrs(
+            attrs,
+            artifacts,
+            drawio_response.resource_id,
+            caption,
+        )
         logger.info(
             "drawio_architecture_resource_uploaded",
             block_id=block_id,
@@ -647,7 +657,7 @@ class ProcessImageBlocksNode(WorkflowNode):
         return {
             **block,
             "blockType": "image",
-            "contentText": artifacts.caption,
+            "contentText": caption,
             "attrs": next_attrs,
         }
 
@@ -684,14 +694,15 @@ class ProcessImageBlocksNode(WorkflowNode):
         attrs: Dict[str, Any],
         artifacts: DiagramArtifacts,
         drawio_asset_id: str,
+        caption: str,
     ) -> Dict[str, Any]:
         """构造 draw.io 架构图块属性."""
         return {
             **attrs,
             "drawioAssetId": drawio_asset_id,
             "editableAssetId": drawio_asset_id,
-            "caption": artifacts.caption,
-            "alt": artifacts.caption,
+            "caption": caption,
+            "alt": caption,
             "architectureSpec": artifacts.spec,
             "diagramKind": "drawio_architecture",
             # 预览由前端 draw.io viewer 从同一份源文件生成，避免后端 SVG 与编辑器渲染不一致
@@ -1151,7 +1162,14 @@ class ProcessImageBlocksNode(WorkflowNode):
         Returns:
             图片标题
         """
+        attrs = block.get("attrs") if isinstance(block.get("attrs"), dict) else {}
+        explicit_caption = ProcessImageBlocksNode._read_explicit_caption(attrs)
+        if explicit_caption:
+            return explicit_caption
+
         content = block.get("contentText", "")
+        if not isinstance(content, str):
+            return ""
         if not content:
             return ""
 
@@ -1168,6 +1186,12 @@ class ProcessImageBlocksNode(WorkflowNode):
                 return ""
 
         return stripped
+
+    @staticmethod
+    def _read_explicit_caption(attrs: Dict[str, Any]) -> str:
+        """读取非空题注"""
+        caption = attrs.get("caption")
+        return caption if isinstance(caption, str) and caption.strip() else ""
 
     @staticmethod
     def _extract_file_name(url: str) -> Optional[str]:

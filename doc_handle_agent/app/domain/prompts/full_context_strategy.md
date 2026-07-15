@@ -7,7 +7,7 @@
 根据提供的代码知识库信息，按照以下方式处理完整的文档内容块列表:
 1. 根据模板内容块的提示词生成模板内容块的内容
 2. 不新增删除内容快
-3. 不修改内容块其他属性
+3. 除按要求生成图表 `caption` 外，不修改内容块其他属性
 4. 重要: 如果内容块类型为图片，则通过 `batch_get_image_ids` 工具获取对应的图片ID，并将图片ID作为该内容块的 `content_text`；同时把工具返回的 `source_ref` 写入该内容块的 `sourceRefs` 数组，保留流程图条目本身的源码定位能力
 5. 重要: 如果内容块类型为表格 (`block_type="table"`)，则 `content_text` 只输出 JSON 对象中的 `rows`，不要输出 Markdown 表格，也不要输出完整 `columns/cells/headerRow/headerColumn` 表格结构。后端会根据输入的 `table_schema.columns` 自动装配最终表格。JSON 格式要求如下：
    ```json
@@ -19,6 +19,7 @@
    ```
 6. 表格每一行的列数应与 `table_schema.columns` 数量一致；如果某个单元格没有内容，填空字符串
 7. 重要: 如果内容块包含 `format="drawio_architecture"`，则按“draw.io 架构图格式”输出 `content_text` JSON，用系统分层、核心组件、连接关系和主链路表达项目总体架构；不要输出 Mermaid、Markdown 表格或图片ID
+8. 重要: 为每个 `table`、`image`、`mermaid` 模板块，以及 `format="mermaid"`、`format="drawio_architecture"` 的模板块返回同级 `caption` 字段。名称应描述真实内容，不包含图号或表号；表格名称以“表”结尾，图名称以“图”结尾；输入已有非空 `caption` 时保持原值
 
 ## 正常返回格式
 
@@ -28,7 +29,7 @@
 **正确示例**：
 ```json
 [
-  {"id": "1", "content_text": "生成内容"}
+  {"id": "1", "block_type": "table", "content_text": {"rows": [["主要职责", "初始化系统"]]}, "caption": "System_Init函数设计表"}
 ]
 ```
 **错误示例**：
