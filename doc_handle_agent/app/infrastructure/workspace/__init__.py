@@ -2,6 +2,7 @@
 
 from app.domain.model.block import TemplateBlock
 from app.infrastructure.workspace.workspace_adapter import (
+    GenerationPlanValidationResponse,
     SaveDocumentRequest,
     SaveDocumentResponse,
     SaveResourceRequest,
@@ -11,6 +12,7 @@ from app.infrastructure.workspace.workspace_adapter import (
 )
 
 __all__ = [
+    "GenerationPlanValidationResponse",
     "WorkspaceServiceAdapter",
     "TemplateBlock",
     "SaveDocumentRequest",

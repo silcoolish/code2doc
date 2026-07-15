@@ -17,7 +17,7 @@ class TestDocumentEngineProgress:
 
         assert result["progress"] == 62.5
         assert result["message"] == "正在生成第 3/12 块..."
-        assert result["current_step"] == 4
+        assert result["current_step"] == 5
 
     def test_get_progress_falls_back_to_old_mapping(self):
         engine = DocumentEngine()
@@ -30,7 +30,7 @@ class TestDocumentEngineProgress:
         result = engine.get_progress("flow_2")
 
         assert result["progress"] == 55
-        assert result["current_step"] == 4
+        assert result["current_step"] == 5
 
     def test_get_progress_failed_state(self):
         engine = DocumentEngine()

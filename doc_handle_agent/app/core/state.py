@@ -60,6 +60,10 @@ class AgentState(TypedDict):
     selected_strategy: Optional[str]  # 选中的策略名称
     estimated_tokens: int  # 预估token数
 
+    # 试用文档生成额度校验结果
+    generation_block_limit: Optional[int]
+    generation_policy_error_code: Optional[str]
+
     # 构建后的文档blocks（用于保存到workspace）
     doc_blocks: List[Dict[str, Any]]
 
@@ -106,6 +110,8 @@ def create_initial_state(
         "title": None,
         "selected_strategy": None,
         "estimated_tokens": 0,
+        "generation_block_limit": None,
+        "generation_policy_error_code": None,
         "current_node": None,
         "progress": None,
         "__progress_reporter": None,

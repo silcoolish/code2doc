@@ -8,11 +8,13 @@ from app.core.nodes.process_image_blocks_node import ProcessImageBlocksNode
 from app.core.nodes.select_strategy_node import SelectStrategyNode
 from app.core.nodes.create_document_node import CreateDocumentNode
 from app.core.nodes.store_block_list import StoreBlockListNode
+from app.core.nodes.validate_generation_policy_node import ValidateGenerationPolicyNode
 
 __all__ = [
     "WorkflowNode",
     "ListTemplateBlockNode",
     "OutlineConfirmationNode",
+    "ValidateGenerationPolicyNode",
     "ProcessImageBlocksNode",
     "SelectStrategyNode",
     "GenerateBlocksNode",

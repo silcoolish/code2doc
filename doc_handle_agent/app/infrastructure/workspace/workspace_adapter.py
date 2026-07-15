@@ -112,6 +112,17 @@ class SaveResourceResponse:
     error: Optional[str] = None
 
 
+@dataclass
+class GenerationPlanValidationResponse:
+    """文档生成计划额度校验响应."""
+
+    allowed: bool
+    planned_block_count: int
+    block_limit: Optional[int] = None
+    error_code: Optional[str] = None
+    message: Optional[str] = None
+
+
 class WorkspaceServiceAdapter:
     """Workspace服务适配器.
 
@@ -156,6 +167,47 @@ class WorkspaceServiceAdapter:
         if not self.auth_token:
             return None
         return {"Authorization": self.auth_token}
+
+    async def validate_generation_plan(
+        self,
+        repo_id: str,
+        planned_block_count: int,
+    ) -> GenerationPlanValidationResponse:
+        """校验大纲展开后的文档生成计划.
+
+        Args:
+            repo_id: 仓库ID
+            planned_block_count: 预计内容块数量
+
+        Returns:
+            Java服务返回的额度校验结果
+
+        Raises:
+            ValueError: 响应缺少必要字段或业务调用失败
+            Exception: workspace服务不可用
+        """
+        url = self._build_url(
+            f"/api/repos/{repo_id}/document-generation/validate-plan"
+        )
+        response = await self.http.post(
+            url,
+            json_data={"plannedBlockCount": planned_block_count},
+            headers=self._auth_headers(),
+        )
+        if not response.get("success"):
+            raise ValueError(response.get("message") or "文档生成额度校验失败")
+
+        data = response.get("data") or {}
+        if not isinstance(data.get("allowed"), bool):
+            raise ValueError("文档生成额度校验响应缺少 allowed 字段")
+
+        return GenerationPlanValidationResponse(
+            allowed=data["allowed"],
+            planned_block_count=data.get("plannedBlockCount", planned_block_count),
+            block_limit=data.get("blockLimit"),
+            error_code=data.get("errorCode"),
+            message=data.get("message") or response.get("message"),
+        )
 
     async def get_block(self, document_id: str, block_id: str) -> Dict[str, Any]:
         """获取单个文档条目.

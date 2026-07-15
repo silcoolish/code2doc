@@ -244,6 +244,7 @@ class DocumentEngine:
     _NODE_ORDER = [
         "list_template_block",
         "outline_confirmation",
+        "validate_generation_policy",
         "select_strategy",
         "generate_blocks",
         "create_document",
@@ -255,6 +256,7 @@ class DocumentEngine:
     _NODE_NAME_MAP = {
         "list_template_block": "获取模板内容块列表",
         "outline_confirmation": "确认文档大纲",
+        "validate_generation_policy": "校验文档生成额度",
         "select_strategy": "选择内容生成策略",
         "generate_blocks": "生成文档内容",
         "create_document": "创建文档",
@@ -266,6 +268,7 @@ class DocumentEngine:
     _NODE_PROGRESS_MAP = {
         "list_template_block": 10,
         "outline_confirmation": 25,
+        "validate_generation_policy": 35,
         "select_strategy": 40,
         "generate_blocks": 55,
         "create_document": 70,
@@ -276,7 +279,8 @@ class DocumentEngine:
     _NODE_WEIGHTS = {
         "list_template_block": 0.05,
         "outline_confirmation": 0.05,
-        "select_strategy": 0.05,
+        "validate_generation_policy": 0.02,
+        "select_strategy": 0.03,
         "generate_blocks": 0.55,
         "create_document": 0.10,
         "process_image_blocks": 0.15,

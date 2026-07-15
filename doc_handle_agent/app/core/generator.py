@@ -13,6 +13,7 @@ from app.core.nodes import (
     ProcessImageBlocksNode,
     SelectStrategyNode,
     StoreBlockListNode,
+    ValidateGenerationPolicyNode,
     WorkflowNode,
 )
 from app.core.state import AgentState, GenerationStatus
@@ -50,7 +51,7 @@ class DocumentGenerator:
     def _build_workflow(self) -> StateGraph:
         """构建工作流.
 
-        流程：获取模板 -> 大纲确认 -> 选择策略 -> 生成内容 -> 创建文档 -> 处理图片块 -> 存储文档块
+        流程：获取模板 -> 大纲确认 -> 校验额度 -> 选择策略 -> 生成内容 -> 创建文档 -> 处理图片块 -> 存储文档块
 
         Returns:
             LangGraph工作流
@@ -61,6 +62,7 @@ class DocumentGenerator:
         nodes = [
             ListTemplateBlockNode(self.workspace_adapter),
             OutlineConfirmationNode(self.content_generator),
+            ValidateGenerationPolicyNode(self.workspace_adapter),
             SelectStrategyNode(self.content_generator),
             GenerateBlocksNode(self.content_generator),
             CreateDocumentNode(self.workspace_adapter),
@@ -77,7 +79,12 @@ class DocumentGenerator:
 
         # 线性流程
         workflow.add_edge("list_template_block", "outline_confirmation")
-        workflow.add_edge("outline_confirmation", "select_strategy")
+        workflow.add_edge("outline_confirmation", "validate_generation_policy")
+        workflow.add_conditional_edges(
+            "validate_generation_policy",
+            self._route_after_generation_policy,
+            {"continue": "select_strategy", "stop": END},
+        )
         workflow.add_edge("select_strategy", "generate_blocks")
         workflow.add_edge("generate_blocks", "create_document")
         workflow.add_edge("create_document", "process_image_blocks")
@@ -85,6 +92,11 @@ class DocumentGenerator:
         workflow.add_edge("store_block_list", END)
 
         return workflow.compile()
+
+    @staticmethod
+    def _route_after_generation_policy(state: AgentState) -> str:
+        """额度校验失败时直接结束工作流."""
+        return "stop" if state.get("error") else "continue"
 
     def _wrap_node(self, node: WorkflowNode):
         """包装节点执行函数，在执行前记录当前节点并注入 ProgressReporter."""
