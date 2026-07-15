@@ -58,6 +58,51 @@ def test_drawio_architecture_renders_valid_connections():
     assert "marker-end" in artifacts.svg
 
 
+def test_drawio_architecture_keeps_title_as_external_caption_only():
+    artifacts = render_drawio_architecture(
+        {
+            "title": "系统架构图",
+            "layers": [
+                {
+                    "id": "service",
+                    "label": "L1",
+                    "name": "服务层",
+                    "items": [{"id": "handler", "name": "处理器"}],
+                }
+            ],
+        },
+        include_svg=True,
+    )
+    cells = ElementTree.fromstring(artifacts.drawio_xml).findall(".//mxCell")
+    title_cells = [cell for cell in cells if cell.attrib.get("value") == "系统架构图"]
+    vertex_y = [
+        int(geometry.attrib["y"])
+        for cell in cells
+        if cell.attrib.get("vertex") == "1"
+        for geometry in cell.findall("mxGeometry")
+        if geometry.attrib.get("y", "").isdigit()
+    ]
+
+    assert artifacts.caption == "系统架构图"
+    assert title_cells == []
+    assert ">系统架构图</text>" not in artifacts.svg
+    assert min(vertex_y) < 40
+
+
+def test_drawio_architecture_does_not_reuse_title_as_fallback_layer_name():
+    artifacts = render_drawio_architecture(
+        "not valid architecture json",
+        fallback_title="项目总体架构图",
+    )
+    cells = ElementTree.fromstring(artifacts.drawio_xml).findall(".//mxCell")
+    values = [cell.attrib.get("value", "") for cell in cells]
+
+    assert artifacts.caption == "项目总体架构图"
+    assert artifacts.spec["layers"][0]["name"] == "系统组成"
+    assert "项目总体架构图" not in values
+    assert any("系统组成" in value for value in values)
+
+
 def test_drawio_architecture_uses_content_based_dynamic_colors():
     layers = [
         {

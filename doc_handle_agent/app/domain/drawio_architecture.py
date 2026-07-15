@@ -16,10 +16,6 @@ DEFAULT_HEIGHT = 900
 DEFAULT_TITLE = "项目架构图"
 SVG_FONT_FAMILY = "Inter, Microsoft YaHei, Arial, sans-serif"
 DRAWIO_MODIFIED_AT = "2026-06-29T00:00:00.000Z"
-DRAWIO_TITLE_STYLE = (
-    "text;html=1;strokeColor=none;fillColor=none;fontSize=34;fontStyle=1;"
-    "fontColor=#0f172a;align=center;verticalAlign=middle;"
-)
 DRAWIO_PIPELINE_STEP_STYLE = (
     "rounded=0;whiteSpace=wrap;html=1;strokeColor=none;fillColor=none;"
     "fontSize=14;fontColor=#111827;align=left;verticalAlign=middle;"
@@ -158,7 +154,7 @@ def normalize_architecture_spec(content: Any, fallback_title: str = DEFAULT_TITL
         parsed = {
             "title": fallback_title,
             "layers": [
-                {"name": fallback_title, "items": _text_items(str(content or ""))}
+                {"name": "系统组成", "items": _text_items(str(content or ""))}
             ],
         }
 
@@ -173,6 +169,9 @@ def normalize_architecture_spec(content: Any, fallback_title: str = DEFAULT_TITL
                 "items": _text_items(str(parsed.get("summary") or "")),
             }
         ]
+    elif len(layers) == 1 and str(layers[0].get("name") or "").strip() == title:
+        # 单层兜底若沿用图题，会把外部题注重复渲染进图框
+        layers[0] = {**layers[0], "name": "系统组成"}
     pipeline = _normalize_pipeline(parsed.get("pipeline") or parsed.get("main_flow") or parsed.get("workflow"))
     connections = _normalize_connections(parsed.get("connections") or parsed.get("links") or parsed.get("edges"))
     visual = _normalize_visual(parsed, title, layers, pipeline)
@@ -428,7 +427,7 @@ def _palette(color_name: str, index: int) -> Dict[str, str]:
 
 def _resolve_layer_layout(layer_count: int, has_pipeline: bool) -> LayerLayout:
     """计算左右栏与层级区域布局."""
-    available_h = 650 if has_pipeline else 740
+    available_h = 710 if has_pipeline else 800
     gap = 16
     layer_h = max(110, int((available_h - gap * (layer_count - 1)) / max(layer_count, 1)))
     return LayerLayout(
@@ -436,7 +435,7 @@ def _resolve_layer_layout(layer_count: int, has_pipeline: bool) -> LayerLayout:
         left_w=230,
         content_x=300,
         content_w=1264,
-        top=90,
+        top=24,
         gap=gap,
         layer_h=layer_h,
     )
@@ -492,15 +491,6 @@ class ArchitectureLayout:
             "</defs>",
             f'<rect width="{self.width}" height="{self.height}" rx="0" fill="url(#pageBg)"/>',
         ]
-        self._svg_text(
-            self.title,
-            self.width // 2,
-            48,
-            size=42,
-            weight=800,
-            anchor="middle",
-            fill="#0f172a",
-        )
         self._render_layers_svg()
         self._render_pipeline_svg()
         self._render_connections_svg()
@@ -514,16 +504,6 @@ class ArchitectureLayout:
             '<mxCell id="0"/>',
             '<mxCell id="1" parent="0"/>',
         ]
-        title_id = self._add_drawio_vertex(
-            "title",
-            self.title,
-            340,
-            16,
-            920,
-            58,
-            DRAWIO_TITLE_STYLE,
-        )
-        self.refs["title"] = ElementRef(title_id, 340, 16, 920, 58)
         self._render_layout_drawio()
         self._render_connections_drawio()
         cells = "".join(self.drawio_cells)
@@ -785,9 +765,9 @@ class ArchitectureLayout:
         if not self.layers:
             return
         x = 64
-        y = 102
+        y = 28
         w = 1472
-        h = 640 if not self.pipeline else 632
+        h = 714 if not self.pipeline else 704
         columns = min(3, max(1, len(self.layers)))
         rows = (len(self.layers) + columns - 1) // columns
         gap = 22
@@ -831,11 +811,11 @@ class ArchitectureLayout:
 
     def _render_pipeline_layout_drawio(self) -> None:
         """渲染 draw.io 主链路布局，用于流程顺序比模块分层更重要的项目"""
-        self._render_pipeline_drawio(x=70, y=112, w=1460, h=104, prefix="main-flow")
+        self._render_pipeline_drawio(x=70, y=36, w=1460, h=104, prefix="main-flow")
         x = 70
-        y = 270
+        y = 194
         w = 1460
-        h = 455
+        h = 531
         columns = min(3, max(1, len(self.layers)))
         rows = (len(self.layers) + columns - 1) // columns
         gap = 18
