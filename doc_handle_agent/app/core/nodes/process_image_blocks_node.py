@@ -39,10 +39,25 @@ MAX_FILE_SIZE = 50 * 1024 * 1024
 # HTTP 下载重试配置
 DOWNLOAD_MAX_RETRIES = 3
 DOWNLOAD_RETRY_DELAY = 1.0
+IMAGE_REF_LOOKUP_MAX_ATTEMPTS = 3
+IMAGE_REF_LOOKUP_RETRY_DELAY = 0.5
 MISSING_BLOCK_PLACEHOLDER_PATTERN = re.compile(
     r"^\[内容块\s+'[^']+'\s+生成缺失\]$"
 )
 CONFIRMED_MISSING_IMAGE_ATTR = "_confirmedMissingImage"
+IMAGE_LOOKUP_FAILED_ATTR = "_imageLookupFailed"
+RESOURCE_ASSET_ATTR_KEYS = frozenset({
+    "assetId",
+    "asset_id",
+    "svgAssetId",
+    "svg_asset_id",
+    "exportImageAssetId",
+    "export_image_asset_id",
+    "editableAssetId",
+    "editable_asset_id",
+    "drawioAssetId",
+    "drawio_asset_id",
+})
 
 
 class ProcessImageBlocksNode(WorkflowNode):
@@ -226,7 +241,8 @@ class ProcessImageBlocksNode(WorkflowNode):
                     error=str(exc),
                     exc_info=True,
                 )
-                processed = block
+                # 未成功绑定资源的图片块不能进入最终文档，否则前端只能显示缺图占位
+                processed = None
             updated_blocks[index] = processed
             async with processed_lock:
                 processed_count += 1
@@ -361,9 +377,13 @@ class ProcessImageBlocksNode(WorkflowNode):
                 node_ids.append(node_id)
                 seen_node_ids.add(node_id)
 
-        image_refs, missing_node_ids = await self._load_image_ref_status_by_node_id(repo_id, node_ids)
+        image_refs, missing_node_ids, unresolved_node_ids = await self._load_image_ref_status_by_node_id(
+            repo_id,
+            node_ids,
+        )
         filled_count = 0
         confirmed_missing_count = 0
+        lookup_failed_count = 0
         for block in pending_blocks:
             node_id = self._extract_source_node_id(block)
             image_ref = image_refs.get(node_id or "")
@@ -374,6 +394,10 @@ class ProcessImageBlocksNode(WorkflowNode):
                 attrs = block.get("attrs") if isinstance(block.get("attrs"), dict) else {}
                 block["attrs"] = {**attrs, CONFIRMED_MISSING_IMAGE_ATTR: True}
                 confirmed_missing_count += 1
+            elif node_id in unresolved_node_ids:
+                attrs = block.get("attrs") if isinstance(block.get("attrs"), dict) else {}
+                block["attrs"] = {**attrs, IMAGE_LOOKUP_FAILED_ATTR: True}
+                lookup_failed_count += 1
 
         logger.info(
             "image_refs_filled_from_source_refs",
@@ -381,6 +405,7 @@ class ProcessImageBlocksNode(WorkflowNode):
             node_count=len(node_ids),
             filled_count=filled_count,
             confirmed_missing_count=confirmed_missing_count,
+            lookup_failed_count=lookup_failed_count,
         )
         return doc_blocks
 
@@ -388,72 +413,113 @@ class ProcessImageBlocksNode(WorkflowNode):
         self,
         repo_id: str,
         node_ids: List[str],
-    ) -> tuple[Dict[str, str], Set[str]]:
-        """调用 batch_get_image_ids 获取图片 ID 与明确缺图状态."""
-        if not node_ids:
-            return {}, set()
-        try:
-            raw_result = await self.mcp_client.call_tool(
-                "batch_get_image_ids",
-                {"repo_id": repo_id, "node_ids": node_ids},
-            )
-        except Exception as exc:
-            logger.warning(
-                "image_refs_load_failed",
-                repo_id=repo_id,
-                node_count=len(node_ids),
-                error_type=type(exc).__name__,
-                error=str(exc),
-            )
-            return {}, set()
-
-        if isinstance(raw_result, dict):
-            payload = raw_result
-        else:
-            try:
-                payload = json.loads(raw_result)
-            except json.JSONDecodeError:
-                try:
-                    payload = ast.literal_eval(raw_result)
-                except (ValueError, SyntaxError):
-                    logger.warning(
-                        "image_refs_parse_failed",
-                        repo_id=repo_id,
-                        raw_result=str(raw_result)[:200],
-                    )
-                    return {}, set()
-            except TypeError:
-                logger.warning(
-                    "image_refs_parse_failed",
-                    repo_id=repo_id,
-                    raw_result=str(raw_result)[:200],
-                )
-                return {}, set()
-        if not isinstance(payload, dict):
-            logger.warning(
-                "image_refs_parse_failed",
-                repo_id=repo_id,
-                raw_result=str(raw_result)[:200],
-            )
-            return {}, set()
+    ) -> tuple[Dict[str, str], Set[str], Set[str]]:
+        """查询图片 ID，并对未确认结果做有限重试."""
+        ordered_node_ids = list(dict.fromkeys(node_id for node_id in node_ids if node_id))
+        if not ordered_node_ids:
+            return {}, set(), set()
 
         refs: Dict[str, str] = {}
         missing_node_ids: Set[str] = set()
-        for item in payload.get("images", []):
-            if not isinstance(item, dict):
-                continue
-            node_id = str(item.get("node_id") or "").strip()
-            if not node_id:
-                continue
-            if not item.get("success"):
-                error = str(item.get("error") or "").strip()
-                if error in {"No image available", "Node not found"}:
-                    missing_node_ids.add(node_id)
-                continue
-            image_id = self._extract_reference_from_value(item)
-            if image_id:
-                refs[node_id] = image_id
-        return refs, missing_node_ids
+        unresolved_node_ids: Set[str] = set(ordered_node_ids)
+        max_attempts = max(1, IMAGE_REF_LOOKUP_MAX_ATTEMPTS)
+
+        for attempt in range(1, max_attempts + 1):
+            requested_node_ids = [
+                node_id for node_id in ordered_node_ids
+                if node_id in unresolved_node_ids
+            ]
+            try:
+                raw_result = await self.mcp_client.call_tool(
+                    "batch_get_image_ids",
+                    {"repo_id": repo_id, "node_ids": requested_node_ids},
+                )
+            except Exception as exc:
+                logger.warning(
+                    "image_refs_load_failed",
+                    repo_id=repo_id,
+                    node_count=len(requested_node_ids),
+                    attempt=attempt,
+                    max_attempts=max_attempts,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+            else:
+                payload = self._parse_image_ref_payload(raw_result)
+                images = payload.get("images") if payload else None
+                if not isinstance(images, list):
+                    logger.warning(
+                        "image_refs_parse_failed",
+                        repo_id=repo_id,
+                        node_count=len(requested_node_ids),
+                        attempt=attempt,
+                        max_attempts=max_attempts,
+                        raw_result=str(raw_result)[:200],
+                    )
+                else:
+                    for item in images:
+                        if not isinstance(item, dict):
+                            continue
+                        node_id = str(item.get("node_id") or "").strip()
+                        if node_id not in unresolved_node_ids:
+                            continue
+                        if not item.get("success"):
+                            error = str(item.get("error") or "").strip()
+                            if error in {"No image available", "Node not found"}:
+                                missing_node_ids.add(node_id)
+                                unresolved_node_ids.discard(node_id)
+                            continue
+                        image_id = self._extract_reference_from_value(item)
+                        if image_id:
+                            refs[node_id] = image_id
+                            unresolved_node_ids.discard(node_id)
+
+            if not unresolved_node_ids:
+                break
+            if attempt < max_attempts:
+                logger.info(
+                    "image_refs_lookup_retry",
+                    repo_id=repo_id,
+                    attempt=attempt,
+                    next_attempt=attempt + 1,
+                    unresolved_count=len(unresolved_node_ids),
+                    unresolved_node_ids=[
+                        node_id for node_id in ordered_node_ids
+                        if node_id in unresolved_node_ids
+                    ][:10],
+                )
+                await asyncio.sleep(
+                    IMAGE_REF_LOOKUP_RETRY_DELAY * (2 ** (attempt - 1))
+                )
+
+        if unresolved_node_ids:
+            logger.warning(
+                "image_refs_lookup_exhausted",
+                repo_id=repo_id,
+                attempts=max_attempts,
+                unresolved_count=len(unresolved_node_ids),
+                unresolved_node_ids=[
+                    node_id for node_id in ordered_node_ids
+                    if node_id in unresolved_node_ids
+                ][:10],
+            )
+        return refs, missing_node_ids, unresolved_node_ids
+
+    @staticmethod
+    def _parse_image_ref_payload(raw_result: Any) -> Optional[Dict[str, Any]]:
+        """解析 MCP 图片查询响应."""
+        if isinstance(raw_result, dict):
+            return raw_result
+        if not isinstance(raw_result, str):
+            return None
+        try:
+            payload = json.loads(raw_result)
+        except json.JSONDecodeError:
+            try:
+                payload = ast.literal_eval(raw_result)
+            except (ValueError, SyntaxError):
+                return None
+        return payload if isinstance(payload, dict) else None
 
     async def _process_image_block(
         self,
@@ -499,8 +565,10 @@ class ProcessImageBlocksNode(WorkflowNode):
                 block_content=str(content or "")[:100],
                 source_node_id=self._extract_source_node_id(block),
                 confirmed_missing=bool(attrs.get(CONFIRMED_MISSING_IMAGE_ATTR)),
+                lookup_failed=bool(attrs.get(IMAGE_LOOKUP_FAILED_ATTR)),
             )
-            return None if attrs.get(CONFIRMED_MISSING_IMAGE_ATTR) else block
+            # 查询重试耗尽或确认无图后都不保留占位图片块
+            return None
 
         caption = self._extract_caption(block) or ""
         block_id = block.get("id")
@@ -594,21 +662,27 @@ class ProcessImageBlocksNode(WorkflowNode):
                         drawio_url=self._sanitize_url(drawio_url),
                     )
 
+        source_attrs = block.get("attrs") if isinstance(block.get("attrs"), dict) else {}
         attrs = {
-            **block.get("attrs", {}),
+            **self._remove_stale_resource_attrs(source_attrs),
             "assetId": asset_id,
             "caption": caption,
             "alt": caption,
         }
         if drawio_asset_id:
             attrs["drawioAssetId"] = drawio_asset_id
+            attrs["editableAssetId"] = drawio_asset_id
 
-        return {
+        processed_block = {
             **block,
             "blockType": "image",
             "contentText": caption,
             "attrs": attrs,
         }
+        # 顶层旧资源 ID 的读取优先级高于 attrs.assetId，需要同步清理
+        processed_block.pop("assetId", None)
+        processed_block.pop("asset_id", None)
+        return processed_block
 
     async def _process_drawio_architecture_block(
         self,
@@ -616,7 +690,7 @@ class ProcessImageBlocksNode(WorkflowNode):
         document_id: str,
         upload_client: Optional[httpx.AsyncClient] = None,
         upload_semaphore: Optional[asyncio.Semaphore] = None,
-    ) -> Dict[str, Any]:
+    ) -> Optional[Dict[str, Any]]:
         """将结构化架构图内容渲染并上传为 draw.io 资源."""
         block_id = str(block.get("id") or "")
         attrs = block.get("attrs") if isinstance(block.get("attrs"), dict) else {}
@@ -637,7 +711,7 @@ class ProcessImageBlocksNode(WorkflowNode):
                 block_id=block_id,
                 error=drawio_response.error,
             )
-            return block
+            return None
 
         caption = self._read_explicit_caption(attrs) or normalize_document_caption(
             artifacts.caption,
@@ -654,12 +728,15 @@ class ProcessImageBlocksNode(WorkflowNode):
             block_id=block_id,
             drawio_asset_id=drawio_response.resource_id,
         )
-        return {
+        processed_block = {
             **block,
             "blockType": "image",
             "contentText": caption,
             "attrs": next_attrs,
         }
+        processed_block.pop("assetId", None)
+        processed_block.pop("asset_id", None)
+        return processed_block
 
     async def _upload_drawio_architecture_resource(
         self,
@@ -698,7 +775,7 @@ class ProcessImageBlocksNode(WorkflowNode):
     ) -> Dict[str, Any]:
         """构造 draw.io 架构图块属性."""
         return {
-            **attrs,
+            **ProcessImageBlocksNode._remove_stale_resource_attrs(attrs),
             "drawioAssetId": drawio_asset_id,
             "editableAssetId": drawio_asset_id,
             "caption": caption,
@@ -707,6 +784,15 @@ class ProcessImageBlocksNode(WorkflowNode):
             "diagramKind": "drawio_architecture",
             # 预览由前端 draw.io viewer 从同一份源文件生成，避免后端 SVG 与编辑器渲染不一致
             "renderKind": "drawio",
+        }
+
+    @staticmethod
+    def _remove_stale_resource_attrs(attrs: Dict[str, Any]) -> Dict[str, Any]:
+        """移除从模板或上次生成继承的资源引用."""
+        return {
+            key: value
+            for key, value in attrs.items()
+            if key not in RESOURCE_ASSET_ATTR_KEYS
         }
 
     async def _download_with_limit(

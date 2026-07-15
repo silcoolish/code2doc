@@ -44,6 +44,21 @@ class _McpClient:
         return self.result
 
 
+class _SequencedMcpClient:
+    def __init__(self, results):
+        self.results = list(results)
+        self.calls = []
+
+    async def call_tool(self, tool_name, arguments):
+        self.calls.append((tool_name, arguments))
+        if not self.results:
+            raise AssertionError("unexpected MCP call")
+        result = self.results.pop(0)
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+
 @pytest.mark.asyncio
 async def test_process_image_blocks_runs_with_bounded_parallelism_and_keeps_order():
     node = ProcessImageBlocksNode(_WorkspaceAdapter())
@@ -232,7 +247,7 @@ async def test_process_image_blocks_limits_upload_parallelism_independently():
 
 
 @pytest.mark.asyncio
-async def test_process_image_blocks_keeps_original_block_when_one_image_fails():
+async def test_process_image_blocks_filters_block_when_one_image_fails():
     node = ProcessImageBlocksNode(_WorkspaceAdapter())
     node.download_parallelism = 2
     node.upload_parallelism = 2
@@ -259,11 +274,7 @@ async def test_process_image_blocks_keeps_original_block_when_one_image_fails():
 
     result = await node._process_blocks(blocks, "doc-1", "repo-1")
 
-    assert [block["contentText"] for block in result] == [
-        "done-i1",
-        "b.svg",
-        "done-i3",
-    ]
+    assert [block["contentText"] for block in result] == ["done-i1", "done-i3"]
 
 
 @pytest.mark.asyncio
@@ -346,7 +357,40 @@ async def test_process_image_blocks_fills_missing_image_refs_from_source_refs():
 
 
 @pytest.mark.asyncio
-async def test_missing_image_reference_is_kept_without_confirmation():
+async def test_image_ref_lookup_retries_transport_and_empty_results_before_success():
+    mcp_client = _SequencedMcpClient([
+        RuntimeError("temporary MCP outage"),
+        {"images": []},
+        {
+            "images": [{
+                "node_id": "method-main",
+                "success": True,
+                "image_id": "main.flowchart.svg",
+            }],
+        },
+    ])
+    node = ProcessImageBlocksNode(_WorkspaceAdapter(), mcp_client)
+    blocks = [{
+        "id": "img-1",
+        "blockType": "image",
+        "contentText": None,
+        "attrs": {},
+        "sourceRefs": [{"sourceId": "method-main"}],
+    }]
+
+    with patch.object(process_image_blocks_node, "IMAGE_REF_LOOKUP_RETRY_DELAY", 0):
+        result = await node._fill_missing_image_refs_from_source_refs(blocks, "repo-1")
+
+    assert result[0]["contentText"] == "main.flowchart.svg"
+    assert len(mcp_client.calls) == 3
+    assert all(
+        arguments == {"repo_id": "repo-1", "node_ids": ["method-main"]}
+        for _, arguments in mcp_client.calls
+    )
+
+
+@pytest.mark.asyncio
+async def test_missing_image_reference_is_filtered_without_confirmation():
     node = ProcessImageBlocksNode(_WorkspaceAdapter())
     block = {
         "id": "img-1",
@@ -358,7 +402,71 @@ async def test_missing_image_reference_is_kept_without_confirmation():
 
     result = await node._process_image_block(block, "doc-1", "repo-1")
 
-    assert result == block
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_template_asset_id_does_not_skip_current_document_upload():
+    node = ProcessImageBlocksNode(_WorkspaceAdapter())
+    node.process_drawio = False
+    uploads = []
+
+    async def download_file(url, max_retries=3, client=None):
+        return b"image"
+
+    async def upload_resource(
+        file_name,
+        file_content,
+        document_id,
+        resource_type,
+        block_id=None,
+        client=None,
+    ):
+        uploads.append((document_id, block_id, file_name))
+        return _UploadResponseWithId("asset-current-document")
+
+    node._download_file = download_file
+    node._upload_resource = upload_resource
+    block = {
+        "id": "img-1",
+        "blockType": "image",
+        "contentText": "main.flowchart.svg",
+        "assetId": "top-level-asset-from-template",
+        "asset_id": "snake-top-level-asset-from-template",
+        "attrs": {
+            "assetId": "asset-from-template",
+            "svgAssetId": "svg-from-template",
+            "svg_asset_id": "snake-svg-from-template",
+            "drawioAssetId": "drawio-from-template",
+            "editableAssetId": "editable-from-template",
+            "editable_asset_id": "snake-editable-from-template",
+            "exportImageAssetId": "export-from-template",
+            "export_image_asset_id": "snake-export-from-template",
+        },
+    }
+
+    result = await node._process_image_block(block, "doc-1", "repo-1")
+
+    assert "assetId" not in result
+    assert "asset_id" not in result
+    assert result["attrs"]["assetId"] == "asset-current-document"
+    assert set(result["attrs"]) == {"assetId", "caption", "alt"}
+    assert uploads == [("doc-1", "img-1", "main.flowchart.svg")]
+
+
+@pytest.mark.asyncio
+async def test_template_asset_id_without_image_reference_is_filtered():
+    node = ProcessImageBlocksNode(_WorkspaceAdapter())
+    block = {
+        "id": "img-1",
+        "blockType": "image",
+        "contentText": "已有图片",
+        "attrs": {"assetId": "asset-from-template"},
+    }
+
+    result = await node._process_image_block(block, "doc-1", "repo-1")
+
+    assert result is None
 
 
 @pytest.mark.asyncio
@@ -510,17 +618,31 @@ async def test_process_drawio_architecture_block_uses_title_from_fenced_json():
             '{"id":"service","name":"服务层","items":[]}]}'
             "\n```"
         ),
-        "attrs": {"format": "drawio_architecture"},
+        "asset_id": "snake-top-level-image-from-template",
+        "attrs": {
+            "format": "drawio_architecture",
+            "assetId": "image-from-template",
+            "svgAssetId": "svg-from-template",
+            "exportImageAssetId": "export-from-template",
+            "drawioAssetId": "asset-from-template",
+            "editableAssetId": "asset-from-template",
+        },
     }
 
     result = await node._process_image_block(block, "doc-1", "repo-1")
 
     assert result["contentText"] == "订单系统架构图"
+    assert "asset_id" not in result
     assert result["attrs"]["caption"] == "订单系统架构图"
+    assert result["attrs"]["drawioAssetId"] == "asset-drawio"
+    assert result["attrs"]["editableAssetId"] == "asset-drawio"
+    assert "assetId" not in result["attrs"]
+    assert "svgAssetId" not in result["attrs"]
+    assert "exportImageAssetId" not in result["attrs"]
 
 
 @pytest.mark.asyncio
-async def test_process_drawio_architecture_block_keeps_original_block_when_drawio_upload_fails():
+async def test_process_drawio_architecture_block_filters_block_when_drawio_upload_fails():
     node = ProcessImageBlocksNode(_WorkspaceAdapter())
     uploads = []
 
@@ -564,7 +686,7 @@ async def test_process_drawio_architecture_block_keeps_original_block_when_drawi
 
     result = await node._process_image_block(block, "doc-1", "repo-1")
 
-    assert result == block
+    assert result is None
     assert [upload[2] for upload in uploads] == ["drawio"]
 
 
@@ -603,11 +725,9 @@ async def test_process_image_blocks_filters_confirmed_missing_image_reference():
 
 
 @pytest.mark.asyncio
-async def test_process_image_blocks_keeps_unconfirmed_missing_image_reference():
-    node = ProcessImageBlocksNode(
-        _WorkspaceAdapter(),
-        _McpClient({"images": []}),
-    )
+async def test_process_image_blocks_filters_unconfirmed_missing_image_reference():
+    mcp_client = _McpClient({"images": []})
+    node = ProcessImageBlocksNode(_WorkspaceAdapter(), mcp_client)
     blocks = [{
         "id": "img-1",
         "blockType": "image",
@@ -616,9 +736,12 @@ async def test_process_image_blocks_keeps_unconfirmed_missing_image_reference():
         "sourceRefs": [{"sourceId": "method-main"}],
     }]
 
-    result = await node._process_blocks(blocks, "doc-1", "repo-1")
+    with patch.object(process_image_blocks_node, "IMAGE_REF_LOOKUP_RETRY_DELAY", 0):
+        result = await node._process_blocks(blocks, "doc-1", "repo-1")
 
-    assert [block["id"] for block in result] == ["img-1"]
+    assert result == []
+    assert len(mcp_client.calls) == 3
+    assert blocks[0]["attrs"][process_image_blocks_node.IMAGE_LOOKUP_FAILED_ATTR] is True
 
 
 @pytest.mark.asyncio
