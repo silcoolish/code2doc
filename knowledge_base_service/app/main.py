@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import PROJECT_ROOT, get_settings, resolve_runtime_path
 from app.infrastructure.db import get_graph_db_client, get_vector_db_client
-from app.api.routes import initialization, progress, reset, settings
+from app.api.routes import initialization, lineage, progress, reset, settings
 from app.api.test import (
     flowchart_generation as test_flowchart_generation,
     module_detection as test_module_detection,
@@ -172,6 +172,11 @@ def create_app() -> FastAPI:
         settings.router,
         prefix="/api/v1",
         tags=["settings"],
+    )
+    app.include_router(
+        lineage.router,
+        prefix="/api/v1/lineage",
+        tags=["lineage"],
     )
 
     # MCP 路由 (HTTP 方式)

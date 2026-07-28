@@ -180,7 +180,14 @@ class Neo4jClient(GraphDatabaseClient):
         MATCH (to:%s {%s: $to_value})
         CREATE (from)-[r:%s%s]->(to)
         RETURN count(r) as created
-        """ % (from_label, from_key, to_label, to_key, rel_type, props_str)
+        """ % (
+            from_label,
+            from_key,
+            to_label,
+            to_key,
+            rel_type,
+            props_str,
+        )
 
         result = await self._execute_query(query, params, database)
         return result[0]["created"] > 0 if result else False
@@ -261,8 +268,14 @@ class Neo4jClient(GraphDatabaseClient):
         total = 0
 
         # 构建带标签的 MATCH 模式（如果提供了标签）
-        from_pattern = f"(from:{from_label} {{id: rel.from_id}})" if from_label else "(from {id: rel.from_id})"
-        to_pattern = f"(to:{to_label} {{id: rel.to_id}})" if to_label else "(to {id: rel.to_id})"
+        from_pattern = (
+            f"(from:{from_label} {{id: rel.from_id}})"
+            if from_label
+            else "(from {id: rel.from_id})"
+        )
+        to_pattern = (
+            f"(to:{to_label} {{id: rel.to_id}})" if to_label else "(to {id: rel.to_id})"
+        )
 
         for i in range(0, len(relationships), BATCH_SIZE):
             batch = relationships[i : i + BATCH_SIZE]
@@ -286,7 +299,9 @@ class Neo4jClient(GraphDatabaseClient):
 
         return total
 
-    async def delete_repo_data(self, repo_id: str, database: Optional[str] = None) -> int:
+    async def delete_repo_data(
+        self, repo_id: str, database: Optional[str] = None
+    ) -> int:
         """删除仓库相关数据.
 
         Args:
@@ -375,7 +390,9 @@ class Neo4jClient(GraphDatabaseClient):
             database,
         )
 
-    async def get_code_files(self, repo_id: str, database: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def get_code_files(
+        self, repo_id: str, database: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
         """获取指定仓库的所有代码文件节点.
 
         Args:
@@ -461,7 +478,8 @@ class Neo4jClient(GraphDatabaseClient):
 
         results = []
         for node_type in node_types:
-            query = """
+            query = (
+                """
             MATCH (n:%s)
             WHERE n.repoId = $repo_id
             RETURN n.id as id, n.name as name, labels(n) as types,
@@ -470,7 +488,9 @@ class Neo4jClient(GraphDatabaseClient):
                    n.description as description,
                    n.startLine as start_line, n.endLine as end_line
             ORDER BY n.name
-            """ % node_type
+            """
+                % node_type
+            )
 
             type_results = await self._execute_query(
                 query, {"repo_id": repo_id}, database
@@ -479,7 +499,9 @@ class Neo4jClient(GraphDatabaseClient):
 
         return results
 
-    async def get_methods_with_calls(self, repo_id: str, database: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def get_methods_with_calls(
+        self, repo_id: str, database: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
         """获取所有 Method 节点及其 CALL 关系.
 
         Args:
@@ -499,7 +521,9 @@ class Neo4jClient(GraphDatabaseClient):
         """
         return await self._execute_query(query, {"repo_id": repo_id}, database)
 
-    async def get_classes_with_methods(self, repo_id: str, database: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def get_classes_with_methods(
+        self, repo_id: str, database: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
         """获取所有 Class 节点及其包含的 Method summaries.
 
         Args:
@@ -519,7 +543,9 @@ class Neo4jClient(GraphDatabaseClient):
         """
         return await self._execute_query(query, {"repo_id": repo_id}, database)
 
-    async def get_files_for_summary(self, repo_id: str, database: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def get_files_for_summary(
+        self, repo_id: str, database: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
         """获取所有 File 节点及其包含的 Class/Method summaries.
 
         Args:
@@ -564,7 +590,9 @@ class Neo4jClient(GraphDatabaseClient):
         SET n.summary = $summary
         """
         try:
-            await self._execute_query(query, {"node_id": node_id, "summary": summary}, database)
+            await self._execute_query(
+                query, {"node_id": node_id, "summary": summary}, database
+            )
             return True
         except Exception as e:
             logger.warning(f"Failed to update summary for {label} {node_id}: {e}")
@@ -593,8 +621,7 @@ class Neo4jClient(GraphDatabaseClient):
 
         # 转换为字典列表供 UNWIND 使用
         updates_dict = [
-            {"node_id": node_id, "summary": summary}
-            for node_id, summary in updates
+            {"node_id": node_id, "summary": summary} for node_id, summary in updates
         ]
 
         query = f"""
@@ -712,9 +739,7 @@ class Neo4jClient(GraphDatabaseClient):
         RETURN count(n) as total
         """
 
-        result = await self._execute_query(
-            query, {"repo_id": repo_id}, database
-        )
+        result = await self._execute_query(query, {"repo_id": repo_id}, database)
         return result[0]["total"] if result else 0
 
     async def get_nodes_with_summary_paginated(
@@ -807,7 +832,9 @@ class Neo4jClient(GraphDatabaseClient):
         SET n.embeddingId = $embedding_id
         """
         try:
-            await self._execute_query(query, {"id": node_id, "embedding_id": embedding_id}, database)
+            await self._execute_query(
+                query, {"id": node_id, "embedding_id": embedding_id}, database
+            )
             return True
         except Exception as e:
             logger.warning(f"Failed to update embeddingId for {label} {node_id}: {e}")
@@ -923,23 +950,32 @@ class Neo4jClient(GraphDatabaseClient):
             关联节点列表，每项包含 id, name, labels, summary, description 等字段
         """
         if direction == "out":
-            query = """
+            query = (
+                """
             MATCH (n {id: $node_id})-[r:%s]->(m)
             RETURN m.id as id, m.name as name, labels(m) as labels,
                    m.summary as summary, m.description as description
-            """ % rel_type
+            """
+                % rel_type
+            )
         elif direction == "in":
-            query = """
+            query = (
+                """
             MATCH (n {id: $node_id})<-[r:%s]-(m)
             RETURN m.id as id, m.name as name, labels(m) as labels,
                    m.summary as summary, m.description as description
-            """ % rel_type
+            """
+                % rel_type
+            )
         else:
-            query = """
+            query = (
+                """
             MATCH (n {id: $node_id})-[r:%s]-(m)
             RETURN m.id as id, m.name as name, labels(m) as labels,
                    m.summary as summary, m.description as description
-            """ % rel_type
+            """
+                % rel_type
+            )
 
         return await self._execute_query(query, {"node_id": node_id}, database)
 
@@ -983,18 +1019,20 @@ class Neo4jClient(GraphDatabaseClient):
 
         dependencies = []
         for result in results:
-            dependencies.append({
-                "source": {
-                    "id": result["source_id"],
-                    "labels": result["source_labels"],
-                },
-                "target": {
-                    "id": result["target_id"],
-                    "labels": result["target_labels"],
-                },
-                "relationships": result["rel_types"],
-                "distance": result["distance"],
-            })
+            dependencies.append(
+                {
+                    "source": {
+                        "id": result["source_id"],
+                        "labels": result["source_labels"],
+                    },
+                    "target": {
+                        "id": result["target_id"],
+                        "labels": result["target_labels"],
+                    },
+                    "relationships": result["rel_types"],
+                    "distance": result["distance"],
+                }
+            )
 
         return dependencies
 
@@ -1078,9 +1116,7 @@ class Neo4jClient(GraphDatabaseClient):
         RETURN f.id as id, f.path as path, f.name as name,
                f.suffix as suffix, f.summary as summary
         """
-        return await self._execute_query(
-            query, {"repo_id": repo_id}, database
-        )
+        return await self._execute_query(query, {"repo_id": repo_id}, database)
 
     async def get_file_use_dependencies(
         self,
@@ -1101,9 +1137,7 @@ class Neo4jClient(GraphDatabaseClient):
         WHERE f1.repoId = $repo_id AND f2.repoId = $repo_id
         RETURN f1.id as source, f2.id as target, count(*) as weight
         """
-        return await self._execute_query(
-            query, {"repo_id": repo_id}, database
-        )
+        return await self._execute_query(query, {"repo_id": repo_id}, database)
 
     async def get_file_call_dependencies(
         self,
@@ -1128,9 +1162,7 @@ class Neo4jClient(GraphDatabaseClient):
           AND f1 <> f2
         RETURN f1.id as source, f2.id as target, count(*) as weight
         """
-        return await self._execute_query(
-            query, {"repo_id": repo_id}, database
-        )
+        return await self._execute_query(query, {"repo_id": repo_id}, database)
 
     async def get_classes_by_file_path(
         self,
@@ -1152,9 +1184,7 @@ class Neo4jClient(GraphDatabaseClient):
         RETURN c.name as name, c.summary as summary
         ORDER BY c.name
         """
-        return await self._execute_query(
-            query, {"file_path": file_path}, database
-        )
+        return await self._execute_query(query, {"file_path": file_path}, database)
 
     async def get_methods_by_file_path(
         self,
@@ -1283,7 +1313,12 @@ class Neo4jClient(GraphDatabaseClient):
 
         return await self._execute_query(
             query,
-            {"repo_id": repo_id, "name": name, "node_types": node_types, "top_k": top_k},
+            {
+                "repo_id": repo_id,
+                "name": name,
+                "node_types": node_types,
+                "top_k": top_k,
+            },
             database,
         )
 
@@ -1374,6 +1409,118 @@ class Neo4jClient(GraphDatabaseClient):
                 "method_count": results[0].get("method_count", 0),
             }
         return {"directory_count": 0, "class_count": 0, "method_count": 0}
+
+    async def get_lineage_graph_page(
+        self,
+        repo_id: str,
+        page: int,
+        page_size: int,
+        database: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """分页读取追溯中心需要的节点和关系.
+
+        当前页节点的入边和出边都会返回，跨页重复关系由消费方按三元组去重
+        """
+        node_types = [
+            "Repository",
+            "Directory",
+            "File",
+            "Class",
+            "Method",
+            "Module",
+            "Workflow",
+        ]
+        relation_types = ["CONTAIN", "USE", "CALL", "BELONG_TO"]
+        skip = (page - 1) * page_size
+        base_params = {
+            "repo_id": repo_id,
+            "node_types": node_types,
+            "skip": skip,
+            "limit": page_size,
+        }
+        count_query = """
+        MATCH (n)
+        WHERE n.repoId = $repo_id
+          AND ANY(label IN labels(n) WHERE label IN $node_types)
+          AND (NOT n:File OR coalesce(n.fileType, 'code') = 'code')
+        WITH n, [label IN labels(n) WHERE label IN $node_types][0] AS node_type
+        RETURN node_type, count(n) AS count
+        """
+        count_rows = await self._execute_query(count_query, base_params, database)
+        counts = {
+            row.get("node_type"): int(row.get("count") or 0)
+            for row in count_rows
+            if row.get("node_type")
+        }
+        total = sum(counts.values())
+
+        node_query = """
+        MATCH (n)
+        WHERE n.repoId = $repo_id
+          AND ANY(label IN labels(n) WHERE label IN $node_types)
+          AND (NOT n:File OR coalesce(n.fileType, 'code') = 'code')
+        WITH n, [label IN labels(n) WHERE label IN $node_types][0] AS node_type
+        OPTIONAL MATCH (owner:Class)-[:CONTAIN]->(n)
+        WHERE owner.repoId = $repo_id
+        WITH n, node_type, head(collect(owner.name)) AS owner_name
+        RETURN coalesce(n.id, elementId(n)) AS id,
+               n.id AS persistent_id,
+               node_type AS node_type,
+               coalesce(n.name, n.path, n.id) AS name,
+               coalesce(n.filePath, n.path, '') AS file_path,
+               CASE
+                   WHEN node_type = 'Method' AND owner_name IS NOT NULL
+                       THEN owner_name + '.' + coalesce(n.name, '')
+                   ELSE coalesce(n.name, n.path, n.id, elementId(n))
+               END AS qualified_name,
+               n.startLine AS line_start,
+               n.endLine AS line_end,
+               coalesce(n.summary, n.description, '') AS summary,
+               coalesce(n.language, '') AS language,
+               coalesce(n.updatedAt, n.createdAt) AS indexed_at
+        ORDER BY node_type, file_path, line_start, name, id
+        SKIP $skip LIMIT $limit
+        """
+        nodes = await self._execute_query(node_query, base_params, database)
+        node_ids = [node.get("id") for node in nodes if node.get("id")]
+
+        relations: List[Dict[str, Any]] = []
+        if node_ids:
+            relation_query = """
+            MATCH (source)-[relation]->(target)
+            WHERE source.repoId = $repo_id
+              AND target.repoId = $repo_id
+              AND ANY(label IN labels(source) WHERE label IN $node_types)
+              AND ANY(label IN labels(target) WHERE label IN $node_types)
+              AND (NOT source:File OR coalesce(source.fileType, 'code') = 'code')
+              AND (NOT target:File OR coalesce(target.fileType, 'code') = 'code')
+              AND type(relation) IN $relation_types
+              AND (
+                  coalesce(source.id, elementId(source)) IN $node_ids
+                  OR coalesce(target.id, elementId(target)) IN $node_ids
+              )
+            RETURN DISTINCT type(relation) AS type,
+                   coalesce(source.id, elementId(source)) AS source_id,
+                   coalesce(target.id, elementId(target)) AS target_id
+            ORDER BY type, source_id, target_id
+            """
+            relations = await self._execute_query(
+                relation_query,
+                {
+                    "repo_id": repo_id,
+                    "node_types": node_types,
+                    "relation_types": relation_types,
+                    "node_ids": node_ids,
+                },
+                database,
+            )
+
+        return {
+            "total": total,
+            "counts": counts,
+            "nodes": nodes,
+            "relations": relations,
+        }
 
 
 # 全局客户端实例

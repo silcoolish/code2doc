@@ -747,3 +747,24 @@ class GraphDatabaseClient(ABC):
             包含 directory_count, class_count, method_count 的字典
         """
         pass
+
+    @abstractmethod
+    async def get_lineage_graph_page(
+        self,
+        repo_id: str,
+        page: int,
+        page_size: int,
+        database: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """分页读取代码—文档追溯所需的完整代码图.
+
+        Args:
+            repo_id: 仓库ID
+            page: 页码
+            page_size: 每页节点数量
+            database: 目标数据库名称
+
+        Returns:
+            节点、当前页相关关系、总数和类型统计
+        """
+        pass
